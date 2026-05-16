@@ -1,0 +1,21 @@
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+sqlalchemy==2.0.36
+pydantic==2.11.4
+psycopg[binary]==3.2.3
+python-dotenv==1.0.1
+httpx==0.28.1
+python-multipart==0.0.20
+bcrypt==4.2.1
+itsdangerous==2.2.0
+
+# --- Sleuth: Excel export ---
+# openpyxl is pure-Python and lightweight (~3 MB), suitable for the
+# 1-vCPU / 2 GB target box. It powers the "export to excel" replies.
+openpyxl==3.1.5
+
+# --- Sleuth: optional local LLM layer ---
+# Uncomment to enable Layer 3 (local llama.cpp inference). Requires a
+# GGUF model file at models/sleuth.gguf. See models/README.md for
+# recommended models and the privacy/RAM tradeoffs.
+# llama-cpp-python==0.3.2

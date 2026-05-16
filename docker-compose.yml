@@ -1,0 +1,111 @@
+# Bug Hunter — fully isolated stack.
+#
+# Designed for a host that already runs other services (including a
+# Postgres on the default port 5432). Everything here lives on its own
+# bridge network and uses a named volume that is unlikely to clash:
+#
+#   • App is exposed on host port 8765 (container 8000)
+#   • Postgres is exposed on host port 55432 (container 5432)
+#   • Network:  bugtracker_net
+#   • Volume:   bugtracker_pgdata
+#
+# Nothing here uses the host's Postgres — the app talks to the
+# `db` service over the internal Docker network only.
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: bugtracker_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-bugtracker}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bugtracker_pw}
+      POSTGRES_DB: ${POSTGRES_DB:-bugtracker}
+    volumes:
+      - bugtracker_pgdata:/var/lib/postgresql/data
+    ports:
+      # Host:Container — host side is non-default to avoid colliding
+      # with any Postgres already running on 5432.
+      - "55432:5432"
+    networks:
+      - bugtracker_net
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U ${POSTGRES_USER:-bugtracker} -d ${POSTGRES_DB:-bugtracker}
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"       # max 50 % of one CPU core
+          memory: 256M
+        reservations:
+          cpus: "0.10"
+          memory: 64M
+
+  app:
+    build: .
+    image: bugtracker_app:3.1.1
+    container_name: bugtracker_app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # The app talks to Postgres via the internal Docker DNS name `db`,
+      # not via the host port mapping above.
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-bugtracker}:${POSTGRES_PASSWORD:-bugtracker_pw}@db:5432/${POSTGRES_DB:-bugtracker}
+      APP_NAME: ${APP_NAME:-Bug Hunter}
+      APP_VERSION: ${APP_VERSION:-4.0.0}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+
+      # Authentication.
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-86400}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      BCRYPT_ROUNDS: ${BCRYPT_ROUNDS:-10}
+
+      # Multi-tenant signup gate.
+      # true  → anyone can hit /signup and create their own organization.
+      # false → only invited users can join (admin must be created out-of-band).
+      ALLOW_PUBLIC_SIGNUP: ${ALLOW_PUBLIC_SIGNUP:-true}
+
+      # Public URL the email links should point to.
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:8765}
+
+      # Email — defaults to "console" so emails get logged to stdout.
+      # Set EMAIL_BACKEND=smtp and the SMTP_* vars when you want real delivery.
+      EMAIL_BACKEND: ${EMAIL_BACKEND:-console}
+      EMAIL_FROM: ${EMAIL_FROM:-bugtracker@localhost}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
+      SMTP_TIMEOUT: ${SMTP_TIMEOUT:-10}
+    ports:
+      - "8765:8000"
+    networks:
+      - bugtracker_net
+    deploy:
+      resources:
+        limits:
+          cpus: "1.00"       # max 1 full CPU core
+          memory: 512M
+        reservations:
+          cpus: "0.10"
+          memory: 128M
+
+networks:
+  bugtracker_net:
+    name: bugtracker_net
+    driver: bridge
+
+volumes:
+  bugtracker_pgdata:
+    name: bugtracker_pgdata
+

@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bug Hunter</title>
+  <link rel="icon" type="image/png" href="/static/favicon.png?v=__ASSET_VERSION__" />
+  <link rel="stylesheet" href="/static/styles.css?v=__ASSET_VERSION__" />
+  <link rel="stylesheet" href="/static/chatbot.css?v=__ASSET_VERSION__" />
+</head>
+<body>
+  <div id="sidebarBackdrop" class="sidebar-backdrop" hidden></div>
+
+  <div class="app">
+    <!-- ============================== SIDEBAR ============================== -->
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <div class="brand-logo">
+          <img src="/static/icon.png?v=__ASSET_VERSION__" alt="Bug Hunter" />
+        </div>
+        <div class="brand-text">
+          <div class="brand-title">Bug Hunter</div>
+          <div class="brand-version" id="brandVersion">v—</div>
+        </div>
+        <button class="icon-btn sidebar-collapse-btn" id="sidebarCollapseBtn"
+                title="Collapse sidebar" aria-label="Collapse sidebar">«</button>
+      </div>
+
+      <!-- Org banner -->
+      <div class="org-banner" id="orgBanner">
+        <div class="org-banner-name" id="orgBannerName">—</div>
+        <div class="org-banner-meta" id="orgBannerMeta">organization</div>
+      </div>
+
+      <nav class="nav">
+        <button class="nav-btn active" data-view="list"><span class="nav-icon">📋</span><span>Bugs</span></button>
+        <button class="nav-btn" data-view="analytics"><span class="nav-icon">📊</span><span>Analytics</span></button>
+        <button class="nav-btn" data-view="invitations" data-needs-role="manager"><span class="nav-icon">✉️</span><span>Invitations</span></button>
+        <button class="nav-btn" data-view="audit" data-needs-role="manager"><span class="nav-icon">🛡</span><span>Audit Trail</span></button>
+        <button class="nav-btn" data-view="sessions" data-needs-role="admin"><span class="nav-icon">🔐</span><span>Sessions</span></button>
+      </nav>
+
+      <section class="side-section">
+        <div class="side-section-header">
+          <span>Projects</span>
+          <button class="icon-btn" id="newProjectBtn" title="New project" aria-label="New project" data-needs-role="manager">+</button>
+        </div>
+        <ul class="side-list" id="projectList"></ul>
+      </section>
+
+      <section class="side-section" data-needs-role="manager">
+        <div class="side-section-header">
+          <span>Users</span>
+          <button class="icon-btn" id="newUserBtn" title="New user" aria-label="New user">+</button>
+        </div>
+        <ul class="side-list" id="userList"></ul>
+      </section>
+
+      <section class="side-section side-account">
+        <div class="side-section-header"><span>Account</span></div>
+        <div class="account-card">
+          <div class="account-avatar" id="accountAvatar">?</div>
+          <div class="account-info">
+            <div class="account-name" id="accountName">—</div>
+            <div class="account-meta"><span id="accountRole">—</span> · <span id="accountEmail">—</span></div>
+          </div>
+        </div>
+        <div class="account-actions">
+          <button class="link-btn" id="changePasswordBtn">🔑 Change password</button>
+          <button class="link-btn" id="logoutBtn">🚪 Log out</button>
+        </div>
+      </section>
+
+      <div class="side-footer">
+        <button class="link-btn" id="exportCsvBtn">⬇ Export CSV</button>
+        <button class="link-btn" id="themeBtn"><svg class="theme-icon" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M 8 2 A 6 6 0 0 0 8 14 Z" fill="#0b1020"/><path d="M 8 2 A 6 6 0 0 1 8 14 Z" fill="#ffffff"/><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1" stroke-opacity="0.55"/><line x1="8" y1="2" x2="8" y2="14" stroke="currentColor" stroke-width="0.6" stroke-opacity="0.4"/></svg> Theme</button>
+      </div>
+    </aside>
+
+    <!-- ============================== MAIN ============================== -->
+    <main class="main">
+      <header class="topbar">
+        <button class="icon-btn menu-btn" id="menuBtn" aria-label="Open menu">☰</button>
+        <h1 class="page-title" id="pageTitle">All Bugs</h1>
+        <div class="search-wrap">
+          <input id="search" type="search" placeholder="Search bugs…" autocomplete="off" />
+        </div>
+        <button class="btn primary" id="newBugBtn">+ New Bug</button>
+      </header>
+
+      <!-- KPI strip: Total | Open | Resolved | Closed | Resolve Later -->
+      <section class="kpi-strip">
+        <div class="kpi"><div class="kpi-num" id="kpiBugs">0</div><div class="kpi-label">Total</div></div>
+        <div class="kpi"><div class="kpi-num kpi-open" id="kpiOpen">0</div><div class="kpi-label">Open</div></div>
+        <div class="kpi"><div class="kpi-num kpi-resolved" id="kpiResolved">0</div><div class="kpi-label">Resolved</div></div>
+        <div class="kpi"><div class="kpi-num kpi-closed" id="kpiClosed">0</div><div class="kpi-label">Closed</div></div>
+        <div class="kpi"><div class="kpi-num kpi-later" id="kpiResolveLater">0</div><div class="kpi-label">Resolve Later</div></div>
+      </section>
+
+      <!-- Filter bar (visible only on list view). Multi-select dropdowns. -->
+      <section class="filter-bar" id="filterBar">
+        <div class="ms-wrap" data-filter="project_id">
+          <button type="button" class="ms-btn" data-ms-toggle aria-haspopup="listbox" aria-expanded="false">
+            <span class="ms-btn-label">All Projects</span><span class="ms-caret">▾</span>
+          </button>
+          <div class="ms-panel" hidden role="listbox" aria-multiselectable="true"></div>
+        </div>
+        <div class="ms-wrap" data-filter="status">
+          <button type="button" class="ms-btn" data-ms-toggle aria-haspopup="listbox" aria-expanded="false">
+            <span class="ms-btn-label">All Statuses</span><span class="ms-caret">▾</span>
+          </button>
+          <div class="ms-panel" hidden role="listbox" aria-multiselectable="true"></div>
+        </div>
+        <div class="ms-wrap" data-filter="priority">
+          <button type="button" class="ms-btn" data-ms-toggle aria-haspopup="listbox" aria-expanded="false">
+            <span class="ms-btn-label">All Priorities</span><span class="ms-caret">▾</span>
+          </button>
+          <div class="ms-panel" hidden role="listbox" aria-multiselectable="true"></div>
+        </div>
+        <div class="ms-wrap" data-filter="environment">
+          <button type="button" class="ms-btn" data-ms-toggle aria-haspopup="listbox" aria-expanded="false">
+            <span class="ms-btn-label">All Envs</span><span class="ms-caret">▾</span>
+          </button>
+          <div class="ms-panel" hidden role="listbox" aria-multiselectable="true"></div>
+        </div>
+        <div class="ms-wrap" data-filter="assignee_id">
+          <button type="button" class="ms-btn" data-ms-toggle aria-haspopup="listbox" aria-expanded="false">
+            <span class="ms-btn-label">All Assignees</span><span class="ms-caret">▾</span>
+          </button>
+          <div class="ms-panel" hidden role="listbox" aria-multiselectable="true"></div>
+        </div>
+        <button class="btn ghost" id="clearFiltersBtn">Clear</button>
+      </section>
+
+      <!-- VIEW: List -->
+      <section class="view" id="viewList">
+        <div class="table-scroll">
+          <table class="bug-table">
+            <thead>
+              <tr>
+                <th class="col-id">#</th>
+                <th class="col-title">Title</th>
+                <th class="col-project">Project</th>
+                <th class="col-status">Status</th>
+                <th class="col-priority">Priority</th>
+                <th class="col-env">Env</th>
+                <th class="col-assignees">Assignees</th>
+                <th class="col-att">📎</th>
+                <th class="col-actions">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="bugTableBody"></tbody>
+          </table>
+        </div>
+        <div id="emptyState" class="empty-state" hidden>
+          <p>No bugs match your filters.</p>
+        </div>
+        <div class="pagination" id="paginationBar"></div>
+      </section>
+
+      <!-- VIEW: Analytics -->
+      <section class="view" id="viewAnalytics" hidden>
+        <div class="charts-grid">
+          <div class="chart-card">
+            <h3>Bugs over the last 14 days</h3>
+            <div id="chartTimeline" class="chart-host"></div>
+          </div>
+          <div class="chart-card">
+            <h3>By Status</h3>
+            <div id="chartStatus" class="chart-host"></div>
+          </div>
+          <div class="chart-card">
+            <h3>By Priority</h3>
+            <div id="chartPriority" class="chart-host"></div>
+          </div>
+          <div class="chart-card">
+            <h3>By Environment</h3>
+            <div id="chartEnvironment" class="chart-host"></div>
+          </div>
+          <div class="chart-card">
+            <h3>By Project</h3>
+            <div id="chartProject" class="chart-host"></div>
+          </div>
+          <div class="chart-card">
+            <h3>Top Assignees</h3>
+            <div id="chartAssignee" class="chart-host"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- VIEW: Audit Trail -->
+      <section class="view" id="viewAudit" hidden>
+        <div class="audit-controls">
+          <select id="auditEntityFilter">
+            <option value="">All entities</option>
+            <option value="bug">Bugs</option>
+            <option value="user">Users</option>
+            <option value="project">Projects</option>
+            <option value="attachment">Attachments</option>
+            <option value="session">Sessions</option>
+            <option value="auth">Auth events</option>
+          </select>
+          <select id="auditActorFilter">
+            <option value="">All actors</option>
+          </select>
+          <input id="auditSearch" type="search" placeholder="Search audit log…" />
+          <button class="btn ghost" id="auditRefreshBtn">Refresh</button>
+        </div>
+        <div class="audit-list" id="auditList"></div>
+      </section>
+
+      <!-- VIEW: Sessions (admin-only) -->
+      <section class="view" id="viewSessions" hidden>
+        <div class="sessions-controls">
+          <p class="sessions-help">
+            Active sessions across the system. Click <strong>Revoke</strong>
+            to log a specific device out without affecting any other session
+            for that user. Your own current session can't be revoked from
+            here — use the Log out button in the sidebar instead.
+          </p>
+          <button class="btn ghost" id="sessionsRefreshBtn">Refresh</button>
+        </div>
+        <div class="sessions-list" id="sessionsList"></div>
+      </section>
+
+      <!-- VIEW: Invitations (admin/manager) -->
+      <section class="view" id="viewInvitations" hidden>
+        <div class="invitations-controls">
+          <p class="sessions-help">
+            Send a link to invite a teammate to your organization. They'll set
+            their own password when they accept. Pending invites expire after 7 days.
+          </p>
+          <button class="btn primary" id="newInviteBtn">+ Invite a teammate</button>
+          <button class="btn ghost" id="invitationsRefreshBtn">Refresh</button>
+        </div>
+        <div class="invitations-list" id="invitationsList"></div>
+      </section>
+    </main>
+  </div>
+
+  <!-- ============================== MODALS ============================== -->
+  <!--
+    Unified bug modal. The same modal handles three modes:
+
+      • Create — empty form, no comments / attachments / activity sections
+        (those need a saved bug to attach to). Header: "New Bug".
+      • View   — pre-filled form with all fields editable inline. Header:
+        "Bug #N · <title>". Comments, attachments and activity rendered
+        below in the same modal (Jira-style — no tabs, no separate "Edit"
+        modal, no pencil button to chase).
+      • Edit   — same as View. Saving submits the whole form.
+
+    Layout:
+      ┌── Title (full-width input) ─────────────────────────────────┐
+      ┌── Main column ────────────┬── Side column ──────────────────┐
+      │ Description               │ Project | Status | Priority |   │
+      │ Comments                  │ Environment | Reporter |        │
+      │ Attachments               │ Assignees | Due date | Dates    │
+      └───────────────────────────┴─────────────────────────────────┘
+
+    On screens narrower than 900 px the two columns collapse to one
+    (CSS handles it).
+  -->
+  <div class="modal" id="modalBug" hidden>
+    <div class="modal-card xxl">
+      <div class="modal-head">
+        <div class="bug-modal-head-left">
+          <h2 id="modalBugTitle">New Bug</h2>
+          <span class="bug-modal-subtitle muted small" id="modalBugSubtitle"></span>
+        </div>
+        <div class="bug-modal-head-actions">
+          <button class="btn danger" id="bugDeleteBtn" hidden>🗑 Delete</button>
+          <button class="icon-btn modal-close" data-close-modal aria-label="Close">✕</button>
+        </div>
+      </div>
+      <form id="formBug" class="modal-body bug-modal-body" novalidate>
+        <input type="hidden" name="id" />
+
+        <!-- Title — full width at the top, like Jira's headline -->
+        <label class="field f-grow bug-title-field">
+          <span>Title <em>*</em></span>
+          <input name="title" required minlength="3" maxlength="200" placeholder="Short summary of the bug…" />
+        </label>
+
+        <div class="bug-modal-grid">
+          <!-- Main column: description + comments + attachments + activity -->
+          <div class="bug-modal-main">
+            <label class="field">
+              <span>Description</span>
+              <textarea name="description" rows="6" maxlength="10000"
+                placeholder="What's happening, expected vs actual, repro steps…"></textarea>
+            </label>
+
+            <!-- Comments + attachments + activity only render when editing
+                 an existing bug. The submit handler removes all three from
+                 the DOM in create mode (no bug_id yet to attach to).
+
+                 IMPORTANT: this block uses <div>s, NOT a nested <form>.
+                 HTML5 forbids nested <form> elements — when a browser
+                 parses one, it implicitly closes the outer <form>, which
+                 detached the bug modal's "Create" submit button from its
+                 form and silently broke create-bug. We handle the
+                 "Post comment" submit programmatically (button click +
+                 Ctrl/Cmd-Enter in textarea). -->
+            <section class="bug-section" id="bugCommentsSection" hidden>
+              <h3>Comments <span class="muted small" id="commentsCount"></span></h3>
+              <div id="bugCommentsList" class="bug-comments-list"></div>
+              <div class="comment-form" id="commentForm">
+                <textarea id="commentBody" placeholder="Add a comment… (Ctrl/Cmd+Enter to post)"></textarea>
+                <div class="comment-form-row">
+                  <label class="comment-attach-btn" title="Attach files">
+                    📎 <span id="fileLabel">Attach files</span>
+                    <input type="file" multiple id="commentFiles" />
+                  </label>
+                  <div class="attach-staged-list" id="filePreview"></div>
+                  <button type="button" class="btn primary" id="commentPostBtn" style="margin-left:auto">Post comment</button>
+                </div>
+              </div>
+            </section>
+
+            <!-- Bug-level attachments section. Only renders when LEGACY
+                 bug-level attachments exist (uploaded before the v3.2 UI
+                 simplification, when there was a separate dropzone here).
+                 New attachments go through the comment composer. -->
+            <section class="bug-section" id="bugAttachmentsSection" hidden>
+              <h3>Attachments <span class="muted small" id="attachmentsCount"></span></h3>
+              <div class="attachment-grid" id="bugAttachmentsGrid"></div>
+            </section>
+
+            <section class="bug-section bug-activity-section" id="bugActivitySection" hidden>
+              <details>
+                <summary>Activity history <span class="muted small" id="activityCount"></span></summary>
+                <div id="bugActivityList" class="bug-activity-list"></div>
+              </details>
+            </section>
+          </div>
+
+          <!-- Side column: metadata — status / priority / env / project / reporter / assignees / due date -->
+          <aside class="bug-modal-side">
+            <label class="field">
+              <span>Project <em>*</em></span>
+              <select name="project_id" required></select>
+            </label>
+            <label class="field">
+              <span>Status</span>
+              <select name="status"></select>
+            </label>
+            <label class="field">
+              <span>Priority</span>
+              <select name="priority"></select>
+            </label>
+            <label class="field">
+              <span>Environment</span>
+              <select name="environment">
+                <option value="DEV">DEV</option>
+                <option value="UAT">UAT</option>
+                <option value="PROD">PROD</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Reporter</span>
+              <!-- Reporter is fixed to whoever is logged in. We disable
+                   the <select> so the user can't pick anyone else; the
+                   submit handler reads the value from STATE.currentUser.id
+                   so the disabled state doesn't affect the request. -->
+              <select name="reporter_id" disabled class="reporter-select"></select>
+            </label>
+            <label class="field">
+              <span>Assignees</span>
+              <div class="chip-picker" id="assigneePicker"></div>
+            </label>
+            <label class="field">
+              <span>Due date</span>
+              <input name="due_date" type="date" />
+            </label>
+
+            <!-- Read-only timestamps shown only when editing an existing bug. -->
+            <div class="bug-side-meta" id="bugSideMeta" hidden>
+              <div class="bug-side-meta-row">
+                <span class="k">Created</span>
+                <span class="v" id="bugMetaCreated">—</span>
+              </div>
+              <div class="bug-side-meta-row">
+                <span class="k">Updated</span>
+                <span class="v" id="bugMetaUpdated">—</span>
+              </div>
+            </div>
+          </aside>
+        </div>
+
+        <div class="modal-foot">
+          <button type="button" class="btn ghost" data-close-modal>Cancel</button>
+          <button type="submit" class="btn primary" id="bugSubmitBtn">Create</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Project create/edit -->
+  <div class="modal" id="modalProject" hidden>
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2 id="modalProjectTitle">New Project</h2>
+        <button class="icon-btn modal-close" data-close-modal aria-label="Close">✕</button>
+      </div>
+      <form id="formProject" class="modal-body" novalidate>
+        <input type="hidden" name="id" />
+        <label class="field">
+          <span>Name <em>*</em></span>
+          <input name="name" required minlength="2" maxlength="120" />
+        </label>
+        <label class="field">
+          <span>Key</span>
+          <input name="key" maxlength="10" placeholder="auto" pattern="[A-Z][A-Z0-9]*"
+                 style="text-transform: uppercase;" />
+          <small class="hint">Short uppercase code shown on bugs (e.g. WEB-42). Leave blank to auto-derive.</small>
+        </label>
+        <label class="field">
+          <span>Color</span>
+          <input name="color" type="color" value="#c9764f" />
+        </label>
+        <label class="field">
+          <span>Description</span>
+          <textarea name="description" rows="2" maxlength="1000"></textarea>
+        </label>
+        <div class="modal-foot">
+          <button type="button" class="btn ghost" data-close-modal>Cancel</button>
+          <button type="submit" class="btn primary">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- User create/edit -->
+  <div class="modal" id="modalUser" hidden>
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2 id="modalUserTitle">New User</h2>
+        <button class="icon-btn modal-close" data-close-modal aria-label="Close">✕</button>
+      </div>
+      <form id="formUser" class="modal-body" novalidate>
+        <input type="hidden" name="id" />
+        <label class="field">
+          <span>Name <em>*</em></span>
+          <input name="name" required minlength="2" maxlength="120" />
+        </label>
+        <label class="field">
+          <span>Email <em>*</em></span>
+          <input name="email" type="email" required maxlength="254" />
+        </label>
+        <label class="field">
+          <span>Role <em>*</em></span>
+          <select name="role">
+            <option value="member">Member — work on assigned projects</option>
+            <option value="manager">Manager — create projects, send invites</option>
+            <option value="admin">Admin — full access (users, billing, settings)</option>
+          </select>
+        </label>
+        <label class="field" id="userPasswordField">
+          <span>Password <em class="js-required">*</em></span>
+          <input name="password" type="password" minlength="8" maxlength="200"
+                 placeholder="Min 8 characters" autocomplete="new-password" />
+          <small class="hint" id="userPasswordHint">At least 8 characters.</small>
+        </label>
+        <label class="field check-row">
+          <input type="checkbox" name="is_active" checked />
+          <span>Active (can log in)</span>
+        </label>
+        <div class="modal-foot">
+          <button type="button" class="btn ghost" data-close-modal>Cancel</button>
+          <button type="submit" class="btn primary">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Change password modal -->
+  <div class="modal" id="modalChangePassword" hidden>
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2>Change password</h2>
+        <button class="icon-btn modal-close" data-close-modal aria-label="Close">✕</button>
+      </div>
+      <form id="formChangePassword" class="modal-body" novalidate>
+        <label class="field">
+          <span>Current password <em>*</em></span>
+          <input name="current_password" type="password" required autocomplete="current-password" />
+        </label>
+        <label class="field">
+          <span>New password <em>*</em></span>
+          <input name="new_password" type="password" required minlength="8" maxlength="200" autocomplete="new-password" />
+          <small class="hint">At least 8 characters.</small>
+        </label>
+        <label class="field">
+          <span>Confirm new password <em>*</em></span>
+          <input name="confirm_password" type="password" required minlength="8" maxlength="200" autocomplete="new-password" />
+        </label>
+        <div class="modal-foot">
+          <button type="button" class="btn ghost" data-close-modal>Cancel</button>
+          <button type="submit" class="btn primary">Update password</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Confirm dialog -->
+  <div class="modal" id="modalConfirm" hidden>
+    <div class="modal-card sm">
+      <div class="modal-head">
+        <h2 id="confirmTitle">Confirm</h2>
+        <button class="icon-btn modal-close" id="confirmClose" aria-label="Close">✕</button>
+      </div>
+      <div class="modal-body">
+        <p id="confirmMessage"></p>
+        <div class="modal-foot">
+          <button class="btn ghost" id="confirmCancel">Cancel</button>
+          <button class="btn danger" id="confirmOk">Delete</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Invitation modal -->
+  <div class="modal" id="modalInvite" hidden>
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2>Invite a teammate</h2>
+        <button class="icon-btn modal-close" data-close-modal aria-label="Close">✕</button>
+      </div>
+      <form id="formInvite" class="modal-body" novalidate>
+        <label class="field">
+          <span>Email <em>*</em></span>
+          <input name="email" type="email" required maxlength="254"
+                 placeholder="teammate@yourcompany.com" autocomplete="off" />
+          <small class="hint">They'll get an email with a link to set their password.</small>
+        </label>
+        <label class="field">
+          <span>Role <em>*</em></span>
+          <select name="role">
+            <option value="member">Member — work on assigned projects</option>
+            <option value="manager">Manager — create projects, send invites</option>
+            <option value="admin">Admin — full access</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Add to projects (optional)</span>
+          <div class="invite-projects" id="inviteProjectList">
+            <p class="muted small">Loading projects…</p>
+          </div>
+          <small class="hint">Members and managers only see projects they're added to.</small>
+        </label>
+        <label class="field check-row">
+          <input type="checkbox" name="as_lead" />
+          <span>Make them a <strong>lead</strong> on the selected projects (can manage members)</span>
+        </label>
+        <div class="modal-foot">
+          <button type="button" class="btn ghost" data-close-modal>Cancel</button>
+          <button type="submit" class="btn primary">Send invite</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Project members modal -->
+  <div class="modal" id="modalProjectMembers" hidden>
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2 id="membersTitle">Project members</h2>
+        <button class="icon-btn modal-close" data-close-modal aria-label="Close">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="members-add" id="membersAddRow">
+          <select id="membersAddUser"><option value="">Add member…</option></select>
+          <select id="membersAddRole">
+            <option value="member">as Member</option>
+            <option value="lead">as Lead</option>
+          </select>
+          <button class="btn ghost" id="membersAddBtn">Add</button>
+        </div>
+        <ul class="members-list" id="membersList"></ul>
+        <div class="modal-foot">
+          <button type="button" class="btn ghost" data-close-modal>Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="/static/app.js?v=__ASSET_VERSION__" defer></script>
+  <script src="/static/chatbot.js?v=__ASSET_VERSION__" defer></script>
+</body>
+</html>

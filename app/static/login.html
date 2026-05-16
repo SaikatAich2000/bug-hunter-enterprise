@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bug Hunter — Sign in</title>
+  <link rel="icon" type="image/png" href="/static/favicon.png?v=__ASSET_VERSION__" />
+  <link rel="stylesheet" href="/static/styles.css?v=__ASSET_VERSION__" />
+</head>
+<body class="auth-body">
+  <main class="auth-shell">
+    <div class="auth-card">
+      <div class="auth-brand">
+        <div class="auth-logo">
+          <img src="/static/icon.png?v=__ASSET_VERSION__" alt="Bug Hunter" />
+        </div>
+        <h1>Bug Hunter</h1>
+        <p class="auth-tagline">Sign in to continue</p>
+      </div>
+
+      <!-- Login form -->
+      <form id="loginForm" class="auth-form" novalidate>
+        <div id="loginAlert" class="auth-alert" hidden></div>
+        <label class="field">
+          <span>Email</span>
+          <input name="email" type="email" required autocomplete="username" autofocus />
+        </label>
+        <label class="field">
+          <span>Password</span>
+          <input name="password" type="password" required autocomplete="current-password" />
+        </label>
+        <button type="submit" class="btn primary auth-submit" id="loginSubmit">Sign in</button>
+        <div class="auth-links">
+          <a href="#" id="showForgot">Forgot your password?</a>
+          <button type="button" class="link-btn" id="loginThemeBtn"><svg class="theme-icon" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M 8 2 A 6 6 0 0 0 8 14 Z" fill="#0b1020"/><path d="M 8 2 A 6 6 0 0 1 8 14 Z" fill="#ffffff"/><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1" stroke-opacity="0.55"/><line x1="8" y1="2" x2="8" y2="14" stroke="currentColor" stroke-width="0.6" stroke-opacity="0.4"/></svg> Theme</button>
+        </div>
+        <div class="auth-footer">
+          New here? <a href="/signup.html">Create an organization</a>
+        </div>
+      </form>
+
+      <!-- Forgot password form (toggled) -->
+      <form id="forgotForm" class="auth-form" novalidate hidden>
+        <div id="forgotAlert" class="auth-alert" hidden></div>
+        <p class="auth-help">Enter your email and we'll send a reset link if an account exists.</p>
+        <label class="field">
+          <span>Email</span>
+          <input name="email" type="email" required autocomplete="username" />
+        </label>
+        <button type="submit" class="btn primary auth-submit">Send reset link</button>
+        <div class="auth-links">
+          <a href="#" id="backToLogin">← Back to sign in</a>
+        </div>
+      </form>
+    </div>
+  </main>
+
+  <script src="/static/login.js?v=__ASSET_VERSION__" defer></script>
+</body>
+</html>

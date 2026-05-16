@@ -1,0 +1,57 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# --- Virtualenvs ---
+.venv/
+venv/
+env/
+
+# --- Test / coverage artefacts ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# --- Local secrets ---
+# IMPORTANT: never commit a real .env. Use .env.example as the template.
+.env
+.env.local
+.env.*.local
+
+# --- Local databases (SQLite fallback for dev) ---
+*.db
+*.sqlite
+*.sqlite3
+bug_hunter.db
+
+# --- Sleuth (AI assistant) ---
+# Local LLM model files are large (300+ MB) and are downloaded
+# per-deployment via models/README.md. They should never be
+# committed to git.
+models/*.gguf
+models/*.bin
+models/*.safetensors
+
+# --- Editors / IDEs ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*.iml
+
+# --- OS noise ---
+.DS_Store
+Thumbs.db
+
+# --- Node (in case anyone runs frontend tooling) ---
+node_modules/
+npm-debug.log*

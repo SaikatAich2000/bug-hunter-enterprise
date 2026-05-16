@@ -1,0 +1,78 @@
+<!-- Sleuth icon — a magnifying glass with a ladybug inside the round lens.
+     Designed to read well at sizes from 24px (avatar) to 56px (FAB).
+     Uses a viewBox of 0 0 100 100 so it can be scaled by any container.
+     Theme-friendly: the glass uses currentColor for stroke, lens has a
+     subtle gradient that works on both dark and light backgrounds. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" aria-hidden="true">
+  <defs>
+    <radialGradient id="sl-lens" cx="42%" cy="38%" r="60%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.95"/>
+      <stop offset="55%" stop-color="#e8f1ff" stop-opacity="0.85"/>
+      <stop offset="100%" stop-color="#b8c8e0" stop-opacity="0.85"/>
+    </radialGradient>
+    <linearGradient id="sl-rim" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fbbf24"/>
+      <stop offset="50%" stop-color="#d97706"/>
+      <stop offset="100%" stop-color="#92400e"/>
+    </linearGradient>
+    <linearGradient id="sl-handle" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#92400e"/>
+      <stop offset="100%" stop-color="#451a03"/>
+    </linearGradient>
+    <radialGradient id="sl-body" cx="40%" cy="35%" r="65%">
+      <stop offset="0%" stop-color="#ff6b6b"/>
+      <stop offset="60%" stop-color="#dc2626"/>
+      <stop offset="100%" stop-color="#7f1d1d"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Handle: dark wood, angled at 45° from bottom-right of lens -->
+  <rect x="68" y="68" width="32" height="11"
+        rx="5" ry="5"
+        fill="url(#sl-handle)"
+        stroke="#1c0a02" stroke-width="1.4"
+        transform="rotate(45 73.5 73.5)"/>
+
+  <!-- Lens background (the "glass") -->
+  <circle cx="42" cy="42" r="30" fill="url(#sl-lens)"/>
+
+  <!-- ====== Ladybug, sitting inside the lens ====== -->
+  <g transform="translate(42 45)">
+    <!-- Small shadow under the bug -->
+    <ellipse cx="0" cy="14" rx="14" ry="2.2" fill="#000" opacity="0.18"/>
+    <!-- Body shell -->
+    <ellipse cx="0" cy="0" rx="16" ry="13" fill="url(#sl-body)"
+             stroke="#3a0a08" stroke-width="1.2"/>
+    <!-- Center line down the back -->
+    <line x1="0" y1="-12" x2="0" y2="12" stroke="#1c0303" stroke-width="1.2"/>
+    <!-- Spots: 4 on the wings -->
+    <circle cx="-7" cy="-4" r="2.5" fill="#1c0303"/>
+    <circle cx="7" cy="-4" r="2.5" fill="#1c0303"/>
+    <circle cx="-8" cy="5" r="2.3" fill="#1c0303"/>
+    <circle cx="8" cy="5" r="2.3" fill="#1c0303"/>
+    <!-- Head -->
+    <ellipse cx="0" cy="-12" rx="7" ry="5" fill="#1c0303"/>
+    <!-- Tiny eyes (white dots) -->
+    <circle cx="-2.4" cy="-12.4" r="1" fill="#fff"/>
+    <circle cx="2.4" cy="-12.4" r="1" fill="#fff"/>
+    <!-- Antennae -->
+    <path d="M -3 -16 Q -5 -19 -7 -19" stroke="#1c0303" stroke-width="1" fill="none" stroke-linecap="round"/>
+    <path d="M 3 -16 Q 5 -19 7 -19" stroke="#1c0303" stroke-width="1" fill="none" stroke-linecap="round"/>
+    <circle cx="-7" cy="-19" r="1.1" fill="#1c0303"/>
+    <circle cx="7" cy="-19" r="1.1" fill="#1c0303"/>
+  </g>
+
+  <!-- Glass highlight (drawn AFTER ladybug so it sits on top, like real glass) -->
+  <ellipse cx="30" cy="28" rx="9" ry="5" fill="#ffffff" opacity="0.45"
+           transform="rotate(-30 30 28)"/>
+
+  <!-- Lens rim — drawn last so its edge sits cleanly above everything -->
+  <circle cx="42" cy="42" r="30"
+          fill="none"
+          stroke="url(#sl-rim)" stroke-width="6"/>
+  <!-- Outer thin dark stroke gives a polished metal feel -->
+  <circle cx="42" cy="42" r="33.2"
+          fill="none" stroke="#451a03" stroke-width="1.2" opacity="0.6"/>
+  <circle cx="42" cy="42" r="27.2"
+          fill="none" stroke="#451a03" stroke-width="0.8" opacity="0.4"/>
+</svg>

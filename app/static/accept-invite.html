@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bug Hunter — Accept invitation</title>
+  <link rel="icon" type="image/png" href="/static/favicon.png?v=__ASSET_VERSION__" />
+  <link rel="stylesheet" href="/static/styles.css?v=__ASSET_VERSION__" />
+</head>
+<body class="auth-body">
+  <main class="auth-shell">
+    <div class="auth-card auth-card-wide">
+      <div class="auth-brand">
+        <div class="auth-logo">
+          <img src="/static/icon.png?v=__ASSET_VERSION__" alt="Bug Hunter" />
+        </div>
+        <h1>Accept invitation</h1>
+      </div>
+
+      <!-- Loading state while we fetch the invite preview -->
+      <div id="loadingState" class="auth-loading">
+        <div class="spinner" aria-hidden="true"></div>
+        <p>Checking your invitation…</p>
+      </div>
+
+      <!-- Error state -->
+      <div id="errorState" class="auth-form" hidden>
+        <div id="errorAlert" class="auth-alert error"></div>
+        <div class="auth-footer">
+          <a href="/login.html">Go to sign in</a>
+        </div>
+      </div>
+
+      <!-- Accept form (shown once we have a valid preview) -->
+      <form id="acceptForm" class="auth-form" novalidate hidden>
+        <div id="acceptAlert" class="auth-alert" hidden></div>
+
+        <div class="invite-preview">
+          <p class="auth-help">
+            You've been invited to join
+            <strong id="orgNameLabel">…</strong>
+            <span id="inviterPart"></span>
+            as <strong id="roleLabel">…</strong>.
+          </p>
+          <p class="auth-fineprint">
+            Signing in as <code id="emailLabel">…</code>
+          </p>
+        </div>
+
+        <label class="field">
+          <span>Your name</span>
+          <input name="name" type="text" required maxlength="120"
+                 autocomplete="name" placeholder="Jane Doe" autofocus />
+        </label>
+
+        <label class="field">
+          <span>Choose a password</span>
+          <input name="password" type="password" required minlength="8" maxlength="200"
+                 autocomplete="new-password" />
+          <small class="field-help">
+            At least 8 characters, with letters and numbers.
+          </small>
+        </label>
+
+        <button type="submit" class="btn primary auth-submit" id="acceptSubmit">
+          Accept &amp; sign in
+        </button>
+
+        <div class="auth-footer">
+          Wrong account? <a href="/login.html">Sign in instead</a>
+        </div>
+      </form>
+    </div>
+  </main>
+
+  <script src="/static/accept-invite.js?v=__ASSET_VERSION__" defer></script>
+</body>
+</html>

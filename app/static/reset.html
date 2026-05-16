@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bug Hunter — Reset password</title>
+  <link rel="icon" type="image/png" href="/static/favicon.png?v=__ASSET_VERSION__" />
+  <link rel="stylesheet" href="/static/styles.css?v=__ASSET_VERSION__" />
+</head>
+<body class="auth-body">
+  <main class="auth-shell">
+    <div class="auth-card">
+      <div class="auth-brand">
+        <h1>Reset your password</h1>
+        <p class="auth-tagline">Pick a new password to finish the reset.</p>
+      </div>
+
+      <form id="resetForm" class="auth-form" novalidate>
+        <div id="resetAlert" class="auth-alert" hidden></div>
+        <label class="field">
+          <span>New password</span>
+          <input name="new_password" type="password" required minlength="8" maxlength="200"
+                 autocomplete="new-password" autofocus />
+          <small class="hint">At least 8 characters.</small>
+        </label>
+        <label class="field">
+          <span>Confirm new password</span>
+          <input name="confirm_password" type="password" required minlength="8" maxlength="200"
+                 autocomplete="new-password" />
+        </label>
+        <button type="submit" class="btn primary auth-submit" id="resetSubmit">Set new password</button>
+        <div class="auth-links">
+          <a href="/login.html">← Back to sign in</a>
+        </div>
+      </form>
+    </div>
+  </main>
+
+  <script src="/static/reset.js?v=__ASSET_VERSION__" defer></script>
+</body>
+</html>
