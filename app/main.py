@@ -167,6 +167,8 @@ _RATE_RULES: dict[str, tuple[int, int]] = {
     "/api/auth/login": (8, 60),
     "/api/auth/signup": (5, 600),               # 5 signups / 10 min per IP
     "/api/auth/forgot-password": (3, 60),
+    "/api/auth/email-change/request": (10, 600), # 10 / 10 min per IP
+    "/api/auth/email-change/confirm": (20, 60),
     "/api/invitations/accept": (10, 600),
 }
 _rate_buckets: dict[tuple[str, str], deque] = {}

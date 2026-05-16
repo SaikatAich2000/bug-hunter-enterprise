@@ -367,6 +367,47 @@ class ResetPasswordIn(BaseModel):
         return _check_password_strength(v)
 
 
+# ----- Profile (self-service) -----
+
+class ProfileUpdateIn(BaseModel):
+    """Self-edit your own name. Email and role aren't editable here —
+    email goes through the two-step EmailChange flow (so a hijacked
+    session can't quietly swap recovery contact); role is set by an
+    admin via the user-admin endpoints."""
+    name: str = Field(min_length=2, max_length=120)
+
+    @field_validator("name")
+    @classmethod
+    def _strip(cls, v: str) -> str:
+        return v.strip()
+
+
+class EmailChangeRequestIn(BaseModel):
+    """Step 1 of the email change: prove ownership of the account (with
+    current password) and nominate a new address. We'll email a code to
+    the new address; it must be entered via EmailChangeConfirmIn to finish."""
+    new_email: str
+    current_password: str = Field(min_length=1, max_length=200)
+
+    @field_validator("new_email")
+    @classmethod
+    def _email(cls, v: str) -> str:
+        return _validate_email(v)
+
+
+class EmailChangeConfirmIn(BaseModel):
+    """Step 2: enter the 6-digit code that was emailed to the new address."""
+    code: str = Field(min_length=6, max_length=6)
+
+    @field_validator("code")
+    @classmethod
+    def _digits(cls, v: str) -> str:
+        v = v.strip()
+        if not v.isdigit() or len(v) != 6:
+            raise ValueError("Code must be exactly 6 digits.")
+        return v
+
+
 class MeOut(BaseModel):
     """Returned to the frontend after login or on refresh. Now includes
     org info so the SPA knows which tenant the user is in without

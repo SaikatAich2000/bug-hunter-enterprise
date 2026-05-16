@@ -1006,6 +1006,11 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
   padding: 16px;
   animation: modal-fade 0.18s ease;
 }
+/* Confirm dialog stacks above the other modals — it's frequently
+   invoked FROM inside another modal (e.g. removing a project member
+   from the Members modal) and was otherwise rendered underneath and
+   unclickable. */
+#modalConfirm { z-index: 200; }
 @keyframes modal-fade { from { opacity: 0; } to { opacity: 1; } }
 .modal[hidden] { display: none; }
 .modal-card {
@@ -2081,19 +2086,33 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
 .upload-sub { font-size: 12px; color: var(--text-muted); }
 
 /* ============================================================================
-   v4 multi-tenant additions
+   v4 multi-tenant — themed and responsive
    ========================================================================== */
 
-/* ---- Org banner above the sidebar nav ---- */
+/* ---- Sidebar org banner ----
+   Sits between the brand row and the nav. Looks like a compact "you're
+   currently in X" card so users always know which tenant they're acting on. */
 .org-banner {
-  margin: 4px 12px 8px;
+  margin: 0 0 8px;
   padding: 10px 12px;
-  background: var(--surface-2, rgba(255,255,255,0.04));
-  border: 1px solid var(--border, rgba(255,255,255,0.08));
-  border-radius: 8px;
+  background: linear-gradient(135deg,
+    rgba(var(--accent-rgb, 99, 102, 241), 0.08),
+    rgba(var(--accent-rgb, 99, 102, 241), 0.02));
+  border: 1px solid var(--border);
+  border-radius: 10px;
   display: flex;
   flex-direction: column;
   gap: 2px;
+  position: relative;
+  overflow: hidden;
+}
+.org-banner::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, var(--accent) 0%, transparent 6%);
+  opacity: 0.15;
+  pointer-events: none;
 }
 .org-banner-name {
   font-weight: 600;
@@ -2102,30 +2121,43 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
   text-overflow: ellipsis;
   overflow: hidden;
   white-space: nowrap;
+  letter-spacing: 0.01em;
 }
 .org-banner-meta {
   font-size: 11px;
   color: var(--text-muted);
   text-transform: lowercase;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.03em;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
-/* ---- Project key chip in sidebar ---- */
+/* Hide the banner entirely when the sidebar is collapsed — there's no
+   useful narrow representation, and showing it cropped (per the bug
+   report) looks broken. */
+body.sidebar-collapsed .org-banner { display: none; }
+
+/* ---- Project key chip ----
+   Compact uppercase pill shown next to project names and on bug rows.
+   Mirrors the Jira "PROJ-42" look without imitating colors. */
 .proj-key {
   display: inline-block;
   padding: 1px 6px;
   margin-left: 4px;
   font-size: 10px;
   font-weight: 700;
-  letter-spacing: 0.04em;
-  background: var(--surface-3, rgba(255,255,255,0.06));
+  letter-spacing: 0.05em;
+  background: rgba(255, 255, 255, 0.06);
   color: var(--text-muted);
   border-radius: 4px;
   vertical-align: middle;
+  font-family: var(--mono, "SF Mono", Menlo, monospace);
 }
+[data-theme="light"] .proj-key { background: rgba(0, 0, 0, 0.05); }
 
-/* ---- Auth pages: wider card for signup + invite forms ---- */
-.auth-card-wide { width: 100%; max-width: 460px; }
+/* ---- Auth pages — wider cards for signup / invite ---- */
+.auth-card-wide { max-width: 460px; }
 .field-help, .auth-fineprint {
   display: block;
   font-size: 12px;
@@ -2133,52 +2165,65 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
   margin-top: 4px;
   line-height: 1.4;
 }
+.auth-fineprint { margin: 8px 0 0; }
 .auth-footer {
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border, rgba(255,255,255,0.08));
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
   text-align: center;
   font-size: 13px;
   color: var(--text-muted);
 }
-.auth-footer a { color: var(--accent); text-decoration: none; }
+.auth-footer a {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 500;
+}
 .auth-footer a:hover { text-decoration: underline; }
 
-/* ---- Loading + invite preview ---- */
+/* ---- Loading state ---- */
 .auth-loading {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 12px;
-  padding: 32px 16px;
+  gap: 14px;
+  padding: 36px 16px;
   color: var(--text-muted);
 }
 .spinner {
   width: 32px;
   height: 32px;
-  border: 3px solid var(--border, rgba(255,255,255,0.08));
+  border: 3px solid var(--border);
   border-top-color: var(--accent);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) {
-  .spinner { animation: none; }
-}
+@media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+
+/* ---- Invite preview banner on accept page ---- */
 .invite-preview {
-  padding: 12px 14px;
-  background: var(--surface-2, rgba(255,255,255,0.04));
-  border-radius: 8px;
-  margin-bottom: 12px;
+  padding: 14px 16px;
+  background: rgba(var(--accent-rgb, 99, 102, 241), 0.06);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin-bottom: 16px;
 }
-.invite-preview .auth-help { margin: 0 0 6px 0; }
+.invite-preview .auth-help {
+  margin: 0 0 6px;
+  font-size: 14px;
+  color: var(--text);
+  line-height: 1.5;
+}
 .invite-preview code {
-  font-family: var(--mono, monospace);
+  font-family: var(--mono, "SF Mono", Menlo, monospace);
   font-size: 12px;
-  padding: 1px 4px;
-  background: var(--surface-3, rgba(255,255,255,0.06));
-  border-radius: 3px;
+  padding: 2px 6px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 4px;
+  color: var(--text);
 }
+[data-theme="light"] .invite-preview code { background: rgba(0, 0, 0, 0.05); }
 
 /* ---- Invitations admin view ---- */
 .invitations-controls {
@@ -2187,108 +2232,255 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
   gap: 12px;
   align-items: center;
   padding: 16px 20px;
-  border-bottom: 1px solid var(--border, rgba(255,255,255,0.08));
+  border-bottom: 1px solid var(--border);
 }
 .invitations-controls .sessions-help {
   flex: 1 1 320px;
   margin: 0;
   color: var(--text-muted);
   font-size: 13px;
+  line-height: 1.5;
 }
-.invitations-list { padding: 12px 20px; display: flex; flex-direction: column; gap: 8px; }
+.invitations-list {
+  padding: 16px 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
 .invite-status {
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 10px;
+  font-weight: 700;
   text-transform: uppercase;
-  padding: 2px 8px;
+  padding: 3px 9px;
   border-radius: 999px;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
 }
 .invite-status-pending  { background: rgba(94, 159, 255, 0.18); color: #6aa9ff; }
 .invite-status-accepted { background: rgba(86, 196, 130, 0.18); color: #6cc98a; }
 .invite-status-revoked  { background: rgba(255, 138, 138, 0.18); color: #ff9090; }
 .invite-status-expired  { background: rgba(255, 200, 100, 0.18); color: #ffc864; }
 
-/* ---- Invite modal projects picker ---- */
+/* ---- Invite modal: project picker checkboxes ----
+   Themed to look like first-class chips, not raw browser checkboxes. */
 .invite-projects {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  max-height: 200px;
+  gap: 4px;
+  max-height: 220px;
   overflow-y: auto;
-  padding: 8px;
-  border: 1px solid var(--border, rgba(255,255,255,0.08));
-  border-radius: 6px;
-  background: var(--surface-2, rgba(255,255,255,0.03));
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
 }
 .invite-proj-chip {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   font-size: 13px;
-  padding: 4px;
+  padding: 8px 10px;
   cursor: pointer;
-  border-radius: 4px;
+  border-radius: 6px;
+  user-select: none;
+  transition: background 0.12s ease;
+  color: var(--text);
 }
-.invite-proj-chip:hover { background: var(--surface-3, rgba(255,255,255,0.05)); }
-.invite-proj-chip input { margin: 0; }
+.invite-proj-chip:hover { background: rgba(var(--accent-rgb, 99, 102, 241), 0.08); }
+.invite-proj-chip input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+  flex-shrink: 0;
+}
 .invite-proj-chip .swatch {
   width: 12px;
   height: 12px;
   border-radius: 3px;
   flex-shrink: 0;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.1);
+}
+.invite-proj-chip:has(input:checked) {
+  background: rgba(var(--accent-rgb, 99, 102, 241), 0.12);
 }
 
 /* ---- Project members modal ---- */
 .members-add {
   display: flex;
   gap: 8px;
-  margin-bottom: 12px;
+  margin-bottom: 14px;
+  padding: 12px;
+  background: var(--bg);
+  border: 1px dashed var(--border);
+  border-radius: 8px;
   align-items: center;
   flex-wrap: wrap;
 }
-.members-add select { flex: 1 1 180px; min-width: 0; }
+.members-add select { flex: 1 1 200px; min-width: 0; }
 .members-list {
   list-style: none;
   margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  max-height: 60vh;
+  gap: 8px;
+  max-height: 50vh;
   overflow-y: auto;
 }
 .member-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px;
-  background: var(--surface-2, rgba(255,255,255,0.03));
-  border-radius: 6px;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  transition: border-color 0.12s ease;
 }
-.member-main { flex: 1; min-width: 0; }
-.member-main > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.member-role-select { width: 110px; }
+.member-row:hover { border-color: var(--border-strong, var(--border)); }
+.member-main { flex: 1; min-width: 0; overflow: hidden; }
+.member-main > div {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.member-main strong { color: var(--text); }
+.member-role-select {
+  width: 110px;
+  flex-shrink: 0;
+}
+.member-row .btn.danger {
+  flex-shrink: 0;
+  padding: 6px 12px;
+  font-size: 12px;
+}
 
-/* ---- Mobile responsive polish ---- */
+/* ---- Profile modal ---- */
+.profile-section {
+  margin-bottom: 18px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--border);
+}
+.profile-section:last-of-type { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+.profile-section-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin: 0 0 12px;
+}
+.profile-readonly-field {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+.profile-readonly-field .label {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+.profile-readonly-field .value {
+  color: var(--text);
+  font-weight: 500;
+  font-family: var(--mono, "SF Mono", Menlo, monospace);
+}
+
+.email-change-step2 {
+  background: rgba(var(--accent-rgb, 99, 102, 241), 0.06);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  margin-top: 10px;
+}
+.email-change-step2 p {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.5;
+}
+.code-input {
+  font-family: var(--mono, "SF Mono", Menlo, monospace);
+  font-size: 20px;
+  letter-spacing: 0.4em;
+  text-align: center;
+  padding: 10px;
+}
+
+/* ---- Responsive polish ---- */
+@media (max-width: 900px) {
+  /* On the slide-in mobile sidebar, the org banner shouldn't be cramped */
+  .org-banner { margin: 0 0 8px; padding: 10px 12px; }
+}
+
 @media (max-width: 700px) {
-  .org-banner { margin: 4px 8px 6px; padding: 8px 10px; }
-  .invitations-controls { padding: 12px; }
-  .invitations-list { padding: 8px 12px; }
+  .invitations-controls {
+    padding: 12px;
+    gap: 10px;
+  }
+  .invitations-controls .sessions-help { flex-basis: 100%; }
+  .invitations-controls .btn { flex: 1 1 auto; }
+  .invitations-list { padding: 12px; }
   .members-add { flex-direction: column; align-items: stretch; }
   .members-add select, .members-add button { width: 100%; }
-  .member-row { flex-wrap: wrap; }
-  .member-role-select { width: 100%; }
+  .member-row {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .member-row .session-avatar { display: none; }
+  .member-main { flex-basis: 100%; }
+  .member-role-select { flex: 1 1 auto; }
+
+  .invite-status { font-size: 9px; padding: 2px 7px; }
 }
 
 @media (max-width: 500px) {
-  /* Login/signup/accept-invite — let the card breathe on phones */
+  /* Auth pages — let the card fill the phone screen */
   .auth-card, .auth-card-wide {
     width: 100%;
     max-width: 100%;
     border-radius: 0;
     min-height: 100vh;
     box-shadow: none;
+    border: none;
   }
   .auth-shell { padding: 0; }
+  .invite-projects { max-height: 160px; }
 }
+
+/* ---- Sidebar brand row: keep the collapse button visible on narrow widths
+   The original CSS sometimes squeezed the » button off-screen because the
+   brand-text + logo + button competed for space without any min-width
+   constraints. ---- */
+.brand {
+  min-width: 0;
+}
+.brand-text {
+  min-width: 0;
+  overflow: hidden;
+}
+.brand-title, .brand-version {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* CSS variable: accent-rgb. The base theme uses --accent as a hex
+   colour; some gradients above want it as r,g,b. Provide a safe default
+   that works in both themes. Override in your theme block if you've
+   customised --accent. */
+:root { --accent-rgb: 99, 102, 241; }
+[data-theme="light"] { --accent-rgb: 99, 102, 241; }
+
+/* Match --accent-rgb to each theme's --accent so tinted gradients
+   look right in both. */
+:root[data-theme="dark"], :root { --accent-rgb: 129, 140, 248; }   /* #818cf8 */
+:root[data-theme="light"]      { --accent-rgb: 99, 102, 241; }     /* #6366f1 */

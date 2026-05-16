@@ -297,3 +297,29 @@ def notify_invitation(
         "— Bug Hunter",
     ])
     deliver(subject, [email], body)
+
+
+def notify_email_change_code(
+    new_email: str,
+    user_name: str,
+    code: str,
+) -> None:
+    """Send a 6-digit verification code to the NEW email address. Sent
+    only to the new address (never the old) — we want to confirm the
+    user actually controls the inbox they're switching to."""
+    if not new_email:
+        return
+    subject = "[Bug Hunter] Confirm your new email address"
+    body = "\n".join([
+        f"Hi {user_name or 'there'},",
+        "",
+        "Use this 6-digit code to confirm your new Bug Hunter email address:",
+        "",
+        f"    {code}",
+        "",
+        "The code expires in 15 minutes. If you didn't request this, you can",
+        "ignore this email — nothing will change unless the code is entered.",
+        "",
+        "— Bug Hunter",
+    ])
+    deliver(subject, [new_email], body)

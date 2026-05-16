@@ -417,6 +417,10 @@ async function loadProjects() {
 
 async function refreshAll() {
   await Promise.all([refreshBugs(), refreshStats()]);
+  // Any caller that just changed user or project data needs the
+  // assignee / project filter dropdowns re-rendered so the new state
+  // is visible without a reload.
+  refreshMultiSelects();
 }
 
 // ---------------------------------------------------------------------------
@@ -1550,6 +1554,109 @@ function renderSessions() {
   }).join("");
 }
 
+// ---------------------------------------------------------------------------
+// Profile — self-service edits
+//
+// Name change is a simple PUT. Email change is two-step:
+//   1. POST /api/auth/email-change/request {new_email, current_password}
+//   2. POST /api/auth/email-change/confirm {code}
+// The code lands in the user's NEW inbox so we confirm they actually
+// control it. We never reveal the code to the JS — it goes via email.
+// ---------------------------------------------------------------------------
+function openProfileModal() {
+  const u = STATE.currentUser;
+  if (!u) return;
+  $("#formProfileIdentity").elements.name.value = u.name || "";
+  $("#profileRole").textContent = u.role || "—";
+  $("#profileOrg").textContent = u.organization_name || "—";
+  $("#profileEmail").textContent = u.email || "—";
+  $("#formEmailChangeRequest").reset();
+  $("#formEmailChangeConfirm").reset();
+  $("#emailChangeStep2").hidden = true;
+  openModal("modalProfile");
+}
+
+async function submitProfileIdentity(e) {
+  e.preventDefault();
+  const name = e.target.elements.name.value.trim();
+  if (name.length < 2) {
+    toast("Name must be at least 2 characters", "error");
+    return;
+  }
+  try {
+    const updated = await api("/auth/profile", {
+      method: "PUT",
+      body: JSON.stringify({ name }),
+    });
+    // Update everywhere the name is shown — sidebar account card, org
+    // banner, and STATE so subsequent re-renders show the new name.
+    STATE.currentUser = { ...STATE.currentUser, ...updated };
+    renderAccountCard();
+    renderOrgBanner();
+    // Refresh the users list so admin views update too.
+    await loadUsers();
+    toast("Profile updated", "success");
+  } catch (err) {
+    toastError(err);
+  }
+}
+
+async function submitEmailChangeRequest(e) {
+  e.preventDefault();
+  const f = e.target;
+  const new_email = f.elements.new_email.value.trim();
+  const current_password = f.elements.current_password.value;
+  if (!new_email || !new_email.includes("@")) {
+    toast("Please enter a valid new email.", "error");
+    return;
+  }
+  if (!current_password) {
+    toast("Please enter your current password to confirm.", "error");
+    return;
+  }
+  try {
+    await api("/auth/email-change/request", {
+      method: "POST",
+      body: JSON.stringify({ new_email, current_password }),
+    });
+    $("#emailChangeNew").textContent = new_email;
+    $("#emailChangeStep2").hidden = false;
+    $("#formEmailChangeConfirm").elements.code.value = "";
+    setTimeout(() => $("#formEmailChangeConfirm").elements.code.focus(), 50);
+    // Clear the password field so it isn't sitting around in the DOM.
+    f.elements.current_password.value = "";
+    toast("Code sent — check your new email inbox.", "success");
+  } catch (err) {
+    toastError(err);
+  }
+}
+
+async function submitEmailChangeConfirm(e) {
+  e.preventDefault();
+  const code = e.target.elements.code.value.trim();
+  if (!/^\d{6}$/.test(code)) {
+    toast("Enter the 6-digit code from your email.", "error");
+    return;
+  }
+  try {
+    const updated = await api("/auth/email-change/confirm", {
+      method: "POST",
+      body: JSON.stringify({ code }),
+    });
+    STATE.currentUser = { ...STATE.currentUser, ...updated };
+    renderAccountCard();
+    renderOrgBanner();
+    $("#profileEmail").textContent = updated.email;
+    $("#emailChangeStep2").hidden = true;
+    $("#formEmailChangeRequest").reset();
+    // Reload the users list so other admins see the change too.
+    await loadUsers();
+    toast("Email updated", "success");
+  } catch (err) {
+    toastError(err);
+  }
+}
+
 async function handleRevokeSession(sessionId) {
   const sess = (STATE.sessions || []).find(s => s.id === sessionId);
   const who = sess && sess.user_name
@@ -1887,6 +1994,18 @@ function bindGlobalListeners() {
     } catch (err) {
       toastError(err);
     }
+  });
+
+  // -------------------------------------------------------------------------
+  // Profile (self-service) — name edit + two-step email change
+  // -------------------------------------------------------------------------
+  $("#profileBtn")?.addEventListener("click", openProfileModal);
+  $("#formProfileIdentity")?.addEventListener("submit", submitProfileIdentity);
+  $("#formEmailChangeRequest")?.addEventListener("submit", submitEmailChangeRequest);
+  $("#formEmailChangeConfirm")?.addEventListener("submit", submitEmailChangeConfirm);
+  $("#emailChangeCancel")?.addEventListener("click", () => {
+    $("#emailChangeStep2").hidden = true;
+    $("#formEmailChangeRequest").reset();
   });
 
   // Mobile hamburger

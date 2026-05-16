@@ -182,6 +182,37 @@ class PasswordResetToken(Base):
 
 
 # ---------------------------------------------------------------------------
+# EmailChangeRequest
+#
+# When a user wants to change their email we don't update the row directly.
+# Instead we stage the new address here and email a 6-digit code to it. The
+# user enters the code into the profile page to finish the change. This is
+# the "2-step verification" piece — without it, a hijacked session could
+# silently swap the account's recovery email.
+# ---------------------------------------------------------------------------
+class EmailChangeRequest(Base):
+    __tablename__ = "email_change_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    new_email: Mapped[str] = mapped_column(String(254), nullable=False)
+    # Same sha256-hashed-token pattern as elsewhere. The plaintext 6-digit
+    # code lives only in the recipient's inbox.
+    code_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Increments on each failed attempt. After 5 tries we invalidate the
+    # request so brute-forcing the 6-digit code is infeasible.
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    __table_args__ = (Index("idx_ecr_user", "user_id"),)
+
+
+
+# ---------------------------------------------------------------------------
 # Invitation
 #
 # Token-emailed invite from an org admin (or project lead, in which case

@@ -541,3 +541,163 @@ class TestProjectKey:
         c_a.post("/api/projects", json={"name": "Ada", "color": "#000000", "key": "PK"})
         r = c_b.post("/api/projects", json={"name": "Ada", "color": "#000000", "key": "PK"})
         assert r.status_code == 201
+
+
+# ============================================================================
+# 9. Manager cannot create projects (v4.1 policy tightening)
+# ============================================================================
+class TestProjectCreationAdminOnly:
+    def test_manager_cannot_create_project(self, client, make_invite):
+        client.post("/api/auth/signup", json={
+            "organization_name": "Acme", "name": "Ada", "email": "a@x.test", "password": PASS,
+        })
+        tok = make_invite(client, "mgr@x.test", role="manager")
+        from fastapi.testclient import TestClient
+        from app.main import app
+        with TestClient(app) as mgr:
+            mgr.post("/api/invitations/accept", json={
+                "token": tok, "name": "Manager Mike", "password": PASS,
+            })
+            r = mgr.post("/api/projects", json={
+                "name": "New Project", "color": "#000000",
+            })
+            assert r.status_code == 403
+
+    def test_member_cannot_create_project(self, client, make_invite):
+        client.post("/api/auth/signup", json={
+            "organization_name": "Acme", "name": "Ada", "email": "a@x.test", "password": PASS,
+        })
+        tok = make_invite(client, "m@x.test", role="member")
+        from fastapi.testclient import TestClient
+        from app.main import app
+        with TestClient(app) as mem:
+            mem.post("/api/invitations/accept", json={
+                "token": tok, "name": "Mia", "password": PASS,
+            })
+            r = mem.post("/api/projects", json={
+                "name": "Sneaky", "color": "#000000",
+            })
+            assert r.status_code == 403
+
+
+# ============================================================================
+# 10. Profile self-service
+# ============================================================================
+class TestProfile:
+    def test_update_own_name(self, client):
+        client.post("/api/auth/signup", json={
+            "organization_name": "Acme", "name": "Original Name",
+            "email": "a@x.test", "password": PASS,
+        })
+        r = client.put("/api/auth/profile", json={"name": "Updated Name"})
+        assert r.status_code == 200
+        assert r.json()["name"] == "Updated Name"
+        # Make sure /me reflects it too
+        assert client.get("/api/auth/me").json()["name"] == "Updated Name"
+
+    def test_profile_name_too_short_rejected(self, client):
+        client.post("/api/auth/signup", json={
+            "organization_name": "Acme", "name": "Original Name",
+            "email": "a@x.test", "password": PASS,
+        })
+        r = client.put("/api/auth/profile", json={"name": "X"})
+        assert r.status_code == 422
+
+    def test_profile_unauth_returns_401(self, client):
+        r = client.put("/api/auth/profile", json={"name": "Hacker"})
+        assert r.status_code == 401
+
+
+# ============================================================================
+# 11. Email change 2-step verification
+# ============================================================================
+class TestEmailChange:
+    def _setup(self, client):
+        client.post("/api/auth/signup", json={
+            "organization_name": "Acme", "name": "Ada Admin",
+            "email": "ada@old.test", "password": PASS,
+        })
+
+    def _peek_code(self, db_path):
+        """Pull the latest unsealed plaintext code by reading the request
+        + replacing the hash with a known token. The plaintext code is only
+        in the email we never sent; for tests we patch the hash."""
+        from app.auth import hash_token
+        import sqlite3
+        # We replace the request's code_hash with our own and use a known
+        # plaintext. Mirrors the invitation token trick.
+        conn = sqlite3.connect(db_path)
+        row = conn.execute(
+            "SELECT id FROM email_change_requests "
+            "WHERE used_at IS NULL ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            conn.close()
+            return None
+        new_code = "123456"
+        conn.execute(
+            "UPDATE email_change_requests SET code_hash=? WHERE id=?",
+            (hash_token(new_code), row[0]),
+        )
+        conn.commit()
+        conn.close()
+        return new_code
+
+    def test_request_requires_current_password(self, client):
+        self._setup(client)
+        r = client.post("/api/auth/email-change/request", json={
+            "new_email": "ada@new.test", "current_password": "wrong-pass",
+        })
+        assert r.status_code == 400
+
+    def test_request_rejects_same_email(self, client):
+        self._setup(client)
+        r = client.post("/api/auth/email-change/request", json={
+            "new_email": "ada@old.test", "current_password": PASS,
+        })
+        assert r.status_code == 400
+
+    def test_request_rejects_already_used_email(self, two_orgs):
+        c_a, c_b, me_a, me_b = two_orgs
+        r = c_a.post("/api/auth/email-change/request", json={
+            "new_email": "bob@b.test", "current_password": PASS,
+        })
+        assert r.status_code == 409
+
+    def test_full_flow_success(self, client, db_path):
+        self._setup(client)
+        r = client.post("/api/auth/email-change/request", json={
+            "new_email": "ada@new.test", "current_password": PASS,
+        })
+        assert r.status_code == 202
+        code = self._peek_code(db_path)
+        assert code is not None
+        r = client.post("/api/auth/email-change/confirm", json={"code": code})
+        assert r.status_code == 200
+        assert r.json()["email"] == "ada@new.test"
+        # /me reflects it
+        assert client.get("/api/auth/me").json()["email"] == "ada@new.test"
+
+    def test_wrong_code_attempts_counted(self, client, db_path):
+        self._setup(client)
+        client.post("/api/auth/email-change/request", json={
+            "new_email": "ada@new.test", "current_password": PASS,
+        })
+        # Don't know the code → keep guessing.
+        for _ in range(5):
+            r = client.post("/api/auth/email-change/confirm", json={"code": "000000"})
+            assert r.status_code == 400
+        # After 5 failures the request is sealed — even the right code fails.
+        code = self._peek_code(db_path)
+        if code:
+            r = client.post("/api/auth/email-change/confirm", json={"code": code})
+            assert r.status_code == 400
+
+    def test_confirm_without_request_fails(self, client):
+        self._setup(client)
+        r = client.post("/api/auth/email-change/confirm", json={"code": "123456"})
+        assert r.status_code == 400
+
+    def test_confirm_requires_auth(self, client):
+        r = client.post("/api/auth/email-change/confirm", json={"code": "123456"})
+        assert r.status_code == 401

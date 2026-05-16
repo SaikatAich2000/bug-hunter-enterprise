@@ -18,6 +18,7 @@ from app.auth import (
     get_current_user,
     hash_password,
     hash_reset_token,
+    hash_token,
     invalidate_outstanding_reset_tokens,
     new_jti,
     set_session_cookie,
@@ -364,3 +365,188 @@ def reset_password(payload: ResetPasswordIn, db: Session = Depends(get_db)) -> R
     )
     db.commit()
     return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# Profile — self-service
+# ---------------------------------------------------------------------------
+import secrets as _secrets
+from app.email_service import notify_email_change_code as _notify_email_change_code
+from app.models import EmailChangeRequest
+from app.schemas import (
+    EmailChangeConfirmIn,
+    EmailChangeRequestIn,
+    ProfileUpdateIn,
+)
+
+EMAIL_CHANGE_TTL = timedelta(minutes=15)
+EMAIL_CHANGE_MAX_ATTEMPTS = 5
+
+
+@router.put("/profile", response_model=MeOut)
+def update_profile(
+    payload: ProfileUpdateIn,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Update the caller's own name. Email is NOT editable here — it
+    goes through the two-step verification flow below. Role is set by
+    admins via /api/users/{id}."""
+    if payload.name and payload.name != user.name:
+        old = user.name
+        user.name = payload.name
+        _audit(
+            db, user.org_id, user, "profile_updated",
+            f"Display name: '{old}' → '{user.name}'",
+            entity_id=user.id,
+        )
+    db.commit()
+    org = db.get(Organization, user.org_id)
+    if org is None:
+        raise HTTPException(status_code=500, detail="Account misconfigured")
+    return _to_me(user, org)
+
+
+@router.post("/email-change/request", status_code=202)
+def request_email_change(
+    payload: EmailChangeRequestIn,
+    background: BackgroundTasks,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    """Step 1: verify current password, stage the new email, mail a code."""
+    # Re-authenticate with current password — same idea as "sudo mode".
+    # Without this, a session hijack would let an attacker change the
+    # recovery email at leisure.
+    if not verify_password(payload.current_password, user.password_hash):
+        raise HTTPException(status_code=400, detail="Current password is incorrect.")
+
+    new_email = payload.new_email
+    if new_email == user.email:
+        raise HTTPException(status_code=400, detail="That's already your email.")
+
+    # Globally unique check — same constraint as signup. The DB unique
+    # index would also catch this, but we want a friendly error first.
+    other = db.scalar(select(User).where(User.email == new_email))
+    if other is not None:
+        # Don't reveal which account if it's in another org — same
+        # tenant-isolation pattern as the invite endpoint, but here we
+        # do leak enough to let the user reuse a forgotten account.
+        raise HTTPException(
+            status_code=409,
+            detail="That email is already in use. Try signing in with it instead.",
+        )
+
+    # Generate a 6-digit code. Six digits is enough entropy for a
+    # 15-minute window when paired with rate limiting and attempt cap.
+    code = f"{_secrets.randbelow(1_000_000):06d}"
+    code_hash = hash_token(code)
+
+    # Invalidate any outstanding requests for this user — only one
+    # pending email change at a time.
+    now = datetime.now(timezone.utc)
+    db.execute(
+        EmailChangeRequest.__table__.update()
+        .where(
+            EmailChangeRequest.user_id == user.id,
+            EmailChangeRequest.used_at.is_(None),
+        )
+        .values(used_at=now)
+    )
+    req = EmailChangeRequest(
+        user_id=user.id,
+        new_email=new_email,
+        code_hash=code_hash,
+        expires_at=now + EMAIL_CHANGE_TTL,
+    )
+    db.add(req)
+    _audit(
+        db, user.org_id, user, "email_change_requested",
+        f"Requested email change to {new_email}",
+        entity_id=user.id,
+    )
+    db.commit()
+
+    background.add_task(_notify_email_change_code, new_email, user.name, code)
+    return {"message": f"Verification code sent to {new_email}."}
+
+
+@router.post("/email-change/confirm", response_model=MeOut)
+def confirm_email_change(
+    payload: EmailChangeConfirmIn,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Step 2: complete the change by entering the code sent to the
+    new address."""
+    req = db.scalar(
+        select(EmailChangeRequest)
+        .where(
+            EmailChangeRequest.user_id == user.id,
+            EmailChangeRequest.used_at.is_(None),
+        )
+        .order_by(EmailChangeRequest.created_at.desc())
+    )
+    if req is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No pending email change. Request one first.",
+        )
+    now = datetime.now(timezone.utc)
+    expires = req.expires_at
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    if expires < now:
+        req.used_at = now
+        db.commit()
+        raise HTTPException(status_code=400, detail="Code expired. Start the change again.")
+
+    if req.attempts >= EMAIL_CHANGE_MAX_ATTEMPTS:
+        req.used_at = now
+        db.commit()
+        raise HTTPException(
+            status_code=400,
+            detail="Too many wrong codes. Start the change again.",
+        )
+
+    if hash_token(payload.code) != req.code_hash:
+        req.attempts = (req.attempts or 0) + 1
+        db.commit()
+        remaining = EMAIL_CHANGE_MAX_ATTEMPTS - req.attempts
+        if remaining > 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Wrong code. {remaining} attempt(s) left.",
+            )
+        raise HTTPException(
+            status_code=400,
+            detail="Too many wrong codes. Start the change again.",
+        )
+
+    # Double-check email is still unclaimed (race during the 15-min window).
+    other = db.scalar(select(User).where(
+        User.email == req.new_email, User.id != user.id,
+    ))
+    if other is not None:
+        req.used_at = now
+        db.commit()
+        raise HTTPException(
+            status_code=409,
+            detail="That email was claimed by someone else while we waited. Try a different address.",
+        )
+
+    old_email = user.email
+    user.email = req.new_email
+    req.used_at = now
+    _audit(
+        db, user.org_id, user, "email_changed",
+        f"Email: {old_email} → {user.email}",
+        entity_id=user.id,
+    )
+    db.commit()
+    db.refresh(user)
+    org = db.get(Organization, user.org_id)
+    if org is None:
+        raise HTTPException(status_code=500, detail="Account misconfigured")
+    return _to_me(user, org)

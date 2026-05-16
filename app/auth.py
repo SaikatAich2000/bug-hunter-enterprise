@@ -340,8 +340,10 @@ def can_delete_project(db: Session, user: User, project: Project) -> bool:
 
 
 def can_create_project(user: User) -> bool:
-    """Org admins and managers can create projects. Plain members cannot."""
-    return user.role in (ROLE_ADMIN, ROLE_MANAGER)
+    """Project creation is admin-only. Managers can be assigned as
+    project leads (where they manage members and bugs) but they can't
+    spin up new projects on their own."""
+    return user.role == ROLE_ADMIN
 
 
 def can_manage_users(user: User) -> bool:

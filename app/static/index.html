@@ -43,12 +43,12 @@
       <section class="side-section">
         <div class="side-section-header">
           <span>Projects</span>
-          <button class="icon-btn" id="newProjectBtn" title="New project" aria-label="New project" data-needs-role="manager">+</button>
+          <button class="icon-btn" id="newProjectBtn" title="New project" aria-label="New project" data-needs-role="admin">+</button>
         </div>
         <ul class="side-list" id="projectList"></ul>
       </section>
 
-      <section class="side-section" data-needs-role="manager">
+      <section class="side-section" data-needs-role="admin">
         <div class="side-section-header">
           <span>Users</span>
           <button class="icon-btn" id="newUserBtn" title="New user" aria-label="New user">+</button>
@@ -66,6 +66,7 @@
           </div>
         </div>
         <div class="account-actions">
+          <button class="link-btn" id="profileBtn">👤 Profile</button>
           <button class="link-btn" id="changePasswordBtn">🔑 Change password</button>
           <button class="link-btn" id="logoutBtn">🚪 Log out</button>
         </div>
@@ -580,6 +581,91 @@
         <ul class="members-list" id="membersList"></ul>
         <div class="modal-foot">
           <button type="button" class="btn ghost" data-close-modal>Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Profile modal -->
+  <div class="modal" id="modalProfile" hidden>
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2>My profile</h2>
+        <button class="icon-btn modal-close" data-close-modal aria-label="Close">✕</button>
+      </div>
+      <div class="modal-body">
+        <!-- Identity (editable name) -->
+        <div class="profile-section">
+          <h3 class="profile-section-title">Identity</h3>
+          <form id="formProfileIdentity" novalidate>
+            <label class="field">
+              <span>Display name <em>*</em></span>
+              <input name="name" required minlength="2" maxlength="120" autocomplete="name" />
+            </label>
+            <button type="submit" class="btn primary">Save name</button>
+          </form>
+        </div>
+
+        <!-- Account info (read-only) -->
+        <div class="profile-section">
+          <h3 class="profile-section-title">Account</h3>
+          <div class="profile-readonly-field">
+            <span class="label">Role</span>
+            <span class="value" id="profileRole">—</span>
+          </div>
+          <div class="profile-readonly-field">
+            <span class="label">Organization</span>
+            <span class="value" id="profileOrg">—</span>
+          </div>
+          <small class="field-help">
+            To change your role or organization, ask an admin.
+          </small>
+        </div>
+
+        <!-- Email change (2-step) -->
+        <div class="profile-section">
+          <h3 class="profile-section-title">Email address</h3>
+          <div class="profile-readonly-field">
+            <span class="label">Current</span>
+            <span class="value" id="profileEmail">—</span>
+          </div>
+
+          <!-- Step 1: request change -->
+          <form id="formEmailChangeRequest" novalidate>
+            <label class="field">
+              <span>New email</span>
+              <input name="new_email" type="email" maxlength="254" autocomplete="email" />
+            </label>
+            <label class="field">
+              <span>Confirm current password <em>*</em></span>
+              <input name="current_password" type="password" autocomplete="current-password" />
+              <small class="field-help">
+                We require your password to change email — a 6-digit
+                code will be emailed to the new address to confirm.
+              </small>
+            </label>
+            <button type="submit" class="btn primary">Send verification code</button>
+          </form>
+
+          <!-- Step 2: confirm code (revealed after step 1) -->
+          <div class="email-change-step2" id="emailChangeStep2" hidden>
+            <p>
+              We sent a 6-digit code to <strong id="emailChangeNew">—</strong>.
+              Enter it below to finish the change.
+            </p>
+            <form id="formEmailChangeConfirm" novalidate>
+              <label class="field">
+                <span>Verification code</span>
+                <input name="code" class="code-input" maxlength="6"
+                       inputmode="numeric" pattern="[0-9]{6}"
+                       autocomplete="one-time-code" />
+              </label>
+              <div style="display:flex; gap:8px;">
+                <button type="submit" class="btn primary">Confirm</button>
+                <button type="button" class="btn ghost" id="emailChangeCancel">Cancel</button>
+              </div>
+            </form>
+          </div>
         </div>
       </div>
     </div>
