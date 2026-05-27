@@ -35,7 +35,7 @@ from app.auth import (
     can_manage_project,
     get_current_user,
 )
-from app.database import get_db
+from app.database import get_db, engine
 from app.email_service import (
     BugSnapshot, UserSnapshot,
     notify_assignment, notify_bug_created, notify_bug_updated, notify_comment_added,
@@ -44,6 +44,7 @@ from app.models import (
     ROLE_ADMIN, ROLE_MANAGER,
     Activity, Attachment, Bug, Comment, Project, User,
 )
+from app.webhooks_delivery import deliver_event
 from app.schemas import (
     ALLOWED_ENVIRONMENTS, ALLOWED_PRIORITIES, ALLOWED_STATUSES,
     ActivityOut, AttachmentBrief, BugCreate, BugDetail, BugListResponse,
@@ -318,11 +319,32 @@ def list_bugs(
         if q_clean.isdigit():
             stmt, count_stmt = apply((stmt, count_stmt), Bug.id == int(q_clean))
         elif q_clean:
-            like = f"%{_like_escape(q_clean.lower())}%"
-            clause = or_(
-                func.lower(Bug.title).like(like, escape="\\"),
-                func.lower(Bug.description).like(like, escape="\\"),
-            )
+            # On Postgres we use the database's full-text search (tsvector
+            # over title || description). It's an order of magnitude
+            # faster than ILIKE on tables >50k rows AND gives us prefix
+            # matching + stemming for free. On SQLite (tests / single-
+            # user dev) we fall back to the older ILIKE path.
+            if engine.dialect.name == "postgresql":
+                # Use plainto_tsquery so user input doesn't have to be
+                # well-formed FTS syntax. We OR with an ILIKE fallback so
+                # short / partial-word searches ("log" → "login") still hit.
+                from sqlalchemy import text as _sqltext
+                tsquery = _sqltext(
+                    "to_tsvector('simple', coalesce(title,'') || ' ' || coalesce(description,'')) "
+                    "@@ plainto_tsquery('simple', :q)"
+                ).bindparams(q=q_clean)
+                like = f"%{_like_escape(q_clean.lower())}%"
+                clause = or_(
+                    tsquery,
+                    func.lower(Bug.title).like(like, escape="\\"),
+                    func.lower(Bug.description).like(like, escape="\\"),
+                )
+            else:
+                like = f"%{_like_escape(q_clean.lower())}%"
+                clause = or_(
+                    func.lower(Bug.title).like(like, escape="\\"),
+                    func.lower(Bug.description).like(like, escape="\\"),
+                )
             stmt, count_stmt = apply((stmt, count_stmt), clause)
 
     total = db.scalar(count_stmt) or 0
@@ -468,6 +490,11 @@ def create_bug(
             tuple(UserSnapshot(id=a.id, name=a.name, email=a.email) for a in assignees),
             actor.name,
         )
+    # Fire outbound webhook.
+    background.add_task(
+        deliver_event, actor.org_id, "bug.created",
+        {"bug": _bug_to_out_dict(fresh), "actor": _user_brief(actor)},
+    )
 
     return BugOut.model_validate(_bug_to_out_dict(
         fresh, 0, can_edit_bug(db, actor, fresh.project),
@@ -570,6 +597,13 @@ def update_bug(
         background.add_task(
             notify_bug_updated, snap, list(changes), actor_name, actor.id,
         )
+        # Webhook fire — only if there were genuine changes.
+        background.add_task(
+            deliver_event, actor.org_id, "bug.updated",
+            {"bug": _bug_to_out_dict(fresh),
+             "changes": [{"field": f, "old": o, "new": n} for f, o, n in changes],
+             "actor_name": actor_name},
+        )
     if newly_assigned:
         background.add_task(
             notify_assignment, snap,
@@ -589,6 +623,7 @@ def update_bug(
 @router.delete("/{bug_id}")
 def delete_bug(
     bug_id: int,
+    background: BackgroundTasks,
     actor: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, str]:
@@ -600,6 +635,7 @@ def delete_bug(
         )
     title = bug.title
     org_id = actor.org_id
+    deleted_snapshot = {"id": bug.id, "title": title, "project_id": bug.project_id}
     db.delete(bug)
     db.add(Activity(
         org_id=org_id, bug_id=None, entity_type="bug", entity_id=bug_id,
@@ -608,7 +644,167 @@ def delete_bug(
         detail=f"Deleted bug #{bug_id}: {title}",
     ))
     db.commit()
+    background.add_task(
+        deliver_event, org_id, "bug.deleted",
+        {"bug": deleted_snapshot, "actor": _user_brief(actor)},
+    )
     return {"message": "Bug deleted"}
+
+
+# ---------------------------------------------------------------------------
+# Bulk actions
+# ---------------------------------------------------------------------------
+from pydantic import BaseModel as _BulkModel, Field as _BulkField
+
+
+class BulkUpdateIn(_BulkModel):
+    """Payload for /api/bugs/bulk-update. Apply the same set of changes
+    to every bug ID in `bug_ids`. We intentionally support a narrow
+    set of fields — anything more complex deserves per-bug PUTs."""
+    bug_ids: list[int] = _BulkField(..., min_length=1, max_length=200)
+    status: Optional[str] = None
+    priority: Optional[str] = None
+    environment: Optional[str] = None
+    add_assignee_ids: Optional[list[int]] = None
+    remove_assignee_ids: Optional[list[int]] = None
+
+
+class BulkDeleteIn(_BulkModel):
+    bug_ids: list[int] = _BulkField(..., min_length=1, max_length=200)
+
+
+@router.post("/bulk-update")
+def bulk_update(
+    payload: BulkUpdateIn,
+    background: BackgroundTasks,
+    actor: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Apply the supplied diff to many bugs in one shot. Skips bugs
+    the actor can't edit (silent — the response lists how many were
+    actually touched). All tenant-isolation checks still apply."""
+    try:
+        if payload.status is not None:
+            payload.status = normalize_choice(payload.status, ALLOWED_STATUSES, "status")
+        if payload.priority is not None:
+            payload.priority = normalize_choice(payload.priority, ALLOWED_PRIORITIES, "priority")
+        if payload.environment is not None:
+            payload.environment = normalize_choice(payload.environment, ALLOWED_ENVIRONMENTS, "environment")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    accessible = set(accessible_project_ids(db, actor))
+    bugs = list(db.scalars(_eager_bug().where(Bug.id.in_(payload.bug_ids))).all())
+    updated = 0
+    skipped = 0
+    add_users: list[User] = []
+    if payload.add_assignee_ids:
+        add_users = _resolve_users(db, payload.add_assignee_ids, actor.org_id)
+    remove_ids = set(payload.remove_assignee_ids or [])
+
+    for bug in bugs:
+        if bug.project is None or bug.project.org_id != actor.org_id:
+            skipped += 1
+            continue
+        if bug.project_id not in accessible:
+            skipped += 1
+            continue
+        if not can_edit_bug(db, actor, bug.project):
+            skipped += 1
+            continue
+        local_changes: list[tuple[str, str, str]] = []
+        for field, new_val in (
+            ("status", payload.status),
+            ("priority", payload.priority),
+            ("environment", payload.environment),
+        ):
+            if new_val is None:
+                continue
+            old = getattr(bug, field)
+            if old != new_val:
+                local_changes.append((field, str(old), str(new_val)))
+                setattr(bug, field, new_val)
+        if add_users:
+            current = {a.id for a in bug.assignees}
+            new_assignees = list(bug.assignees)
+            for u in add_users:
+                if u.id not in current:
+                    new_assignees.append(u)
+            if len(new_assignees) != len(bug.assignees):
+                old_names = sorted(a.name for a in bug.assignees)
+                new_names = sorted(u.name for u in new_assignees)
+                local_changes.append(("assignees",
+                                      ", ".join(old_names) or "(none)",
+                                      ", ".join(new_names) or "(none)"))
+                bug.assignees = new_assignees
+        if remove_ids:
+            kept = [u for u in bug.assignees if u.id not in remove_ids]
+            if len(kept) != len(bug.assignees):
+                old_names = sorted(a.name for a in bug.assignees)
+                new_names = sorted(u.name for u in kept)
+                local_changes.append(("assignees",
+                                      ", ".join(old_names) or "(none)",
+                                      ", ".join(new_names) or "(none)"))
+                bug.assignees = kept
+        if local_changes:
+            for field, old, new in local_changes:
+                _log(db, actor.org_id, bug.id, actor, f"{field}_changed",
+                     f"{field}: '{old}' → '{new}' (bulk)")
+            updated += 1
+    if updated:
+        db.commit()
+        background.add_task(
+            deliver_event, actor.org_id, "bugs.bulk_updated",
+            {"bug_ids": [b.id for b in bugs if b.project and b.project.org_id == actor.org_id],
+             "updated": updated, "skipped": skipped,
+             "actor": _user_brief(actor)},
+        )
+    else:
+        db.rollback()
+    return {"updated": updated, "skipped": skipped}
+
+
+@router.post("/bulk-delete")
+def bulk_delete(
+    payload: BulkDeleteIn,
+    background: BackgroundTasks,
+    actor: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Delete many bugs at once. Same per-bug permission as DELETE /bugs/{id}."""
+    accessible = set(accessible_project_ids(db, actor))
+    bugs = list(db.scalars(_eager_bug().where(Bug.id.in_(payload.bug_ids))).all())
+    deleted = 0
+    skipped = 0
+    deleted_ids: list[int] = []
+    for bug in bugs:
+        if bug.project is None or bug.project.org_id != actor.org_id:
+            skipped += 1
+            continue
+        if bug.project_id not in accessible:
+            skipped += 1
+            continue
+        if not can_delete_bug(db, actor, bug.project):
+            skipped += 1
+            continue
+        bid = bug.id
+        title = bug.title
+        db.delete(bug)
+        db.add(Activity(
+            org_id=actor.org_id, bug_id=None, entity_type="bug", entity_id=bid,
+            actor_user_id=actor.id, actor_name=actor.name,
+            action="bug_deleted",
+            detail=f"Deleted bug #{bid}: {title} (bulk)",
+        ))
+        deleted_ids.append(bid)
+        deleted += 1
+    if deleted:
+        db.commit()
+        background.add_task(
+            deliver_event, actor.org_id, "bugs.bulk_deleted",
+            {"bug_ids": deleted_ids, "actor": _user_brief(actor)},
+        )
+    return {"deleted": deleted, "skipped": skipped}
 
 
 # ---------------------------------------------------------------------------
@@ -668,6 +864,11 @@ def add_comment(
     snap = _bug_snapshot(bug)
     background.add_task(
         notify_comment_added, snap, author.name, author.id, payload.body,
+    )
+    background.add_task(
+        deliver_event, author.org_id, "comment.added",
+        {"bug_id": bug_id, "comment_id": c.id,
+         "body": c.body, "author": _user_brief(author)},
     )
     return {
         "id": c.id, "bug_id": c.bug_id,

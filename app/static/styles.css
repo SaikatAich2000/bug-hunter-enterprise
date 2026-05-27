@@ -12,6 +12,14 @@
 
 /* ---------- Reset & base ---------- */
 * { box-sizing: border-box; }
+
+/* Honour the HTML `hidden` attribute even on flex/grid containers that
+   declare their own display. Without this, [hidden] = display:none from
+   the UA sheet is silently overridden by our component CSS (e.g.
+   `.filter-bar { display: flex }`), so JS toggling `.hidden = true` did
+   nothing. This was the cause of the bug filter-bar leaking onto the
+   Audit page even though setView() correctly flagged it. */
+[hidden] { display: none !important; }
 *::-webkit-scrollbar { width: 10px; height: 10px; }
 *::-webkit-scrollbar-track { background: transparent; }
 *::-webkit-scrollbar-thumb {
@@ -209,6 +217,9 @@ body.sidebar-collapsed .app { grid-template-columns: 64px 1fr; }
   gap: 12px;
   padding: 4px 4px 14px;
   border-bottom: 1px solid var(--border);
+  /* Same flex-shrink fix as .org-banner — a tall sidebar (many
+     projects/users) would otherwise squash this row's content. */
+  flex-shrink: 0;
 }
 .brand-text { flex: 1; min-width: 0; overflow: hidden; }
 .sidebar-collapse-btn {
@@ -458,6 +469,13 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
   position: relative;
   overflow: hidden;
   transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+  /* Button reset — KPI tiles are now <button> for keyboard + filter clicks */
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  display: block;
+  width: 100%;
 }
 .kpi::before {
   content: "";
@@ -474,6 +492,19 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
   border-color: var(--border-strong);
 }
 .kpi:hover::before { opacity: 1; }
+.kpi:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+  border-color: var(--accent);
+}
+.kpi:active { transform: translateY(0); }
+/* Active = the KPI's status filter matches the current multi-select */
+.kpi.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), var(--shadow);
+}
+.kpi.active::before { opacity: 1; }
+.kpi.active .kpi-label { color: var(--accent); }
 .kpi-num {
   font-size: 28px;
   font-weight: 700;
@@ -713,7 +744,7 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
 .bug-table tbody tr:hover { background: var(--bg-elev-2); }
 .bug-table tbody tr:last-child td { border-bottom: none; }
 
-.col-id        { width: 58px; color: var(--text-muted); font-weight: 600; }
+.col-id        { width: 72px; color: var(--text-muted); font-weight: 600; }
 .col-title     { width: auto; }
 .col-project   { width: 130px; }
 .col-status    { width: 120px; }
@@ -898,6 +929,47 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
 .chart-host { width: 100%; min-height: 180px; }
 .chart-host svg { width: 100%; height: auto; display: block; }
 
+/* ---------- Page intro banner ----------
+   The Audit Trail, Sessions and Invitations screens don't have the KPI
+   strip so without this their controls bar sits flush against the
+   topbar — visually cramped. The banner gives the page a title +
+   one-line purpose and creates breathing room. */
+.page-intro {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 22px 24px 18px;
+  border-bottom: 1px solid var(--border-soft);
+  background: linear-gradient(180deg, var(--accent-soft) 0%, transparent 100%);
+}
+.page-intro-icon {
+  width: 46px;
+  height: 46px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-sm);
+}
+.page-intro-text { min-width: 0; }
+.page-intro-text h2 {
+  margin: 0 0 4px;
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+.page-intro-text p {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
 /* ---------- Audit list ---------- */
 .audit-controls {
   display: flex;
@@ -905,7 +977,7 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
   margin-bottom: 12px;
   flex-wrap: wrap;
   align-items: center;
-  padding: 0 24px 12px;
+  padding: 18px 24px 12px;
 }
 .audit-controls select, .audit-controls input {
   background: var(--bg-elev);
@@ -1002,7 +1074,10 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 100;
+  /* Above the Sleuth FAB (z-index 900) and any other floating UI so an
+     active modal's primary actions (Save / Delete / Cancel) are never
+     covered. The backdrop also occludes the FAB while a modal is open. */
+  z-index: 1000;
   padding: 16px;
   animation: modal-fade 0.18s ease;
 }
@@ -1019,14 +1094,39 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
   border-radius: 14px;
   width: 100%;
   max-width: 540px;
+  /* Use dvh (dynamic viewport height) on mobile browsers so the card
+     accounts for the browser chrome that appears/disappears on scroll.
+     Falls back to vh on browsers without dvh support. */
   max-height: 92vh;
+  max-height: 92dvh;
   display: flex;
   flex-direction: column;
+  /* Override-able by descendants but a sensible default. */
+  overflow: hidden;
   box-shadow: var(--shadow-xl);
   animation: modal-rise 0.22s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 @keyframes modal-rise { from { opacity: 0; transform: translateY(12px) scale(0.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
 .modal-card.sm { max-width: 400px; }
+/* Compact confirm dialog — single-line prompts (Log out, Cancel revoke…)
+   look cramped or too spacious in the generic modal-body layout, so we
+   give the confirm dialog its own tightened paddings. */
+.confirm-card { max-width: 380px; }
+.confirm-body {
+  padding: 14px 20px 4px;
+}
+.confirm-body p {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--text);
+  white-space: pre-wrap;
+}
+.confirm-foot {
+  padding: 12px 20px 16px;
+  margin-top: 0;
+  border-top: none;
+}
 .modal-card.lg { max-width: 760px; }
 .modal-card.xl { max-width: 920px; }
 .modal-card.xxl {
@@ -1072,16 +1172,47 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
 .bug-modal-subtitle { font-weight: 400; }
 
 .modal-body {
-  padding: 18px 20px;
+  padding: 18px 20px 0;
   overflow-y: auto;
+  /* min-height: 0 lets the body shrink inside the flex parent so the
+     sticky foot has a real scrolling viewport instead of overflowing
+     past the bottom of the modal-card. Without this the foot can sit
+     off-screen at high browser zoom. */
+  min-height: 0;
+  flex: 1 1 auto;
+  /* Avoid janky bouncing on iOS when the body content overflows. */
+  -webkit-overflow-scrolling: touch;
 }
 .modal-foot {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-  padding-top: 18px;
-  margin-top: 8px;
+  padding: 14px 20px;
+  /* Stretch across the modal-body's horizontal padding so the foot's
+     top border reaches edge-to-edge and the buttons line up with the
+     right side of the card. */
+  margin: 12px -20px 0;
   border-top: 1px solid var(--border);
+  background: var(--bg-elev);
+  /* Pin to the bottom of the scrolling modal-body so action buttons
+     stay visible at any zoom / viewport. Outside a scroll container
+     (e.g. the confirm modal where modal-foot is a sibling of body)
+     sticky degrades gracefully into normal flow. */
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+}
+/* The foot above only makes sense when it lives INSIDE the scrolling
+   modal-body. For the confirm modal where modal-foot is a sibling of
+   modal-body, cancel the negative margin so it sits inside its own
+   padding box. */
+.modal-card > .modal-foot {
+  margin: 0;
+}
+/* The bug modal's body has padding: 0 (sections inside provide their
+   own padding), so the foot must not use the default negative margin. */
+.bug-modal-body > .modal-foot {
+  margin: 12px 0 0;
 }
 
 .bug-modal-body { padding: 0; }
@@ -1250,6 +1381,13 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
   color: white;
   border-color: transparent;
   box-shadow: 0 2px 6px var(--accent-glow);
+}
+/* When a chip is selected, the sub-label (e.g. role name beside the
+   assignee name) needs higher contrast against the gradient background
+   than the muted blue-grey used elsewhere. */
+.chip.selected .chip-sub {
+  color: rgba(255, 255, 255, 0.85);
+  opacity: 1;
 }
 
 /* Comments */
@@ -1558,6 +1696,19 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
     background: transparent;
     border: 1px dashed var(--border);
   }
+
+  /* Without the sidebar the bug-list container is ~768px wide and the
+     fixed-width columns (id+project+status+priority+env+assignees+att
+     +actions) sum to ~838px, squeezing the auto-width title to zero.
+     Trim a few non-essential columns so the Title stays readable. */
+  .col-actions   { display: none; }
+  .col-id        { width: 68px; }
+  .col-att       { width: 50px; }
+  .col-project   { width: 110px; }
+  .col-status    { width: 100px; }
+  .col-priority  { width: 86px; }
+  .col-env       { width: 62px; }
+  .col-assignees { width: 160px; }
 }
 
 @media (max-width: 700px) {
@@ -1569,12 +1720,16 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
   .modal-card { max-height: 95vh; }
   .modal-card.xxl { width: 100%; max-width: 100%; }
   .charts-grid { grid-template-columns: 1fr; }
-  .audit-controls { padding: 0 12px 12px; }
+  .audit-controls { padding: 14px 12px 12px; }
   .audit-list { padding: 0 12px 24px; }
+  .sessions-controls { padding: 14px 12px 12px; flex-direction: column; align-items: stretch; }
+  .page-intro { padding: 16px 12px 14px; gap: 12px; }
+  .page-intro-icon { width: 40px; height: 40px; font-size: 18px; }
+  .page-intro-text h2 { font-size: 15px; }
+  .page-intro-text p { font-size: 12px; }
   .col-project { width: 110px; }
   .col-env, .col-att { display: none; }
 
-  .sessions-controls { flex-direction: column; align-items: stretch; }
   .session-row { grid-template-columns: 1fr; }
   .session-actions { justify-self: stretch; }
 }
@@ -1584,7 +1739,16 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
   .kpi { padding: 12px 14px; }
   .kpi-num { font-size: 22px; }
   .page-title { font-size: 17px; }
-  .search-wrap { display: none; }
+  /* On phones the topbar can't fit title + search + new-bug side-by-side,
+     so we break the search onto its own row below the topbar. Previously
+     we hid it entirely, which left mobile users with no search at all. */
+  .topbar { flex-wrap: wrap; row-gap: 10px; }
+  .search-wrap {
+    order: 3;
+    flex: 1 0 100%;
+    max-width: none;
+    margin-left: 0;
+  }
   .modal { padding: 0; }
   .modal-card { max-height: 100vh; height: 100vh; border-radius: 0; max-width: 100%; }
   .modal-card.xxl { width: 100%; }
@@ -1648,14 +1812,22 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
  * Auth pages
  * ============================================================ */
 .auth-body {
+  /* min-height (not height) so the page CAN grow when the card needs more
+     room than the viewport. Combined with `overflow-x: hidden` (not
+     overflow: hidden) so we still clip the decorative blob pseudo-
+     elements on the sides but vertical scroll keeps working. Previously
+     overflow:hidden + align-items:center meant tall forms (signup, accept
+     invite) got clipped on short screens with no way to reach the submit
+     button. */
   min-height: 100vh;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
   background: var(--bg-grad);
   padding: 32px 16px;
   position: relative;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 .auth-body::before, .auth-body::after {
   content: "";
@@ -1685,6 +1857,11 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
   gap: 16px;
   position: relative;
   z-index: 1;
+  /* Push the card into vertical center when content is shorter than the
+     viewport. Auto margins under flex-align-items:flex-start give us
+     this without forcing align-items:center on the parent (which broke
+     scrolling for tall forms). */
+  margin: auto 0;
 }
 .auth-card {
   width: 100%;
@@ -1848,11 +2025,20 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
 }
 .field em.js-required.hidden { display: none; }
 
+/* Reporter is always the logged-in user — the select is disabled and only
+   ever holds one option. Stripping the dropdown caret makes it read as a
+   static field rather than implying the user can pick someone else. */
 .reporter-select {
   width: 100% !important;
   max-width: 100%;
   text-overflow: ellipsis;
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  background-image: none !important;
+  padding-right: 12px !important;
 }
+.reporter-select::-ms-expand { display: none; }
 .reporter-select option {
   text-overflow: ellipsis;
   overflow: hidden;
@@ -2105,6 +2291,12 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
   gap: 2px;
   position: relative;
   overflow: hidden;
+  /* The sidebar is itself a flex column with max-height: 100vh. With
+     enough content (projects + users lists) the sidebar total exceeds
+     the viewport and EVERY flex child shrinks proportionally — including
+     this banner, which collapsed its name + meta lines to 0px. Lock the
+     banner's intrinsic height by refusing to shrink. */
+  flex-shrink: 0;
 }
 .org-banner::before {
   content: "";
@@ -2443,16 +2635,19 @@ body.sidebar-collapsed .org-banner { display: none; }
 }
 
 @media (max-width: 500px) {
-  /* Auth pages — let the card fill the phone screen */
+  /* Auth pages — let the card fill the phone screen. We keep min-height
+     for visual consistency on short forms (login) but make sure the
+     card can grow with content (signup, accept-invite) and the parent
+     allows vertical scroll. */
   .auth-card, .auth-card-wide {
     width: 100%;
     max-width: 100%;
     border-radius: 0;
-    min-height: 100vh;
     box-shadow: none;
     border: none;
   }
-  .auth-shell { padding: 0; }
+  .auth-shell { padding: 0; margin: 0; }
+  .auth-body { padding: 0; align-items: stretch; }
   .invite-projects { max-height: 160px; }
 }
 

@@ -46,6 +46,10 @@
     localStorage.setItem("theme", next);
   });
 
+  // Holds the short-lived token returned by step-1 (password) so step-2
+  // (TOTP) can echo it back.
+  let pendingTotpToken = "";
+
   $("#loginForm").addEventListener("submit", async (e) => {
     e.preventDefault();
     hideAlerts();
@@ -75,16 +79,79 @@
         showAlert("#loginAlert", msg);
         return;
       }
-      // Success — redirect to home (or `next` query param if provided).
+      // Step-1 may return `{requires_totp: true, pending_token}` which
+      // means the password was right but the user has 2FA on. Surface
+      // the 6-digit code form instead of redirecting.
+      const data = await res.json().catch(() => ({}));
+      if (data && data.requires_totp && data.pending_token) {
+        pendingTotpToken = data.pending_token;
+        $("#loginForm").hidden = true;
+        const totpForm = $("#totpForm");
+        if (totpForm) {
+          totpForm.hidden = false;
+          setTimeout(() => totpForm.elements.code?.focus(), 50);
+        }
+        return;
+      }
+      // No 2FA — straight to home / next.
       const params = new URLSearchParams(location.search);
       const next = params.get("next") || "/";
       location.href = next;
     } catch (err) {
-      showAlert("#loginAlert", "Network error. Try again.");
+      showAlert("#loginAlert", "Network error. Try again");
     } finally {
       btn.disabled = false; btn.textContent = "Sign in";
     }
   });
+
+  // 2FA step-2 handler — fires only when the page contains a #totpForm.
+  const totpForm = $("#totpForm");
+  if (totpForm) {
+    totpForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      hideAlerts();
+      const code = (totpForm.elements.code.value || "").trim();
+      if (!code) {
+        showAlert("#totpAlert", "Enter the 6-digit code from your authenticator app");
+        return;
+      }
+      const btn = totpForm.querySelector("button[type=submit]");
+      btn.disabled = true; btn.textContent = "Verifying…";
+      try {
+        const res = await fetch("/api/auth/login/totp", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ pending_token: pendingTotpToken, code }),
+        });
+        if (!res.ok) {
+          let msg = "Invalid code";
+          try {
+            const data = await res.json();
+            if (typeof data.detail === "string") msg = data.detail;
+          } catch {}
+          showAlert("#totpAlert", msg);
+          return;
+        }
+        const params = new URLSearchParams(location.search);
+        const next = params.get("next") || "/";
+        location.href = next;
+      } catch (err) {
+        showAlert("#totpAlert", "Network error. Try again");
+      } finally {
+        btn.disabled = false; btn.textContent = "Verify";
+      }
+    });
+
+    $("#totpBack")?.addEventListener("click", (e) => {
+      e.preventDefault();
+      pendingTotpToken = "";
+      totpForm.hidden = true;
+      $("#loginForm").hidden = false;
+      $("#loginForm").elements.password.value = "";
+      $("#loginForm").elements.email.focus();
+    });
+  }
 
   $("#forgotForm").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -99,8 +166,10 @@
         body: JSON.stringify({ email: f.elements.email.value.trim() }),
       });
       if (res.status === 204) {
+        // Email exists — the server queued the reset link. Be specific
+        // about what happens next so the user knows to check their inbox.
         showAlert("#forgotAlert",
-          "If that email is registered, a reset link has been sent. Check your inbox.",
+          "Reset link sent. Check your inbox — the link expires in 30 minutes",
           "success");
       } else {
         let msg = "Request failed";
@@ -115,7 +184,7 @@
         showAlert("#forgotAlert", msg);
       }
     } catch (err) {
-      showAlert("#forgotAlert", "Network error. Try again.");
+      showAlert("#forgotAlert", "Network error. Try again");
     } finally {
       btn.disabled = false; btn.textContent = "Send reset link";
     }

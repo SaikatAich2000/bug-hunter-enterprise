@@ -47,7 +47,7 @@ services:
 
   app:
     build: .
-    image: bugtracker_app:3.1.1
+    image: bugtracker_app:2.2
     container_name: bugtracker_app
     restart: unless-stopped
     depends_on:
@@ -58,7 +58,7 @@ services:
       # not via the host port mapping above.
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-bugtracker}:${POSTGRES_PASSWORD:-bugtracker_pw}@db:5432/${POSTGRES_DB:-bugtracker}
       APP_NAME: ${APP_NAME:-Bug Hunter}
-      APP_VERSION: ${APP_VERSION:-4.0.0}
+      APP_VERSION: ${APP_VERSION:-2.2}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
 

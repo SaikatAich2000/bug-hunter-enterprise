@@ -7,6 +7,11 @@
   <link rel="icon" type="image/png" href="/static/favicon.png?v=__ASSET_VERSION__" />
   <link rel="stylesheet" href="/static/styles.css?v=__ASSET_VERSION__" />
   <link rel="stylesheet" href="/static/chatbot.css?v=__ASSET_VERSION__" />
+  <!-- PWA: lets the app be "Add to Home Screen" on iOS/Android. -->
+  <link rel="manifest" href="/static/manifest.webmanifest" />
+  <meta name="theme-color" content="#6366f1" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 </head>
 <body>
   <div id="sidebarBackdrop" class="sidebar-backdrop" hidden></div>
@@ -35,7 +40,7 @@
       <nav class="nav">
         <button class="nav-btn active" data-view="list"><span class="nav-icon">📋</span><span>Bugs</span></button>
         <button class="nav-btn" data-view="analytics"><span class="nav-icon">📊</span><span>Analytics</span></button>
-        <button class="nav-btn" data-view="invitations" data-needs-role="manager"><span class="nav-icon">✉️</span><span>Invitations</span></button>
+        <button class="nav-btn" data-view="invitations" data-needs-role="manager"><span class="nav-icon">📨</span><span>Invitations</span></button>
         <button class="nav-btn" data-view="audit" data-needs-role="manager"><span class="nav-icon">🛡</span><span>Audit Trail</span></button>
         <button class="nav-btn" data-view="sessions" data-needs-role="admin"><span class="nav-icon">🔐</span><span>Sessions</span></button>
       </nav>
@@ -89,13 +94,25 @@
         <button class="btn primary" id="newBugBtn">+ New Bug</button>
       </header>
 
-      <!-- KPI strip: Total | Open | Resolved | Closed | Resolve Later -->
-      <section class="kpi-strip">
-        <div class="kpi"><div class="kpi-num" id="kpiBugs">0</div><div class="kpi-label">Total</div></div>
-        <div class="kpi"><div class="kpi-num kpi-open" id="kpiOpen">0</div><div class="kpi-label">Open</div></div>
-        <div class="kpi"><div class="kpi-num kpi-resolved" id="kpiResolved">0</div><div class="kpi-label">Resolved</div></div>
-        <div class="kpi"><div class="kpi-num kpi-closed" id="kpiClosed">0</div><div class="kpi-label">Closed</div></div>
-        <div class="kpi"><div class="kpi-num kpi-later" id="kpiResolveLater">0</div><div class="kpi-label">Resolve Later</div></div>
+      <!-- KPI strip: Total | Open | Resolved | Closed | Resolve Later
+           Each tile is a clickable filter that drives the status multi-select.
+           Clicking the active tile clears the filter. -->
+      <section class="kpi-strip" id="kpiStrip">
+        <button type="button" class="kpi" data-kpi="total" aria-label="Show all bugs">
+          <div class="kpi-num" id="kpiBugs">0</div><div class="kpi-label">Total</div>
+        </button>
+        <button type="button" class="kpi" data-kpi="open" aria-label="Filter to open bugs">
+          <div class="kpi-num kpi-open" id="kpiOpen">0</div><div class="kpi-label">Open</div>
+        </button>
+        <button type="button" class="kpi" data-kpi="resolved" aria-label="Filter to resolved bugs">
+          <div class="kpi-num kpi-resolved" id="kpiResolved">0</div><div class="kpi-label">Resolved</div>
+        </button>
+        <button type="button" class="kpi" data-kpi="closed" aria-label="Filter to closed bugs">
+          <div class="kpi-num kpi-closed" id="kpiClosed">0</div><div class="kpi-label">Closed</div>
+        </button>
+        <button type="button" class="kpi" data-kpi="resolve_later" aria-label="Filter to resolve-later bugs">
+          <div class="kpi-num kpi-later" id="kpiResolveLater">0</div><div class="kpi-label">Resolve Later</div>
+        </button>
       </section>
 
       <!-- Filter bar (visible only on list view). Multi-select dropdowns. -->
@@ -154,7 +171,7 @@
           </table>
         </div>
         <div id="emptyState" class="empty-state" hidden>
-          <p>No bugs match your filters.</p>
+          <p>No bugs match your filters</p>
         </div>
         <div class="pagination" id="paginationBar"></div>
       </section>
@@ -191,6 +208,13 @@
 
       <!-- VIEW: Audit Trail -->
       <section class="view" id="viewAudit" hidden>
+        <div class="page-intro audit-intro">
+          <div class="page-intro-icon" aria-hidden="true">🛡</div>
+          <div class="page-intro-text">
+            <h2>Audit Trail</h2>
+            <p>Every create, update, delete, login and session event across your organization — useful for incident review and compliance</p>
+          </div>
+        </div>
         <div class="audit-controls">
           <select id="auditEntityFilter">
             <option value="">All entities</option>
@@ -204,7 +228,8 @@
           <select id="auditActorFilter">
             <option value="">All actors</option>
           </select>
-          <input id="auditSearch" type="search" placeholder="Search audit log…" />
+          <input id="auditSearch" type="search" placeholder="Search audit log (try bug #, user name, action…)" />
+          <button class="btn ghost" id="auditClearBtn">Clear</button>
           <button class="btn ghost" id="auditRefreshBtn">Refresh</button>
         </div>
         <div class="audit-list" id="auditList"></div>
@@ -212,12 +237,16 @@
 
       <!-- VIEW: Sessions (admin-only) -->
       <section class="view" id="viewSessions" hidden>
+        <div class="page-intro sessions-intro">
+          <div class="page-intro-icon" aria-hidden="true">🔐</div>
+          <div class="page-intro-text">
+            <h2>Active Sessions</h2>
+            <p>Every device currently logged in to your organization. Revoke a session to log that device out without affecting anything else</p>
+          </div>
+        </div>
         <div class="sessions-controls">
           <p class="sessions-help">
-            Active sessions across the system. Click <strong>Revoke</strong>
-            to log a specific device out without affecting any other session
-            for that user. Your own current session can't be revoked from
-            here — use the Log out button in the sidebar instead.
+            Click <strong>Revoke</strong> to log a specific device out without affecting any other session for that user. Your own current session can't be revoked from here — use the Log out button in the sidebar instead
           </p>
           <button class="btn ghost" id="sessionsRefreshBtn">Refresh</button>
         </div>
@@ -226,11 +255,14 @@
 
       <!-- VIEW: Invitations (admin/manager) -->
       <section class="view" id="viewInvitations" hidden>
+        <div class="page-intro invitations-intro">
+          <div class="page-intro-icon" aria-hidden="true">📨</div>
+          <div class="page-intro-text">
+            <h2>Invitations</h2>
+            <p>Invite teammates to your organization by email. They'll set their own password when they accept — pending invites expire after 7 days</p>
+          </div>
+        </div>
         <div class="invitations-controls">
-          <p class="sessions-help">
-            Send a link to invite a teammate to your organization. They'll set
-            their own password when they accept. Pending invites expire after 7 days.
-          </p>
           <button class="btn primary" id="newInviteBtn">+ Invite a teammate</button>
           <button class="btn ghost" id="invitationsRefreshBtn">Refresh</button>
         </div>
@@ -414,7 +446,7 @@
           <span>Key</span>
           <input name="key" maxlength="10" placeholder="auto" pattern="[A-Z][A-Z0-9]*"
                  style="text-transform: uppercase;" />
-          <small class="hint">Short uppercase code shown on bugs (e.g. WEB-42). Leave blank to auto-derive.</small>
+          <small class="hint">Short uppercase code shown on bugs (e.g. WEB-42). Leave blank to auto-derive</small>
         </label>
         <label class="field">
           <span>Color</span>
@@ -461,7 +493,7 @@
           <span>Password <em class="js-required">*</em></span>
           <input name="password" type="password" minlength="8" maxlength="200"
                  placeholder="Min 8 characters" autocomplete="new-password" />
-          <small class="hint" id="userPasswordHint">At least 8 characters.</small>
+          <small class="hint" id="userPasswordHint">At least 8 characters</small>
         </label>
         <label class="field check-row">
           <input type="checkbox" name="is_active" checked />
@@ -490,7 +522,7 @@
         <label class="field">
           <span>New password <em>*</em></span>
           <input name="new_password" type="password" required minlength="8" maxlength="200" autocomplete="new-password" />
-          <small class="hint">At least 8 characters.</small>
+          <small class="hint">At least 8 characters</small>
         </label>
         <label class="field">
           <span>Confirm new password <em>*</em></span>
@@ -504,19 +536,20 @@
     </div>
   </div>
 
-  <!-- Confirm dialog -->
+  <!-- Confirm dialog — compact layout with a tight body so single-line
+       prompts (Log out, Cancel revoke …) don't waste vertical space -->
   <div class="modal" id="modalConfirm" hidden>
-    <div class="modal-card sm">
+    <div class="modal-card sm confirm-card">
       <div class="modal-head">
         <h2 id="confirmTitle">Confirm</h2>
         <button class="icon-btn modal-close" id="confirmClose" aria-label="Close">✕</button>
       </div>
-      <div class="modal-body">
+      <div class="modal-body confirm-body">
         <p id="confirmMessage"></p>
-        <div class="modal-foot">
-          <button class="btn ghost" id="confirmCancel">Cancel</button>
-          <button class="btn danger" id="confirmOk">Delete</button>
-        </div>
+      </div>
+      <div class="modal-foot confirm-foot">
+        <button class="btn ghost" id="confirmCancel">Cancel</button>
+        <button class="btn danger" id="confirmOk">Delete</button>
       </div>
     </div>
   </div>
@@ -533,7 +566,7 @@
           <span>Email <em>*</em></span>
           <input name="email" type="email" required maxlength="254"
                  placeholder="teammate@yourcompany.com" autocomplete="off" />
-          <small class="hint">They'll get an email with a link to set their password.</small>
+          <small class="hint">They'll get an email with a link to set their password</small>
         </label>
         <label class="field">
           <span>Role <em>*</em></span>
@@ -548,7 +581,7 @@
           <div class="invite-projects" id="inviteProjectList">
             <p class="muted small">Loading projects…</p>
           </div>
-          <small class="hint">Members and managers only see projects they're added to.</small>
+          <small class="hint">Members and managers only see projects they're added to</small>
         </label>
         <label class="field check-row">
           <input type="checkbox" name="as_lead" />
@@ -618,7 +651,7 @@
             <span class="value" id="profileOrg">—</span>
           </div>
           <small class="field-help">
-            To change your role or organization, ask an admin.
+            To change your role or organization, ask an admin
           </small>
         </div>
 
@@ -641,7 +674,7 @@
               <input name="current_password" type="password" autocomplete="current-password" />
               <small class="field-help">
                 We require your password to change email — a 6-digit
-                code will be emailed to the new address to confirm.
+                code will be emailed to the new address to confirm
               </small>
             </label>
             <button type="submit" class="btn primary">Send verification code</button>

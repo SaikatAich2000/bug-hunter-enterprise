@@ -369,6 +369,12 @@ class ParsedQuery:
     # If we couldn't disambiguate (e.g. "John" matched two users), the
     # executor surfaces these as a clarifying reply.
     ambiguous_names: list[tuple[str, list[str]]] = field(default_factory=list)
+    # Name phrases the user gave that didn't match ANY user. The executor
+    # uses this to ask for clarification instead of silently dropping the
+    # filter and returning every bug — the latter is misleading when the
+    # user clearly expressed an assignee / reporter intent.
+    unresolved_assignee_names: list[str] = field(default_factory=list)
+    unresolved_reporter_names: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -530,28 +536,38 @@ def _candidate_name_phrases(message: str) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
 
     # Assignee cues -------------------------------------------------------
-    # "assigned to X", "for X", "to X", "against X", "with X (assigned)"
+    # The character class for the name phrase includes `()` so a trailing
+    # parenthetical like "(export to excel)" from the chat suggestion
+    # can't be absorbed into the name. The lookahead's alternation also
+    # accepts "export" / "download" / "to xlsx" so suggestion text
+    # appended in any common shape ends the assignee phrase cleanly.
+    name_terminator_lookahead = (
+        r"$|[,.;!?()]|\s+(?:and|or|with|that|which|in|for|on|by|status|"
+        r"priority|environment|project|created|updated|reported|filed|"
+        r"owned|export|exported|exporting|download|downloaded|"
+        r"to\s+excel|as\s+excel|to\s+xlsx|as\s+xlsx)"
+    )
+    short_terminator_lookahead = (
+        r"$|[,.;!?()]|\s+(?:and|or|in|for|on|by|status|priority|"
+        r"environment|project|export|exported|exporting|download|"
+        r"to\s+excel|as\s+excel|to\s+xlsx|as\s+xlsx)"
+    )
     assignee_pats = [
-        r"assigned\s+to\s+([^,.;!?]+?)(?=$|[,.;!?]|\s+(?:and|or|with|that|"
-        r"which|in|for|on|by|status|priority|environment|project|created|"
-        r"updated|reported|filed|owned|to\s+excel))",
-        r"against\s+([^,.;!?]+?)(?=$|[,.;!?]|\s+(?:and|or|in|for|on|by|"
-        r"status|priority|environment|project|to\s+excel))",
-        r"owner\s+is\s+([^,.;!?]+?)(?=$|[,.;!?]|\s+(?:and|or|in|for|on|by))",
-        r"owned\s+by\s+([^,.;!?]+?)(?=$|[,.;!?]|\s+(?:and|or|in|for|on|by|"
-        r"status|priority|environment|project|to\s+excel))",
-        r"under\s+([^,.;!?]+?)'s?\s+name",
+        r"assigned\s+to\s+([^,.;!?()]+?)(?=" + name_terminator_lookahead + r")",
+        r"against\s+([^,.;!?()]+?)(?=" + short_terminator_lookahead + r")",
+        r"owner\s+is\s+([^,.;!?()]+?)(?=$|[,.;!?()]|\s+(?:and|or|in|for|on|by))",
+        r"owned\s+by\s+([^,.;!?()]+?)(?=" + short_terminator_lookahead + r")",
+        r"under\s+([^,.;!?()]+?)'s?\s+name",
         # Action verbs: "assign bug 5 to alice", "give bug 5 to alice",
         # "delegate #5 to bob", "hand over #5 to alice", "assign it to alice".
         # The optional pronoun group lets pronoun-with-memory cases parse
         # the name without first resolving the bug.
         r"(?:assign|reassign|allocate|allot|delegate|hand(?:\s+over)?|give|"
         r"put)\s+(?:the\s+)?(?:bug|issue|ticket|defect|it|this|that)?\s*"
-        r"(?:#|no\.?)?\d*\s*(?:over\s+)?to\s+([^,.;!?]+?)"
-        r"(?=$|[,.;!?]|\s+(?:and|or|with|that|which|in|for|on|by|status|"
-        r"priority|environment|project|to\s+excel))",
+        r"(?:#|no\.?)?\d*\s*(?:over\s+)?to\s+([^,.;!?()]+?)"
+        r"(?=" + name_terminator_lookahead + r")",
         # "unassign alice from #5" / "remove alice from bug 5"
-        r"(?:unassign|deassign|remove|drop|deallocate)\s+([^,.;!?]+?)\s+"
+        r"(?:unassign|deassign|remove|drop|deallocate)\s+([^,.;!?()]+?)\s+"
         r"from\s+(?:the\s+)?(?:bug|issue|ticket|defect|it|this|that)?\s*"
         r"(?:#|no\.?)?\s*\d*",
     ]
@@ -563,17 +579,12 @@ def _candidate_name_phrases(message: str) -> list[tuple[str, str]]:
 
     # Reporter cues -------------------------------------------------------
     reporter_pats = [
-        r"reported\s+by\s+([^,.;!?]+?)(?=$|[,.;!?]|\s+(?:and|or|with|in|"
-        r"for|on|by|status|priority|environment|project|to\s+excel))",
-        r"filed\s+by\s+([^,.;!?]+?)(?=$|[,.;!?]|\s+(?:and|or|with|in|for|"
-        r"on|by|status|priority|environment|project|to\s+excel))",
-        r"raised\s+by\s+([^,.;!?]+?)(?=$|[,.;!?]|\s+(?:and|or|with|in|for|"
-        r"on|by|status|priority|environment|project|to\s+excel))",
-        r"created\s+by\s+([^,.;!?]+?)(?=$|[,.;!?]|\s+(?:and|or|with|in|for|"
-        r"on|by|status|priority|environment|project|to\s+excel))",
-        r"opened\s+by\s+([^,.;!?]+?)(?=$|[,.;!?]|\s+(?:and|or|with|in|for|"
-        r"on|by|status|priority|environment|project|to\s+excel))",
-        r"reporter\s+is\s+([^,.;!?]+?)(?=$|[,.;!?]|\s+(?:and|or|in|for|on|by))",
+        r"reported\s+by\s+([^,.;!?()]+?)(?=" + name_terminator_lookahead + r")",
+        r"filed\s+by\s+([^,.;!?()]+?)(?=" + name_terminator_lookahead + r")",
+        r"raised\s+by\s+([^,.;!?()]+?)(?=" + name_terminator_lookahead + r")",
+        r"created\s+by\s+([^,.;!?()]+?)(?=" + name_terminator_lookahead + r")",
+        r"opened\s+by\s+([^,.;!?()]+?)(?=" + name_terminator_lookahead + r")",
+        r"reporter\s+is\s+([^,.;!?()]+?)(?=$|[,.;!?()]|\s+(?:and|or|in|for|on|by))",
     ]
     for pat in reporter_pats:
         for m in re.finditer(pat, message, re.IGNORECASE):
@@ -911,6 +922,13 @@ def parse(message: str, ctx: Context, now: Optional[datetime] = None) -> ParsedQ
         matches = _resolve_name(phrase, ctx)
         if not matches:
             pq.notes.append(f"No user matched '{phrase}'.")
+            # Track which kind of name the user meant so the executor can
+            # ask for clarification rather than silently dropping the
+            # filter and returning every bug.
+            if role == "assignee":
+                pq.unresolved_assignee_names.append(phrase)
+            elif role == "reporter":
+                pq.unresolved_reporter_names.append(phrase)
             continue
         if len(matches) > 1:
             pq.ambiguous_names.append(

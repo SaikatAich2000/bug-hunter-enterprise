@@ -115,16 +115,16 @@ def _check_can_edit_bug(db: Session, actor: User, bug: Bug) -> Optional[str]:
     """Returns None if OK, otherwise an error string. Cross-org and
     project-membership both enforced — chatbot is not a back door."""
     if bug.project is None or bug.project.org_id != actor.org_id:
-        return "Bug not found."
+        return "Bug not found"
     if not can_edit_bug(db, actor, bug.project):
-        return "You don't have permission to edit that bug."
+        return "You don't have permission to edit that bug"
     return None
 
 
 def _check_can_create_project(actor: User) -> Optional[str]:
     if not can_create_project(actor):
         return ("Only admins or managers can create projects. "
-                "Ask one of them to do it for you.")
+                "Ask one of them to do it for you")
     return None
 
 
@@ -132,7 +132,7 @@ def _check_can_create_bug(actor: User) -> Optional[str]:
     # Per current bug routes: any authenticated user can file a bug.
     # This stays consistent with the REST endpoint POST /api/bugs.
     if not actor.is_active:
-        return "Your account is inactive."
+        return "Your account is inactive"
     return None
 
 
@@ -240,7 +240,7 @@ def _apply_assign(db: Session, plan: ActionPlan, actor: User) -> Response:
         )
     ).all()) if plan.target_user_ids else []
     if not targets:
-        return _error_response("Couldn't find the user(s) to assign.")
+        return _error_response("Couldn't find the user(s) to assign")
 
     before = sorted(a.name for a in bug.assignees)
     new_set = list(bug.assignees) + [t for t in targets
@@ -314,7 +314,7 @@ def _apply_add_comment(db: Session, plan: ActionPlan, actor: User) -> Response:
     # Project-access check on top of org scope — non-member shouldn't
     # be able to post a comment on a project they can't see.
     if not can_access_project(db, actor, bug.project):
-        return _error_response("You don't have access to that bug's project.")
+        return _error_response("You don't have access to that bug's project")
     body = (plan.comment_body or "").strip()
     if not body:
         return _error_response(
@@ -322,7 +322,7 @@ def _apply_add_comment(db: Session, plan: ActionPlan, actor: User) -> Response:
             "*comment on #5: this is fixed in commit abc*"
         )
     if len(body) > 4000:
-        return _error_response("Comment too long — keep it under 4000 chars.")
+        return _error_response("Comment too long — keep it under 4000 chars")
     c = Comment(bug_id=bug.id, author_user_id=actor.id,
                 author_name=actor.name, body=body)
     db.add(c)
@@ -348,7 +348,7 @@ def _apply_create_bug(db: Session, plan: ActionPlan, actor: User) -> Response:
             "*create a bug titled \"Login broken\" in project Apollo*"
         )
     if len(title) > 200:
-        return _error_response("Title too long — keep it under 200 chars.")
+        return _error_response("Title too long — keep it under 200 chars")
 
     # Resolve the project within the actor's org and access set.
     from app.auth import accessible_project_ids
@@ -365,14 +365,14 @@ def _apply_create_bug(db: Session, plan: ActionPlan, actor: User) -> Response:
             select(Project).where(Project.id.in_(pids)).order_by(Project.id)
         )
         if first is None:
-            return _error_response("There are no projects yet. Create one first.")
+            return _error_response("There are no projects yet. Create one first")
         project_id = first.id
     else:
         proj = db.get(Project, project_id)
         if proj is None or proj.org_id != actor.org_id:
-            return _error_response("That project doesn't exist anymore.")
+            return _error_response("That project doesn't exist anymore")
         if project_id not in pids:
-            return _error_response("You don't have access to that project.")
+            return _error_response("You don't have access to that project")
 
     bug = Bug(
         title=title,
@@ -408,9 +408,9 @@ def _apply_create_project(db: Session, plan: ActionPlan, actor: User) -> Respons
         return _error_response(err)
     name = (plan.new_project_name or "").strip()
     if not name:
-        return _error_response("I need a name to create a project.")
+        return _error_response("I need a name to create a project")
     if len(name) > 120:
-        return _error_response("Project name too long — keep it under 120 chars.")
+        return _error_response("Project name too long — keep it under 120 chars")
 
     # Org-scoped uniqueness — two different orgs can each have a
     # "Platform" project. Only collisions inside the same org are blocked.
@@ -461,7 +461,7 @@ def execute_plan(plan: ActionPlan, db: Session, actor: User) -> Response:
     """Run a confirmed plan. Caller is responsible for verifying that the
     plan really came from this user (we still re-check actor.id below)."""
     if plan.actor_user_id != actor.id:
-        return _error_response("That action was staged for a different user.")
+        return _error_response("That action was staged for a different user")
 
     try:
         if plan.kind == "assign":

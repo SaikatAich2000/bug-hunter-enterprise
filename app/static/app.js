@@ -95,11 +95,27 @@ const fileIcon = (ct, name) => {
 // ---------------------------------------------------------------------------
 // API client
 // ---------------------------------------------------------------------------
+// CSRF double-submit: read the `bh_csrf` cookie set by the server on
+// page load and echo it back in the X-CSRF-Token header on any
+// state-changing request. Same-Origin Policy prevents foreign sites
+// from reading the cookie, so they can't forge a matching header.
+function _readCookie(name) {
+  const match = document.cookie.match(new RegExp("(?:^|;\\s*)" + name + "=([^;]+)"));
+  return match ? decodeURIComponent(match[1]) : "";
+}
+
 async function api(path, opts = {}) {
   const headers = { ...(opts.headers || {}) };
   // Don't auto-set Content-Type for FormData (browser sets boundary)
   if (opts.body && !(opts.body instanceof FormData) && !headers["Content-Type"]) {
     headers["Content-Type"] = "application/json";
+  }
+  const method = (opts.method || "GET").toUpperCase();
+  if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS") {
+    const csrf = _readCookie("bh_csrf");
+    if (csrf && !headers["X-CSRF-Token"]) {
+      headers["X-CSRF-Token"] = csrf;
+    }
   }
 
   const res = await fetch(API + path, {
@@ -240,7 +256,7 @@ async function boot() {
     return;
   }
   STATE.currentUser = me;
-
+  applyBranding(me.branding);
   applyRoleVisibility();
   renderAccountCard();
   renderOrgBanner();
@@ -258,6 +274,32 @@ async function boot() {
   // Polls /api/auth/me every 15 s so admin session-revocation kicks the
   // user out within seconds, not only when they next click something.
   scheduleSessionPoll();
+}
+
+// Apply per-organization branding (logo + accent colour) on boot. The
+// SPA's CSS uses --accent and --accent-grad heavily, so a single
+// custom-property override threads the chosen colour through every
+// gradient and chip in the UI.
+function applyBranding(branding) {
+  if (!branding) return;
+  if (branding.accent_color) {
+    const root = document.documentElement;
+    root.style.setProperty("--accent", branding.accent_color);
+    // Derive a complementary darker stop for the existing gradient
+    // recipe. We don't try to be clever — just reuse the same hue but
+    // slightly lighter for the second stop.
+    root.style.setProperty("--accent-2", branding.accent_color);
+    root.style.setProperty(
+      "--accent-grad",
+      `linear-gradient(135deg, ${branding.accent_color}, ${branding.accent_color})`,
+    );
+  }
+  if (branding.logo_data_url) {
+    const imgs = document.querySelectorAll(
+      ".brand img, .auth-logo img, [data-brand-img]"
+    );
+    imgs.forEach(img => { img.src = branding.logo_data_url; });
+  }
 }
 
 function applyRoleVisibility() {
@@ -334,7 +376,7 @@ function scheduleVersionCheck() {
         !STATE.versionDriftWarned
       ) {
         STATE.versionDriftWarned = true;
-        toast("New version available — reload the page when ready.", "info");
+        toast("New version available — reload the page when ready", "info");
       }
     } catch { /* ignore */ }
   }, 5 * 60 * 1000);
@@ -441,9 +483,63 @@ async function refreshStats() {
 }
 
 // ---------------------------------------------------------------------------
+// KPI strip — click-to-filter behaviour. Each tile maps to a status set;
+// clicking the active tile clears it.
+// ---------------------------------------------------------------------------
+const KPI_FILTER_MAP = {
+  total:         [],
+  open:          ["New", "In Progress", "Reopened"],
+  resolved:      ["Resolved"],
+  closed:        ["Closed"],
+  resolve_later: ["Resolve Later"],
+};
+
+function _arraysEqualAsSets(a, b) {
+  if (a.length !== b.length) return false;
+  const sa = new Set(a);
+  for (const x of b) if (!sa.has(x)) return false;
+  return true;
+}
+
+function refreshKpiActiveState() {
+  const cur = STATE.filters.status || [];
+  $$("#kpiStrip .kpi").forEach(btn => {
+    const key = btn.dataset.kpi;
+    const target = KPI_FILTER_MAP[key];
+    if (!target) return;
+    const active = key === "total"
+      ? cur.length === 0
+      : _arraysEqualAsSets(cur, target);
+    btn.classList.toggle("active", active);
+  });
+}
+
+function handleKpiClick(key) {
+  const target = KPI_FILTER_MAP[key];
+  if (!target) return;
+  const cur = STATE.filters.status || [];
+  // Toggle: clicking the active filter clears it back to "all bugs".
+  if (_arraysEqualAsSets(cur, target) && target.length > 0) {
+    STATE.filters.status = [];
+  } else {
+    STATE.filters.status = [...target];
+  }
+  STATE.page = 1;
+  if (STATE.view !== "list") setView("list");
+  refreshMultiSelects();
+  refreshKpiActiveState();
+  refreshBugs();
+}
+
+// ---------------------------------------------------------------------------
 // Bug list
 // ---------------------------------------------------------------------------
 async function refreshBugs() {
+  // Reflect current status filter in the KPI tile highlight.
+  refreshKpiActiveState();
+  // Mirror filter state into the URL so a refresh / shared link
+  // restores the same view.
+  try { syncFiltersToUrl(); } catch {}
   const params = new URLSearchParams();
   params.set("page", String(STATE.page));
   params.set("page_size", String(STATE.pageSize));
@@ -746,6 +842,16 @@ function setView(view) {
   const viewInvitations = document.getElementById("viewInvitations");
   if (viewInvitations) viewInvitations.hidden = view !== "invitations";
   $("#filterBar").hidden = view !== "list";
+  // The bug search, the "+ New Bug" CTA and the KPI strip are bug-only
+  // controls. They make no sense on Audit / Sessions / Invitations, and
+  // showing them there is visual noise. Toggle them in lock-step with
+  // the view.
+  const searchWrap = document.querySelector(".search-wrap");
+  if (searchWrap) searchWrap.style.display = view === "list" ? "" : "none";
+  const newBugBtn = $("#newBugBtn");
+  if (newBugBtn) newBugBtn.style.display = view === "list" ? "" : "none";
+  const kpiStrip = $("#kpiStrip");
+  if (kpiStrip) kpiStrip.style.display = (view === "list" || view === "analytics") ? "" : "none";
   $("#pageTitle").textContent = ({
     list: "All Bugs", analytics: "Analytics",
     audit: "Audit Trail", sessions: "Active Sessions",
@@ -988,7 +1094,7 @@ function renderBugInlineSections(bug) {
             ${atts ? `<div class="comment-attachments"><div class="attachment-grid">${atts}</div></div>` : ""}
           </div>`;
       }).join("")
-    : '<p class="no-content">No comments yet — be the first to add one.</p>';
+    : '<p class="no-content">No comments yet — be the first to add one</p>';
   // The comment form lives in the static HTML (now a <div>, not a
   // <form> — see the long note in index.html for why). Clear any
   // leftover input from a previous bug.
@@ -1361,7 +1467,7 @@ async function handleEditBug(bugId) {
 }
 
 async function handleDeleteBug(bugId) {
-  const ok = await confirmDialog(`Delete bug #${bugId}? This will also delete its comments and attachments. Cannot be undone.`);
+  const ok = await confirmDialog(`Delete bug #${bugId}? This will also delete its comments and attachments. Cannot be undone`);
   if (!ok) return;
   try {
     await api(`/bugs/${bugId}`, { method: "DELETE" });
@@ -1374,7 +1480,7 @@ async function handleDeleteBug(bugId) {
 async function handleDeleteProject(id) {
   const project = STATE.projects.find(p => p.id === id);
   const name = project ? project.name : `#${id}`;
-  const ok = await confirmDialog(`Delete project "${name}"?\nThis only works if it has no bugs.`);
+  const ok = await confirmDialog(`Delete project "${name}"?\nThis only works if it has no bugs`);
   if (!ok) return;
   try {
     await api(`/projects/${id}`, { method: "DELETE" });
@@ -1397,7 +1503,7 @@ async function handleDeleteUser(id) {
   const user = STATE.users.find(u => u.id === id);
   const name = user ? user.name : `#${id}`;
   const ok = await confirmDialog(
-    `Delete user "${name}"?\nThis user will be removed from all bug assignments.\nReports they filed will become "unassigned reporter".`,
+    `Delete user "${name}"?\nThis user will be removed from all bug assignments.\nReports they filed will become "unassigned reporter"`,
   );
   if (!ok) return;
   try {
@@ -1607,11 +1713,11 @@ async function submitEmailChangeRequest(e) {
   const new_email = f.elements.new_email.value.trim();
   const current_password = f.elements.current_password.value;
   if (!new_email || !new_email.includes("@")) {
-    toast("Please enter a valid new email.", "error");
+    toast("Please enter a valid new email", "error");
     return;
   }
   if (!current_password) {
-    toast("Please enter your current password to confirm.", "error");
+    toast("Please enter your current password to confirm", "error");
     return;
   }
   try {
@@ -1625,7 +1731,7 @@ async function submitEmailChangeRequest(e) {
     setTimeout(() => $("#formEmailChangeConfirm").elements.code.focus(), 50);
     // Clear the password field so it isn't sitting around in the DOM.
     f.elements.current_password.value = "";
-    toast("Code sent — check your new email inbox.", "success");
+    toast("Code sent — check your new email inbox", "success");
   } catch (err) {
     toastError(err);
   }
@@ -1635,7 +1741,7 @@ async function submitEmailChangeConfirm(e) {
   e.preventDefault();
   const code = e.target.elements.code.value.trim();
   if (!/^\d{6}$/.test(code)) {
-    toast("Enter the 6-digit code from your email.", "error");
+    toast("Enter the 6-digit code from your email", "error");
     return;
   }
   try {
@@ -1665,7 +1771,7 @@ async function handleRevokeSession(sessionId) {
   const ok = await confirmDialog(
     `Revoke this session for ${who}?\n\n` +
     `That device will be immediately logged out. Other sessions for the ` +
-    `same user are not affected.`,
+    `same user are not affected`,
     { title: "Revoke session", okLabel: "Revoke", danger: true },
   );
   if (!ok) return;
@@ -1918,7 +2024,7 @@ async function refreshAudit() {
   try {
     const rows = await api("/audit?" + params.toString());
     const host = $("#auditList");
-    if (!rows.length) { host.innerHTML = '<p class="no-content">No audit events match.</p>'; return; }
+    if (!rows.length) { host.innerHTML = '<p class="no-content">No audit events match</p>'; return; }
     host.innerHTML = rows.map(r => `
       <div class="audit-row">
         <span class="audit-icon">${activityIcon(r.action)}</span>
@@ -2058,6 +2164,20 @@ function bindGlobalListeners() {
   $("#auditActorFilter").addEventListener("change", refreshAudit);
   $("#auditSearch").addEventListener("input", debounce(refreshAudit, 300));
   $("#auditRefreshBtn").addEventListener("click", refreshAudit);
+  $("#auditClearBtn")?.addEventListener("click", () => {
+    const ent = $("#auditEntityFilter"); if (ent) ent.value = "";
+    const act = $("#auditActorFilter"); if (act) act.value = "";
+    const q = $("#auditSearch"); if (q) q.value = "";
+    refreshAudit();
+  });
+
+  // KPI strip — each tile is a clickable status filter. Event delegation
+  // on the strip so we don't bind 5 separate listeners.
+  $("#kpiStrip")?.addEventListener("click", (e) => {
+    const btn = e.target.closest(".kpi[data-kpi]");
+    if (!btn) return;
+    handleKpiClick(btn.dataset.kpi);
+  });
 
   // Bug table — row click opens the unified modal in edit/view mode;
   // delete button (admin-only) handled separately. The pencil edit
@@ -2228,6 +2348,186 @@ function bindGlobalListeners() {
     e.preventDefault();
     openBugDetail(parseInt(bugId, 10));
   });
+
+  // ── Keyboard shortcuts + command palette ────────────────────────
+  // Power-user affordances. We use document-level keydown with checks
+  // for whether focus is currently in a text input — typing in a
+  // textbox should NEVER trigger a shortcut.
+  document.addEventListener("keydown", (e) => {
+    const tag = e.target?.tagName || "";
+    const inTextInput = ["INPUT", "TEXTAREA", "SELECT"].includes(tag)
+                        || e.target?.isContentEditable;
+    // Cmd+K / Ctrl+K opens the command palette from anywhere.
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+      e.preventDefault();
+      openCommandPalette();
+      return;
+    }
+    if (inTextInput) return;
+    // Single-character shortcuts (only when not in a text input).
+    if (e.key === "/") {
+      e.preventDefault();
+      const search = $("#search");
+      if (search) { setView("list"); search.focus(); }
+    } else if (e.key === "c") {
+      e.preventDefault();
+      openBugForm();
+    } else if (e.key === "g") {
+      // Vim-style "g then X" sequences via a transient flag.
+      STATE._gPending = true;
+      setTimeout(() => { STATE._gPending = false; }, 1000);
+    } else if (STATE._gPending) {
+      STATE._gPending = false;
+      if (e.key === "d") { e.preventDefault(); setView("analytics"); }
+      else if (e.key === "a") { e.preventDefault(); setView("audit"); }
+      else if (e.key === "b") { e.preventDefault(); setView("list"); }
+      else if (e.key === "i") { e.preventDefault(); setView("invitations"); }
+      else if (e.key === "s") { e.preventDefault(); setView("sessions"); }
+    }
+  });
+
+  // ── URL-encoded filter state ────────────────────────────────────
+  // Forward/back navigation should restore the filter state.
+  window.addEventListener("popstate", () => {
+    syncFiltersFromUrl();
+    refreshMultiSelects();
+    refreshBugs();
+  });
+  // Initial load — restore filters from URL if any.
+  syncFiltersFromUrl();
+  refreshMultiSelects();
+}
+
+
+// ---------------------------------------------------------------------------
+// Command palette — Cmd+K / Ctrl+K
+// ---------------------------------------------------------------------------
+function openCommandPalette() {
+  const overlay = document.getElementById("commandPaletteOverlay");
+  if (overlay) {
+    overlay.hidden = false;
+    document.getElementById("cmdPaletteInput")?.focus();
+    return;
+  }
+  // Lazy-build the overlay on first invocation.
+  const div = document.createElement("div");
+  div.id = "commandPaletteOverlay";
+  div.className = "modal";
+  div.innerHTML = `
+    <div class="modal-card sm" style="max-width:560px;">
+      <div class="modal-head" style="padding:14px 18px;">
+        <input id="cmdPaletteInput" type="text" placeholder="Jump to view, find a bug…"
+               style="flex:1; background:transparent; border:0; color:inherit;
+                      font-size:15px; outline:none;" autocomplete="off" />
+        <span class="muted small">Esc to close</span>
+      </div>
+      <div id="cmdPaletteResults" class="modal-body" style="padding:6px 0; max-height:50vh;"></div>
+    </div>`;
+  document.body.appendChild(div);
+  const input = div.querySelector("#cmdPaletteInput");
+  const results = div.querySelector("#cmdPaletteResults");
+  const renderResults = () => {
+    const q = input.value.trim().toLowerCase();
+    const ALL = [
+      { label: "Go to Bugs",          shortcut: "g b", run: () => setView("list") },
+      { label: "Go to Analytics",     shortcut: "g d", run: () => setView("analytics") },
+      { label: "Go to Audit",         shortcut: "g a", run: () => setView("audit") },
+      { label: "Go to Sessions",      shortcut: "g s", run: () => setView("sessions") },
+      { label: "Go to Invitations",   shortcut: "g i", run: () => setView("invitations") },
+      { label: "New bug",             shortcut: "c",   run: () => openBugForm() },
+      { label: "New project",         shortcut: "",    run: () => openProjectForm() },
+      { label: "Toggle theme",        shortcut: "",    run: () => $("#themeBtn")?.click() },
+      { label: "Profile",             shortcut: "",    run: () => $("#profileBtn")?.click() },
+      { label: "Export bugs (CSV)",   shortcut: "",    run: () => { location.href = "/api/bugs/export.csv"; } },
+      { label: "Log out",             shortcut: "",    run: () => $("#logoutBtn")?.click() },
+    ];
+    // Include bugs by ID for direct jump
+    if (/^#?\d+$/.test(q)) {
+      const id = parseInt(q.replace("#",""), 10);
+      ALL.unshift({ label: `Open bug #${id}`, shortcut: "", run: () => openBugDetail(id) });
+    }
+    const filtered = q ? ALL.filter(c => c.label.toLowerCase().includes(q)) : ALL;
+    results.innerHTML = filtered.map((c, i) => `
+      <div class="cmd-row" data-cmd-i="${i}" style="
+        padding:10px 18px; display:flex; align-items:center; gap:12px;
+        cursor:pointer; ${i===0 ? 'background:var(--bg-elev-2);' : ''}">
+        <span style="flex:1;">${escapeHtml(c.label)}</span>
+        ${c.shortcut ? `<kbd style="font-size:11px; color:var(--text-muted);
+          background:var(--bg-elev-2); padding:2px 6px; border-radius:4px;">${escapeHtml(c.shortcut)}</kbd>` : ""}
+      </div>`).join("") || `<div class="muted" style="padding:14px 18px;">No matches</div>`;
+    results.dataset.cmds = JSON.stringify(filtered.map(c => null));  // length marker
+    results._cmds = filtered;
+  };
+  let selectedIdx = 0;
+  const close = () => { div.hidden = true; };
+  // When a palette command runs a navigation, close any open modal
+  // first — otherwise the user lands on the destination view with a
+  // stale modal hiding the content.
+  const runCommand = (cmd) => {
+    close();
+    if (cmd.label.startsWith("Go to ")) {
+      $$(".modal:not([hidden])").forEach(m => { m.hidden = true; });
+    }
+    cmd.run();
+  };
+  input.addEventListener("input", () => { selectedIdx = 0; renderResults(); });
+  input.addEventListener("keydown", (e) => {
+    const cmds = results._cmds || [];
+    if (e.key === "Escape") { close(); }
+    else if (e.key === "ArrowDown") { e.preventDefault(); selectedIdx = (selectedIdx + 1) % Math.max(cmds.length, 1); renderResults(); }
+    else if (e.key === "ArrowUp")   { e.preventDefault(); selectedIdx = (selectedIdx - 1 + cmds.length) % Math.max(cmds.length, 1); renderResults(); }
+    else if (e.key === "Enter") {
+      const cmd = cmds[selectedIdx];
+      if (cmd) runCommand(cmd);
+    }
+  });
+  results.addEventListener("click", (e) => {
+    const row = e.target.closest("[data-cmd-i]");
+    if (!row) return;
+    const idx = parseInt(row.dataset.cmdI, 10);
+    const cmd = (results._cmds || [])[idx];
+    if (cmd) runCommand(cmd);
+  });
+  div.addEventListener("click", (e) => { if (e.target === div) close(); });
+  renderResults();
+  input.focus();
+}
+
+
+// ---------------------------------------------------------------------------
+// URL-encoded filter state
+// ---------------------------------------------------------------------------
+function syncFiltersToUrl() {
+  const params = new URLSearchParams();
+  for (const [k, v] of Object.entries(STATE.filters)) {
+    if (Array.isArray(v)) {
+      for (const item of v) {
+        if (item !== "" && item != null) params.append(k, String(item));
+      }
+    } else if (v !== "" && v != null) {
+      params.set(k, String(v));
+    }
+  }
+  const qs = params.toString();
+  const newUrl = qs ? `${location.pathname}?${qs}` : location.pathname;
+  if (newUrl !== location.pathname + location.search) {
+    history.replaceState(null, "", newUrl);
+  }
+}
+
+function syncFiltersFromUrl() {
+  const params = new URLSearchParams(location.search);
+  const arrayKeys = ["project_id", "status", "priority", "environment", "assignee_id"];
+  for (const k of arrayKeys) {
+    const vals = params.getAll(k);
+    if (vals.length) STATE.filters[k] = vals;
+  }
+  const q = params.get("q");
+  if (q) {
+    STATE.filters.q = q;
+    const search = $("#search");
+    if (search) search.value = q;
+  }
 }
 
 function closeSidebar() {
@@ -2242,5 +2542,13 @@ boot().catch(err => {
   console.error("Boot failed:", err);
   toast("Failed to load: " + err.message, "error");
 });
+
+// PWA: register the service worker. Failure is silent — the SW is
+// optional and only enables offline-capable static caching.
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch(() => {});
+  });
+}
 
 })();

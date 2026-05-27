@@ -480,7 +480,13 @@ def try_understand(message: str, db: Session, actor: User) -> Optional[Response]
     )
 
     # Build a synthetic ParsedQuery so existing handlers work unchanged.
-    ctx = build_context(db)
+    # `actor` is required by every multi-tenant handler — without it the
+    # call would crash with a TypeError, which would be swallowed by the
+    # outer try/except in executor.py and look like the LLM "didn't
+    # understand". (That was the case in the original enterprise build —
+    # the imported handlers all gained `actor` after v4.0 but this caller
+    # wasn't updated.)
+    ctx = build_context(db, actor)
     pq = _nlu.ParsedQuery(raw_message=message)
     filters = parsed.get("filters") or {}
     pq.statuses = [s for s in (filters.get("status") or [])
@@ -497,17 +503,17 @@ def try_understand(message: str, db: Session, actor: User) -> Optional[Response]
     if intent == "help":
         return _handle_help()
     if intent == "stats":
-        return _handle_stats(db)
+        return _handle_stats(db, actor)
     if intent == "recent_activity":
         return _handle_recent_activity(db, pq, actor)
     if intent == "list_users":
-        return _handle_list_users(db, pq)
+        return _handle_list_users(db, pq, actor)
     if intent == "list_projects":
-        return _handle_list_projects(db)
+        return _handle_list_projects(db, actor)
     if intent == "bug_detail" and pq.bug_id is not None:
-        return _handle_bug_detail(db, pq)
+        return _handle_bug_detail(db, pq, actor)
     if intent == "list_bugs":
-        return _handle_list_bugs(db, pq)
+        return _handle_list_bugs(db, pq, actor, ctx)
 
     # If we got an intent we don't recognise, fall back.
     return None

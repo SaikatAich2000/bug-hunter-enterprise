@@ -107,6 +107,18 @@ class Organization(Base):
     slug: Mapped[str] = mapped_column(String(80), nullable=False, unique=True)
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
 
+    # ── Per-org branding (v2.2). All nullable / defaulted so init_db's
+    # column-reconciliation pass can add them to a pre-existing prod DB
+    # without breaking existing rows. ────────────────────────────────
+    # Custom display logo — data URL (image/png|jpeg|svg+xml) at most
+    # ~200 KB. The settings endpoint enforces this; the column just
+    # stores the string.
+    logo_data_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # CSS hex colour overriding the default accent (#6366f1).
+    accent_color: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Outgoing email from-address override. Falls back to settings.EMAIL_FROM.
+    email_from_override: Mapped[str | None] = mapped_column(String(254), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
@@ -147,6 +159,17 @@ class User(Base):
     # with an old session_version no longer validate. This is what makes
     # "I changed my password" actually log out other devices.
     session_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # ── 2FA (v2.2). totp_secret stays NULL until the user enrols; once
+    # confirmed (totp_enabled=true) every subsequent login also requires
+    # the 6-digit TOTP code (or a one-time recovery code, see
+    # TotpRecoveryCode below). All columns are nullable/default-able so
+    # init_db can add them to an existing prod DB without errors. ─────
+    totp_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    totp_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    totp_enrolled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
@@ -504,4 +527,167 @@ class Session(Base):
         Index("idx_sessions_jti", "jti"),
         Index("idx_sessions_user_id", "user_id"),
         Index("idx_sessions_expires_at", "expires_at"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# TotpRecoveryCode (v2.2)
+#
+# One-time backup codes a 2FA-enrolled user can use instead of the TOTP
+# app — for the case "phone lost, lock-out incoming." We hash each code
+# at creation; only the hash is stored. Codes are issued in bulk
+# (default 10) at enrolment time; the plaintext is shown to the user
+# ONCE on a "save these somewhere safe" screen.
+# ---------------------------------------------------------------------------
+class TotpRecoveryCode(Base):
+    __tablename__ = "totp_recovery_codes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    code_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("idx_trc_user", "user_id"),
+        Index("idx_trc_hash", "code_hash"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# SavedView (v2.2)
+#
+# A named filter set the user (or org) wants to come back to: "My open
+# critical bugs in PROD". Saved views render as buttons above the bug
+# list. `shared_with_org=True` makes the view visible to everyone in
+# the org (admins/managers use this for team queues); otherwise it's
+# per-user.
+#
+# The `filters_json` blob is a small JSON object mirroring the SPA's
+# STATE.filters shape (status: [], priority: [], etc.). Free-text `q`
+# lives in there too.
+# ---------------------------------------------------------------------------
+class SavedView(Base):
+    __tablename__ = "saved_views"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    owner_user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    filters_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    shared_with_org: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        Index("idx_views_org", "org_id"),
+        Index("idx_views_owner", "owner_user_id"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Webhook (v2.2)
+#
+# An outbound HTTP destination that receives POSTed JSON whenever a
+# subscribed event happens in the org (e.g. bug.created, bug.updated,
+# bug.deleted, comment.added). Body is signed with HMAC-SHA256 using
+# the `secret` column so listeners can verify authenticity.
+#
+# We deliver from a background task at request commit time; failures
+# bump `consecutive_failures` and after 10 in a row the webhook is
+# auto-suspended (`is_active=false`) so a misconfigured listener can't
+# keep generating noise indefinitely.
+# ---------------------------------------------------------------------------
+class Webhook(Base):
+    __tablename__ = "webhooks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    url: Mapped[str] = mapped_column(String(500), nullable=False)
+    secret: Mapped[str] = mapped_column(String(80), nullable=False)
+    # Comma-separated list of event names this hook subscribes to. "*"
+    # subscribes to everything.
+    events: Mapped[str] = mapped_column(String(500), nullable=False, default="*")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        Index("idx_webhooks_org", "org_id"),
+        Index("idx_webhooks_active", "is_active"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# CustomField + BugCustomValue (v2.2)
+#
+# Per-project user-defined fields on bugs. A CustomField row defines
+# "name", "field_type" (text|number|date|select), "options" (CSV for
+# select), and whether the field is required. BugCustomValue stores the
+# answer for one (bug, field) pair. Decoupling the two tables means we
+# can update field definitions without touching values, and orphaned
+# values are tolerated (treated as "value for a field that was deleted").
+# ---------------------------------------------------------------------------
+class CustomField(Base):
+    __tablename__ = "custom_fields"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    # "text" | "number" | "date" | "select"
+    field_type: Mapped[str] = mapped_column(String(20), nullable=False, default="text")
+    # For select fields: pipe-separated options. e.g. "Low|Medium|High".
+    options: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    is_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "name", name="uq_cf_project_name"),
+        Index("idx_cf_project", "project_id"),
+    )
+
+
+class BugCustomValue(Base):
+    __tablename__ = "bug_custom_values"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bug_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("bugs.id", ondelete="CASCADE"), nullable=False
+    )
+    field_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("custom_fields.id", ondelete="CASCADE"), nullable=False
+    )
+    value: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("bug_id", "field_id", name="uq_bcv_bug_field"),
+        Index("idx_bcv_bug", "bug_id"),
+        Index("idx_bcv_field", "field_id"),
     )

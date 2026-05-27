@@ -22,11 +22,11 @@
       <form id="loginForm" class="auth-form" novalidate>
         <div id="loginAlert" class="auth-alert" hidden></div>
         <label class="field">
-          <span>Email</span>
+          <span>Email <em>*</em></span>
           <input name="email" type="email" required autocomplete="username" autofocus />
         </label>
         <label class="field">
-          <span>Password</span>
+          <span>Password <em>*</em></span>
           <input name="password" type="password" required autocomplete="current-password" />
         </label>
         <button type="submit" class="btn primary auth-submit" id="loginSubmit">Sign in</button>
@@ -39,12 +39,28 @@
         </div>
       </form>
 
+      <!-- 2FA verification form — shown after password OK if the user
+           has TOTP enrolled. login.js toggles this in/out. -->
+      <form id="totpForm" class="auth-form" novalidate hidden>
+        <div id="totpAlert" class="auth-alert" hidden></div>
+        <p class="auth-help">Open your authenticator app and enter the 6-digit code. You can also paste a one-time recovery code if you've lost your device</p>
+        <label class="field">
+          <span>Code <em>*</em></span>
+          <input name="code" type="text" inputmode="numeric" autocomplete="one-time-code"
+                 maxlength="20" pattern="[A-Za-z0-9\\-]{6,}" required autofocus />
+        </label>
+        <button type="submit" class="btn primary auth-submit">Verify</button>
+        <div class="auth-links">
+          <a href="#" id="totpBack">← Use a different account</a>
+        </div>
+      </form>
+
       <!-- Forgot password form (toggled) -->
       <form id="forgotForm" class="auth-form" novalidate hidden>
         <div id="forgotAlert" class="auth-alert" hidden></div>
-        <p class="auth-help">Enter your email and we'll send a reset link if an account exists.</p>
+        <p class="auth-help">Enter the email tied to your Bug Hunter account and we'll send a reset link</p>
         <label class="field">
-          <span>Email</span>
+          <span>Email <em>*</em></span>
           <input name="email" type="email" required autocomplete="username" />
         </label>
         <button type="submit" class="btn primary auth-submit">Send reset link</button>

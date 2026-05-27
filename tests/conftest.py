@@ -34,6 +34,12 @@ def app_env(db_path, monkeypatch):
     monkeypatch.setenv("SESSION_SECRET", "test_secret_for_tests_only")
     monkeypatch.setenv("BCRYPT_ROUNDS", "4")
     monkeypatch.setenv("ALLOW_PUBLIC_SIGNUP", "true")
+    # Most tests exercise endpoints directly without simulating the
+    # SPA's cookie-read-then-header-echo dance, so the CSRF
+    # double-submit check would reject every POST/PUT. Disable it for
+    # the test suite — the CSRF logic itself is covered by dedicated
+    # tests that flip this back on explicitly.
+    monkeypatch.setenv("CSRF_PROTECTION", "false")
     # Wipe module cache so the engine picks up the new env vars.
     for mod in list(sys.modules):
         if mod == "app" or mod.startswith("app."):

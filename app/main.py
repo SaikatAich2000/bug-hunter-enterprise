@@ -21,12 +21,22 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.auth import COOKIE_NAME, parse_session_token
 from app.config import get_settings
+from app.csrf import CSRFMiddleware
 from app.database import SessionLocal, init_db
-from app.models import Session as SessionRow
+from app.models import Activity, Session as SessionRow
+from app.observability import (
+    ObservabilityMiddleware, configure_logging, render_prometheus,
+)
 from app.chatbot.router import router as chatbot_router
 from app.routes import (
     audit, auth, bugs, invitations, memberships, organizations,
     projects, sessions, stats, users,
+    webhooks as webhooks_route,
+    saved_views as saved_views_route,
+    branding as branding_route,
+    custom_fields as custom_fields_route,
+    dsar as dsar_route,
+    totp as totp_route,
 )
 from app.schemas import (
     ALLOWED_ENVIRONMENTS,
@@ -34,8 +44,12 @@ from app.schemas import (
     ALLOWED_STATUSES,
 )
 
+# Configure logging EARLY so subsequent imports use the right format.
+configure_logging(
+    json_logging=get_settings().JSON_LOGGING,
+    level=get_settings().LOG_LEVEL,
+)
 logger = logging.getLogger("bug_hunter")
-logging.basicConfig(level=get_settings().LOG_LEVEL)
 
 
 # ---------------------------------------------------------------------------
@@ -59,20 +73,64 @@ def _compute_asset_version(static_dir: Path) -> str:
     return h.hexdigest()[:12]
 
 
+async def _audit_retention_loop(retention_days: int):
+    """Background sweep that deletes activity_log rows older than the
+    configured retention window. Runs on startup, then every 24h.
+
+    We swallow exceptions so a transient DB issue doesn't kill the
+    sweep loop — operators will see retries via the access log.
+    """
+    import asyncio
+    from datetime import timedelta
+
+    while True:
+        try:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+            db = SessionLocal()
+            try:
+                deleted = db.execute(
+                    Activity.__table__.delete().where(Activity.created_at < cutoff)
+                ).rowcount
+                db.commit()
+                if deleted:
+                    logger.info(
+                        "audit retention: purged %d rows older than %d days",
+                        deleted, retention_days,
+                    )
+            finally:
+                db.close()
+        except Exception:
+            logger.exception("audit retention sweep failed")
+        await asyncio.sleep(24 * 3600)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import asyncio
     init_db()
 
-    if not get_settings().SESSION_SECRET:
+    settings = get_settings()
+    if not settings.SESSION_SECRET:
         logger.warning(
             "SESSION_SECRET is not set. Using a random per-process fallback. "
             "Set SESSION_SECRET in your environment for stable sessions across "
             "restarts and multi-worker deployments."
         )
 
-    logger.info("Bug Hunter v4 started. asset_version=%s", app.state.asset_version)
-    yield
-    logger.info("Bug Hunter shutting down.")
+    # Spawn the audit-retention sweep if enabled.
+    retention_task = None
+    if settings.AUDIT_RETENTION_DAYS > 0:
+        retention_task = asyncio.create_task(
+            _audit_retention_loop(settings.AUDIT_RETENTION_DAYS)
+        )
+
+    logger.info("Bug Hunter v2.2 started. asset_version=%s", app.state.asset_version)
+    try:
+        yield
+    finally:
+        if retention_task is not None:
+            retention_task.cancel()
+        logger.info("Bug Hunter shutting down.")
 
 
 settings = get_settings()
@@ -221,6 +279,18 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(RateLimitMiddleware)
+# CSRF defence-in-depth (double-submit cookie). Installed after rate-limit
+# so unauthenticated abuse is throttled FIRST and our 403 doesn't even
+# get evaluated on a flooded path.
+app.add_middleware(CSRFMiddleware)
+# Observability is the OUTERMOST middleware so it sees the request from
+# the moment it arrives until the moment the response leaves; that way
+# the access log + /metrics histogram includes time spent in every other
+# middleware below it (rate limit, CSRF, CORS, ...).
+app.add_middleware(
+    ObservabilityMiddleware,
+    json_logging=settings.JSON_LOGGING,
+)
 
 
 app.mount("/static", StaticFiles(directory=settings.STATIC_DIR), name="static")
@@ -296,6 +366,22 @@ def reset_page() -> HTMLResponse:
     return _serve_html("reset.html")
 
 
+# Serve the PWA service worker from the root path so its scope can
+# cover the entire origin. (Service workers are restricted to the
+# scope at-or-below the URL they're served from; /static/sw.js would
+# only control /static/* without an explicit Service-Worker-Allowed
+# header, which static-file mounts don't easily emit.)
+@app.get("/sw.js", include_in_schema=False)
+def service_worker() -> Response:
+    body = (settings.STATIC_DIR / "sw.js").read_text(encoding="utf-8")
+    return Response(
+        content=body,
+        media_type="application/javascript",
+        headers={"Service-Worker-Allowed": "/",
+                 "Cache-Control": "no-cache"},
+    )
+
+
 # ---------------------------------------------------------------------------
 # Meta endpoints
 # ---------------------------------------------------------------------------
@@ -320,16 +406,42 @@ def meta() -> dict[str, object]:
 
 # Routers
 app.include_router(auth.router)
+app.include_router(totp_route.router)
 app.include_router(organizations.router)
+app.include_router(branding_route.router)
 app.include_router(invitations.router)
 app.include_router(users.router)
 app.include_router(projects.router)
+app.include_router(custom_fields_route.router)
 app.include_router(memberships.router)
 app.include_router(bugs.router)
 app.include_router(stats.router)
 app.include_router(audit.router)
 app.include_router(sessions.router)
+app.include_router(webhooks_route.router)
+app.include_router(saved_views_route.router)
+app.include_router(dsar_route.router)
 app.include_router(chatbot_router)
+
+
+# ---------------------------------------------------------------------------
+# /api/metrics — Prometheus text exposition. Off by default so anonymous
+# scrapers can't fingerprint deployments; enable via METRICS_ENABLED.
+# Optionally guarded by a shared bearer token (METRICS_TOKEN).
+# ---------------------------------------------------------------------------
+@app.get("/api/metrics", include_in_schema=False)
+def metrics_endpoint(request: Request) -> Response:
+    s = get_settings()
+    if not s.METRICS_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+    if s.METRICS_TOKEN:
+        auth = request.headers.get("authorization", "")
+        if not auth.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="Missing bearer token")
+        if auth[7:].strip() != s.METRICS_TOKEN:
+            raise HTTPException(status_code=403, detail="Invalid metrics token")
+    text = render_prometheus()
+    return Response(content=text, media_type="text/plain; version=0.0.4")
 
 
 @app.exception_handler(HTTPException)

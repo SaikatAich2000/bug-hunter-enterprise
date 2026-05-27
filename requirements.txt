@@ -14,6 +14,14 @@ itsdangerous==2.2.0
 # 1-vCPU / 2 GB target box. It powers the "export to excel" replies.
 openpyxl==3.1.5
 
+# --- Enterprise feature dependencies (v2.2 expansion) ---
+# pyotp: RFC 6238 TOTP for login-time 2FA. Pure-Python, ~50 KB.
+pyotp==2.9.0
+# qrcode in pure-Python mode (no PIL required) — we render QR codes as
+# SVG, served straight to the browser, so 2FA enrollment never needs a
+# bitmap toolchain on the deployment host.
+qrcode==7.4.2
+
 # --- Sleuth: optional local LLM layer ---
 # Uncomment to enable Layer 3 (local llama.cpp inference). Requires a
 # GGUF model file at models/sleuth.gguf. See models/README.md for

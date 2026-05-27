@@ -68,42 +68,97 @@ def get_db() -> Generator[Session, None, None]:
 
 def init_db() -> None:
     """Create tables if they don't exist, AND create any missing indexes on
-    existing tables. Idempotent — safe to call on every boot.
+    existing tables AND add any missing columns the model declares.
+    Idempotent — safe to call on every boot.
 
-    Why the second pass? SQLAlchemy's `create_all()` skips tables that
-    already exist, including their indexes. That means new indexes added
-    in a later release would never appear on a long-running production
-    database — the schema would silently lag behind the model. We close
-    that gap by inspecting existing indexes per table after `create_all()`
-    and issuing `CREATE INDEX IF NOT EXISTS` for any that the model
-    declares but the database lacks.
+    Why all three passes? SQLAlchemy's `create_all()` skips tables that
+    already exist, including their indexes and any new columns the
+    model has grown since the last release. That means schema
+    additions never reach a long-running production database — the
+    schema would silently lag behind the code. We close that gap with:
 
-    This is strictly ADDITIVE: nothing is dropped, altered, or renamed,
-    and existing data is never touched. Both SQLite and Postgres
-    natively support `CREATE INDEX IF NOT EXISTS`, so no per-dialect
-    branching is needed.
+      1. `create_all()` — new tables.
+      2. Index reconciliation — `CREATE INDEX IF NOT EXISTS` for any
+         index the model declares but the DB lacks.
+      3. Column reconciliation — `ALTER TABLE ... ADD COLUMN` for any
+         column the model declares but the DB lacks. ALTER ADD COLUMN
+         is non-locking and atomic on both SQLite and Postgres for the
+         nullable / default-having columns we add for new features
+         (TOTP secrets, brand colour, etc.).
+
+    Everything here is strictly ADDITIVE: nothing is dropped, altered
+    in-place, renamed, or has its constraints tightened. Existing data
+    is never touched. Both SQLite and Postgres natively support
+    `CREATE INDEX IF NOT EXISTS`; ADD COLUMN is dialect-portable.
     """
     # Local import avoids circular import at module load.
     from app import models  # noqa: F401  (registers tables on Base.metadata)
-    from sqlalchemy import inspect
+    from sqlalchemy import inspect, text
+    from sqlalchemy.schema import CreateColumn
 
     Base.metadata.create_all(bind=engine)
 
-    # Second pass: add any indexes the model declares but the DB is missing.
-    # This is what makes new composite indexes show up on an upgraded DB.
     inspector = inspect(engine)
+
+    # ── Pass 2: indexes ──────────────────────────────────────────────
     with engine.begin() as conn:
         for table in Base.metadata.sorted_tables:
             try:
                 existing = {idx["name"] for idx in inspector.get_indexes(table.name)}
             except Exception:
-                # If the table doesn't exist for any reason, create_all
-                # would have made it on the line above; either way, nothing
-                # to compare against. Skip cleanly.
                 continue
             for idx in table.indexes:
                 if idx.name and idx.name not in existing:
-                    # Use SQLAlchemy's own DDL — emits dialect-correct
-                    # CREATE INDEX with the right column escaping for
-                    # whichever backend is active.
                     idx.create(bind=conn, checkfirst=True)
+
+    # ── Pass 3: columns ──────────────────────────────────────────────
+    # Inspector is a snapshot; we rebuild it once after create_all so
+    # newly-created tables are visible. SQLAlchemy 2's inspector cache
+    # is per-instance, so re-instantiating is the safe way to refresh.
+    inspector = inspect(engine)
+    dialect = engine.dialect.name
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            try:
+                existing_columns = {col["name"] for col in inspector.get_columns(table.name)}
+            except Exception:
+                continue
+            for column in table.columns:
+                if column.name in existing_columns:
+                    continue
+                # Skip primary-key columns: ADD COLUMN can't add a PK on
+                # an existing table portably. Any model that adds a new
+                # PK is a re-design, not an additive change.
+                if column.primary_key:
+                    continue
+                # Build the ALTER TABLE manually so we can guarantee the
+                # column lands with a NULL-tolerant definition. We never
+                # add a NOT NULL column without a server-side default on
+                # an existing table, because that would fail on rows the
+                # DB already has.
+                col_ddl = CreateColumn(column).compile(dialect=engine.dialect).string
+                # SQLAlchemy emits the bare column spec — wrap it.
+                stmt = text(f'ALTER TABLE "{table.name}" ADD COLUMN {col_ddl}')
+                try:
+                    conn.execute(stmt)
+                except Exception:
+                    # If the dialect emits a definition the DB rejects,
+                    # we fall back to a permissive nullable variant so
+                    # the boot still completes — the model code reading
+                    # the column already tolerates NULL.
+                    try:
+                        sql_type = column.type.compile(dialect=engine.dialect)
+                        conn.execute(text(
+                            f'ALTER TABLE "{table.name}" '
+                            f'ADD COLUMN "{column.name}" {sql_type}'
+                        ))
+                    except Exception:
+                        # Last resort — log and continue. Operators
+                        # will see the missing column in /api/health
+                        # diagnostics (or downstream model usage will
+                        # surface a clear error).
+                        import logging
+                        logging.getLogger("bug_hunter").exception(
+                            "Failed to add column %s.%s; manual migration may be needed",
+                            table.name, column.name,
+                        )

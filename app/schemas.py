@@ -408,6 +408,14 @@ class EmailChangeConfirmIn(BaseModel):
         return v
 
 
+class BrandingInfo(BaseModel):
+    """Lightweight subset of /api/branding that's safe to ship to any
+    user (no settings / secrets). Lets the SPA theme itself on boot."""
+    model_config = ConfigDict(from_attributes=True)
+    logo_data_url: str | None = None
+    accent_color: str | None = None
+
+
 class MeOut(BaseModel):
     """Returned to the frontend after login or on refresh. Now includes
     org info so the SPA knows which tenant the user is in without
@@ -421,6 +429,9 @@ class MeOut(BaseModel):
     org_id: int
     organization_name: str
     organization_slug: str
+    # v2.2 additions — both defaulted so older callers don't break.
+    totp_enabled: bool = False
+    branding: BrandingInfo | None = None
 
 
 class UserBrief(BaseModel):

@@ -85,6 +85,13 @@ def _to_me(user: User, org: Organization) -> dict:
         "org_id": org.id,
         "organization_name": org.name,
         "organization_slug": org.slug,
+        # v2.2 additions — let the SPA paint branding on first load and
+        # know whether to surface the 2FA banner.
+        "totp_enabled": bool(getattr(user, "totp_enabled", False)),
+        "branding": {
+            "logo_data_url": getattr(org, "logo_data_url", None),
+            "accent_color": getattr(org, "accent_color", None),
+        },
     }
 
 
@@ -190,41 +197,128 @@ def signup(
 
 
 # ---------------------------------------------------------------------------
-# Login
+# Login (step 1: password — if 2FA is on, returns requires_totp instead
+# of issuing a session cookie)
 # ---------------------------------------------------------------------------
-@router.post("/login", response_model=MeOut)
+def _issue_session(
+    db: Session, user: User, org: Organization,
+    request: Request, response: Response,
+) -> dict:
+    """Helper shared by both single-step login and the second
+    (TOTP / recovery-code) step. Caller is responsible for verifying
+    credentials BEFORE calling this."""
+    settings = get_settings()
+    jti = new_jti()
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=settings.SESSION_TTL_SECONDS)
+    db.add(SessionRow(
+        user_id=user.id, jti=jti,
+        user_agent=(request.headers.get("user-agent") or "")[:400],
+        ip_address=_client_ip(request),
+        expires_at=expires_at,
+    ))
+    set_session_cookie(response, user, jti=jti)
+    _audit(db, user.org_id, user, "login", f"{user.email} logged in")
+    db.commit()
+    from app.observability import record_event
+    record_event("login_success")
+    return _to_me(user, org)
+
+
+@router.post("/login")
 def login(
     payload: LoginIn, request: Request, response: Response,
     db: Session = Depends(get_db),
-) -> dict:
+):
     user = db.scalar(select(User).where(User.email == payload.email))
     if user is None or not verify_password(payload.password, user.password_hash):
+        from app.observability import record_event
+        record_event("login_failure")
         raise HTTPException(status_code=401, detail="Invalid email or password")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account is disabled")
 
     org = db.get(Organization, user.org_id)
     if org is None:
-        # Defensive: an active user must have an org. Tampered data — log
-        # and reject the login rather than panic.
         logger.error("User %d has no organization (org_id=%s)", user.id, user.org_id)
         raise HTTPException(status_code=500, detail="Account misconfigured. Contact support.")
 
+    # 2FA gate. If enabled, password-only response carries a short-
+    # lived pending token that the next step (POST /login/totp) trades
+    # for a real session.
     settings = get_settings()
-    jti = new_jti()
-    expires_at = datetime.now(timezone.utc) + timedelta(seconds=settings.SESSION_TTL_SECONDS)
-    db.add(SessionRow(
-        user_id=user.id,
-        jti=jti,
-        user_agent=(request.headers.get("user-agent") or "")[:400],
-        ip_address=_client_ip(request),
-        expires_at=expires_at,
-    ))
+    if settings.TOTP_ENABLED and user.totp_enabled and user.totp_secret:
+        from app.totp import make_pending_token
+        token = make_pending_token(user.id)
+        _audit(db, user.org_id, user, "login_password_ok_awaiting_2fa",
+               f"{user.email} passed password, awaiting 2FA")
+        db.commit()
+        return {"requires_totp": True, "pending_token": token}
 
-    set_session_cookie(response, user, jti=jti)
-    _audit(db, user.org_id, user, "login", f"{user.email} logged in")
+    return _issue_session(db, user, org, request, response)
+
+
+class LoginTotpIn(LoginIn.__mro__[1]):  # type: ignore[misc]
+    pass
+
+
+from pydantic import BaseModel as _BM, Field as _F  # noqa: E402
+
+
+class LoginTotpStepIn(_BM):
+    pending_token: str = _F(..., min_length=1, max_length=400)
+    code: str = _F(..., min_length=6, max_length=20)
+
+
+@router.post("/login/totp")
+def login_totp(
+    payload: LoginTotpStepIn, request: Request, response: Response,
+    db: Session = Depends(get_db),
+):
+    """Step 2 of login when the user has 2FA on. Accepts either a
+    6-digit TOTP code or a 11-char recovery code."""
+    from app.totp import parse_pending_token, verify_code, hash_recovery_code
+    from app.models import TotpRecoveryCode
+
+    user_id = parse_pending_token(payload.pending_token)
+    if user_id is None:
+        raise HTTPException(status_code=400, detail="Login session expired. Sign in again.")
+    user = db.get(User, user_id)
+    if user is None or not user.is_active or not user.totp_enabled or not user.totp_secret:
+        raise HTTPException(status_code=400, detail="Login session invalid. Sign in again.")
+
+    org = db.get(Organization, user.org_id)
+    if org is None:
+        raise HTTPException(status_code=500, detail="Account misconfigured.")
+
+    code = payload.code.strip().upper()
+    used_recovery = False
+    if verify_code(user.totp_secret, code):
+        pass  # success via TOTP app
+    else:
+        # Try recovery codes — single-use, hashed lookup.
+        h = hash_recovery_code(code)
+        rc = db.scalar(
+            select(TotpRecoveryCode).where(
+                TotpRecoveryCode.user_id == user.id,
+                TotpRecoveryCode.code_hash == h,
+                TotpRecoveryCode.used_at.is_(None),
+            )
+        )
+        if rc is None:
+            from app.observability import record_event
+            record_event("login_totp_failure")
+            raise HTTPException(status_code=400, detail="Invalid code. Try again or use a recovery code.")
+        rc.used_at = datetime.now(timezone.utc)
+        used_recovery = True
+
+    if used_recovery:
+        _audit(db, user.org_id, user, "login_recovery_code_used",
+               f"{user.email} signed in with a one-time recovery code")
+    else:
+        _audit(db, user.org_id, user, "login_totp_ok",
+               f"{user.email} completed 2FA verification")
     db.commit()
-    return _to_me(user, org)
+    return _issue_session(db, user, org, request, response)
 
 
 # ---------------------------------------------------------------------------
@@ -310,24 +404,52 @@ def forgot_password(
     background: BackgroundTasks,
     db: Session = Depends(get_db),
 ) -> Response:
-    user = db.scalar(select(User).where(User.email == payload.email))
-    if user is not None and user.is_active:
-        raw_token, token_hash = generate_reset_token()
-        prt = PasswordResetToken(
-            user_id=user.id,
-            token_hash=token_hash,
-            expires_at=datetime.now(timezone.utc) + PASSWORD_RESET_TTL,
-        )
-        db.add(prt)
-        _audit(
-            db, user.org_id, None, "password_reset_requested",
-            f"Password reset requested for {user.email}",
-        )
-        db.commit()
+    """Issue a password-reset email.
 
-        base = get_settings().APP_BASE_URL.rstrip("/")
-        reset_url = f"{base}/reset.html?token={raw_token}"
-        background.add_task(notify_password_reset, user.email, user.name, reset_url)
+    Product decision: this endpoint validates the email against the DB
+    before sending. If no account matches we return 404 so the user
+    immediately knows they typed the wrong address instead of waiting
+    for an email that will never arrive.
+
+    Trade-off: this allows account enumeration. The product owner
+    accepted that risk in exchange for friendlier UX. Login is still
+    protected by strong passwords + session revocation, and every reset
+    attempt (success or miss) is captured in the audit log."""
+    user = db.scalar(select(User).where(User.email == payload.email))
+    if user is None or not user.is_active:
+        if user is not None:
+            _audit(
+                db, user.org_id, None, "password_reset_no_account",
+                f"Password reset attempted for inactive email: {payload.email}",
+            )
+            db.commit()
+        # Enterprise default (ALLOW_ACCOUNT_ENUMERATION=false):
+        # respond 204 regardless so the endpoint can't be used to
+        # probe which emails have accounts. Set
+        # ALLOW_ACCOUNT_ENUMERATION=true if you prefer the friendlier
+        # "we couldn't find that email" message (consumer-app UX).
+        if not get_settings().ALLOW_ACCOUNT_ENUMERATION:
+            return Response(status_code=204)
+        raise HTTPException(
+            status_code=404,
+            detail="We couldn't find an account with that email. Check the address or contact an administrator",
+        )
+    raw_token, token_hash = generate_reset_token()
+    prt = PasswordResetToken(
+        user_id=user.id,
+        token_hash=token_hash,
+        expires_at=datetime.now(timezone.utc) + PASSWORD_RESET_TTL,
+    )
+    db.add(prt)
+    _audit(
+        db, user.org_id, None, "password_reset_requested",
+        f"Password reset requested for {user.email}",
+    )
+    db.commit()
+
+    base = get_settings().APP_BASE_URL.rstrip("/")
+    reset_url = f"{base}/reset.html?token={raw_token}"
+    background.add_task(notify_password_reset, user.email, user.name, reset_url)
     return Response(status_code=204)
 
 
