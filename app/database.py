@@ -78,13 +78,17 @@ def init_db() -> None:
     schema would silently lag behind the code. We close that gap with:
 
       1. `create_all()` — new tables.
-      2. Index reconciliation — `CREATE INDEX IF NOT EXISTS` for any
-         index the model declares but the DB lacks.
-      3. Column reconciliation — `ALTER TABLE ... ADD COLUMN` for any
+      2. Column reconciliation — `ALTER TABLE ... ADD COLUMN` for any
          column the model declares but the DB lacks. ALTER ADD COLUMN
          is non-locking and atomic on both SQLite and Postgres for the
          nullable / default-having columns we add for new features
          (TOTP secrets, brand colour, etc.).
+      3. Index reconciliation — `CREATE INDEX IF NOT EXISTS` for any
+         index the model declares but the DB lacks. This runs AFTER
+         the column pass because new indexes can target new columns
+         (e.g. v2.4 adds idx_bugs_event_id on the brand-new
+         bugs.event_id column) — running indexes first would fail with
+         "column does not exist" on long-running production DBs.
 
     Everything here is strictly ADDITIVE: nothing is dropped, altered
     in-place, renamed, or has its constraints tightened. Existing data
@@ -98,25 +102,11 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
 
+    # ── Pass 2: columns ──────────────────────────────────────────────
+    # Must run before the index pass so any new indexes that target a
+    # brand-new column (e.g. idx_bugs_event_id → bugs.event_id) see the
+    # column when CREATE INDEX runs.
     inspector = inspect(engine)
-
-    # ── Pass 2: indexes ──────────────────────────────────────────────
-    with engine.begin() as conn:
-        for table in Base.metadata.sorted_tables:
-            try:
-                existing = {idx["name"] for idx in inspector.get_indexes(table.name)}
-            except Exception:
-                continue
-            for idx in table.indexes:
-                if idx.name and idx.name not in existing:
-                    idx.create(bind=conn, checkfirst=True)
-
-    # ── Pass 3: columns ──────────────────────────────────────────────
-    # Inspector is a snapshot; we rebuild it once after create_all so
-    # newly-created tables are visible. SQLAlchemy 2's inspector cache
-    # is per-instance, so re-instantiating is the safe way to refresh.
-    inspector = inspect(engine)
-    dialect = engine.dialect.name
     with engine.begin() as conn:
         for table in Base.metadata.sorted_tables:
             try:
@@ -162,3 +152,43 @@ def init_db() -> None:
                             "Failed to add column %s.%s; manual migration may be needed",
                             table.name, column.name,
                         )
+
+    # ── Pass 3: indexes ──────────────────────────────────────────────
+    # Re-inspect so we see columns we just added (Pass 2) — otherwise
+    # the "all index columns exist" guard below would skip indexes that
+    # target the column we literally just created.
+    inspector = inspect(engine)
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            try:
+                existing = {idx["name"] for idx in inspector.get_indexes(table.name)}
+            except Exception:
+                continue
+            try:
+                table_cols = {col["name"] for col in inspector.get_columns(table.name)}
+            except Exception:
+                table_cols = set()
+            for idx in table.indexes:
+                if not idx.name or idx.name in existing:
+                    continue
+                # Defensive guard: only create an index when every column
+                # it references actually exists in the live table. If the
+                # column pass above failed for any reason, we'd rather
+                # log-and-skip than crash startup and leave the service
+                # down.
+                idx_cols = {c.name for c in idx.columns}
+                if table_cols and not idx_cols.issubset(table_cols):
+                    import logging
+                    logging.getLogger("bug_hunter").warning(
+                        "Skipping index %s on %s: missing columns %s",
+                        idx.name, table.name, sorted(idx_cols - table_cols),
+                    )
+                    continue
+                try:
+                    idx.create(bind=conn, checkfirst=True)
+                except Exception:
+                    import logging
+                    logging.getLogger("bug_hunter").exception(
+                        "Failed to create index %s on %s; manual migration may be needed",
+                        idx.name, table.name,
+                    )
