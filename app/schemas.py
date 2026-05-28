@@ -18,6 +18,9 @@ ALLOWED_STATUSES = [
 EXCLUDED_FROM_TOTAL_STATUSES = ["Not a Bug"]
 ALLOWED_PRIORITIES = ["Low", "Medium", "High", "Critical"]
 ALLOWED_ENVIRONMENTS = ["DEV", "UAT", "PROD"]
+# v2.4: three work-item flavours sharing one numbering sequence.
+ALLOWED_ITEM_TYPES = ["Bug", "Requirement", "Task"]
+DEFAULT_ITEM_TYPE = "Bug"
 ALLOWED_ROLES = ["admin", "manager", "member"]
 ALLOWED_PROJECT_ROLES = ["lead", "member"]
 
@@ -538,6 +541,9 @@ class BugCreate(BaseModel):
     priority: str = Field(default="Medium")
     environment: str = Field(default="DEV")
     due_date: Optional[str] = None
+    # v2.4: type + optional event container.
+    item_type: str = Field(default=DEFAULT_ITEM_TYPE)
+    event_id: Optional[int] = None
 
     @field_validator("title")
     @classmethod
@@ -548,6 +554,11 @@ class BugCreate(BaseModel):
     @classmethod
     def _desc(cls, v: str) -> str:
         return v.strip() if isinstance(v, str) else v
+
+    @field_validator("item_type")
+    @classmethod
+    def _item_type(cls, v: str) -> str:
+        return _normalize_choice(v, ALLOWED_ITEM_TYPES, "item_type")
 
     @field_validator("status")
     @classmethod
@@ -595,6 +606,10 @@ class BugUpdate(BaseModel):
     priority: Optional[str] = None
     environment: Optional[str] = None
     due_date: Optional[str] = None
+    # v2.4: editable type + event link. event_id can be set to null to
+    # detach the item from its event.
+    item_type: Optional[str] = None
+    event_id: Optional[int] = None
 
     @field_validator("title")
     @classmethod
@@ -602,6 +617,11 @@ class BugUpdate(BaseModel):
         if v is None:
             return None
         return _strip_and_check_min_length(v, MIN_TITLE_LENGTH, "Title")
+
+    @field_validator("item_type")
+    @classmethod
+    def _item_type(cls, v: Optional[str]) -> Optional[str]:
+        return None if v is None else _normalize_choice(v, ALLOWED_ITEM_TYPES, "item_type")
 
     @field_validator("description")
     @classmethod
@@ -664,6 +684,10 @@ class BugOut(BaseModel):
     project_id: int
     project_name: Optional[str] = None
     project_key: Optional[str] = None
+    # v2.4: item flavour + optional event link.
+    item_type: str = DEFAULT_ITEM_TYPE
+    event_id: Optional[int] = None
+    event_name: Optional[str] = None
     title: str
     description: str
     reporter: Optional[UserBrief] = None
@@ -684,6 +708,106 @@ class BugListResponse(BaseModel):
     page_size: int
     total: int
     pages: int
+
+
+# ---------------------------------------------------------------------------
+# Event (v2.4)
+#
+# Container for groups of work items. The Create / Update / Out trio
+# mirrors the Project schemas. `manager_ids` is admin/manager-only at
+# the route layer; the server validates each id belongs to the actor's
+# org AND has the admin or manager role.
+# ---------------------------------------------------------------------------
+class EventCreate(BaseModel):
+    name: str = Field(max_length=200)
+    description: str = Field(default="", max_length=10000)
+    scheduled_for: Optional[str] = None
+    manager_ids: list[int] = Field(default_factory=list)
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, v: str) -> str:
+        return _strip_and_check_min_length(v, 2, "Event name")
+
+    @field_validator("description")
+    @classmethod
+    def _desc(cls, v: str) -> str:
+        return v.strip() if isinstance(v, str) else v
+
+    @field_validator("scheduled_for")
+    @classmethod
+    def _scheduled(cls, v: Optional[str]) -> Optional[str]:
+        if v in (None, ""):
+            return None
+        try:
+            datetime.strptime(v, "%Y-%m-%d")
+        except ValueError as exc:
+            raise ValueError("scheduled_for must be YYYY-MM-DD") from exc
+        return v
+
+
+class EventUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, max_length=200)
+    description: Optional[str] = Field(default=None, max_length=10000)
+    scheduled_for: Optional[str] = None
+    manager_ids: Optional[list[int]] = None
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, v: Optional[str]) -> Optional[str]:
+        return None if v is None else _strip_and_check_min_length(v, 2, "Event name")
+
+    @field_validator("description")
+    @classmethod
+    def _desc(cls, v: Optional[str]) -> Optional[str]:
+        return v.strip() if isinstance(v, str) else v
+
+    @field_validator("scheduled_for")
+    @classmethod
+    def _scheduled(cls, v: Optional[str]) -> Optional[str]:
+        if v in (None, ""):
+            return None
+        try:
+            datetime.strptime(v, "%Y-%m-%d")
+        except ValueError as exc:
+            raise ValueError("scheduled_for must be YYYY-MM-DD") from exc
+        return v
+
+
+class EventOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    name: str
+    description: str
+    scheduled_for: Optional[str] = None
+    managers: list[UserBrief] = Field(default_factory=list)
+    item_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+    can_edit: bool = False
+    can_delete: bool = False
+
+
+class EventItemBrief(BaseModel):
+    """One row in the event-detail item list — same columns as the
+    main work-items table so the UI can render them identically."""
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    item_type: str
+    title: str
+    project_id: int
+    project_name: Optional[str] = None
+    project_key: Optional[str] = None
+    status: str
+    priority: str
+    environment: str
+    due_date: Optional[str] = None
+    assignees: list[UserBrief] = Field(default_factory=list)
+    attachment_count: int = 0
+
+
+class EventDetailOut(EventOut):
+    items: list[EventItemBrief] = Field(default_factory=list)
 
 
 class CommentIn(BaseModel):
@@ -756,6 +880,11 @@ class StatsOut(BaseModel):
     by_status: dict[str, int]
     by_priority: dict[str, int]
     by_environment: dict[str, int]
+    # v2.4: type-breakdown counts. Always GLOBAL (not filtered by the
+    # item_type query param) so the tab badges keep showing reality.
+    # Includes an "Event" key with the event count even though events
+    # live in a separate table — the SPA renders one unified row.
+    by_type: dict[str, int] = Field(default_factory=dict)
     by_project: list[dict[str, Any]]
     by_assignee: list[dict[str, Any]]
     timeline: list[dict[str, Any]]

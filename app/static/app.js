@@ -8,9 +8,13 @@
 // State
 // ---------------------------------------------------------------------------
 const STATE = {
-  meta:     { statuses: [], priorities: [], environments: [] },
+  meta:     { statuses: [], priorities: [], environments: [],
+              item_types: ["Bug", "Requirement", "Task"] },
   users:    [],
   projects: [],
+  events:   [],            // v2.4 — events list cache
+  currentEventId: null,    // v2.4 — null = list mode; id = detail mode
+  currentEvent: null,      // v2.4 — detail object when drilled in
   stats:    null,
   bugs:     [],
   page:     1,
@@ -21,9 +25,24 @@ const STATE = {
   // text search `q` and the legacy single-value `reporter_id` stay scalar.
   filters: {
     project_id: [], status: [], priority: [],
-    environment: [], assignee_id: [],
+    environment: [], assignee_id: [], item_type: [],   // v2.4 item_type filter
     reporter_id: "", q: "",
   },
+  // v2.4 — "+ New" split button remembers the last-chosen type.
+  defaultNewType: (() => {
+    try { return localStorage.getItem("defaultNewType") || "Bug"; }
+    catch { return "Bug"; }
+  })(),
+  // v2.4 — active work-items tab: "all" / "Bug" / "Requirement" / "Task".
+  activeTab: (() => {
+    try { return localStorage.getItem("activeTab") || "all"; }
+    catch { return "all"; }
+  })(),
+  // v2.4 — staged-files buckets for the bug create modal and comment
+  // composer. Files chosen via the input land here; the X-on-hover
+  // removes individual entries (FileList is read-only so we can't
+  // splice it directly). Submit reads the array, not input.files.
+  stagedFiles: { createBug: [], comment: [] },
   view: "list",
   currentBugId: null,
   // Detail tabs are gone in v3.1 — bug detail is now a single inline
@@ -469,16 +488,28 @@ async function refreshAll() {
 // Stats / KPIs
 // ---------------------------------------------------------------------------
 async function refreshStats() {
-  STATE.stats = await api("/stats");
-  // KPI strip: Total | Open | Resolved | Closed | Resolve Later. We
-  // defensively coalesce missing fields to 0 so an older server that
-  // hasn't shipped the new schema yet doesn't render `undefined`.
+  // v2.4 — KPI strip is scoped by the active tab. by_type stays GLOBAL
+  // server-side so the tab badges keep showing reality.
+  const path = (STATE.activeTab && STATE.activeTab !== "all")
+    ? `/stats?item_type=${encodeURIComponent(STATE.activeTab)}`
+    : "/stats";
+  STATE.stats = await api(path);
   const s = STATE.stats || {};
   $("#kpiBugs").textContent = s.bugs ?? 0;
   $("#kpiOpen").textContent = s.open ?? 0;
   $("#kpiResolved").textContent = s.resolved ?? 0;
   $("#kpiClosed").textContent = s.closed ?? (s.by_status?.Closed ?? 0);
   $("#kpiResolveLater").textContent = s.resolve_later ?? (s.by_status?.["Resolve Later"] ?? 0);
+  // v2.4 — type-tab badge counts come from by_type (always global).
+  const byType = s.by_type || {};
+  const tabAll = (byType.Bug ?? 0) + (byType.Requirement ?? 0) + (byType.Task ?? 0);
+  const setEl = (id, v) => { const el = $(id); if (el) el.textContent = v; };
+  setEl("#typeTabCountAll", tabAll);
+  setEl("#typeTabCountBug", byType.Bug ?? 0);
+  setEl("#typeTabCountRequirement", byType.Requirement ?? 0);
+  setEl("#typeTabCountTask", byType.Task ?? 0);
+  refreshKpiActiveState();
+  refreshTypeTabActiveState();
   if (STATE.view === "analytics") renderCharts();
 }
 
@@ -537,6 +568,7 @@ function handleKpiClick(key) {
 async function refreshBugs() {
   // Reflect current status filter in the KPI tile highlight.
   refreshKpiActiveState();
+  refreshTypeTabActiveState();
   // Mirror filter state into the URL so a refresh / shared link
   // restores the same view.
   try { syncFiltersToUrl(); } catch {}
@@ -555,6 +587,15 @@ async function refreshBugs() {
       params.set(k, String(v));
     }
   }
+  // v2.4 — implicit tab filter. Layered on top of STATE.filters.item_type
+  // so the user can still multi-select extra types via the dropdown but
+  // the tab provides the default narrowing.
+  if (STATE.activeTab && STATE.activeTab !== "all") {
+    const explicit = STATE.filters.item_type || [];
+    if (!explicit.includes(STATE.activeTab)) {
+      params.append("item_type", STATE.activeTab);
+    }
+  }
   const data = await api("/bugs?" + params.toString());
   STATE.bugs = data.items;
   STATE.total = data.total;
@@ -563,56 +604,133 @@ async function refreshBugs() {
   renderPagination();
 }
 
-function renderBugTable() {
-  const tbody = $("#bugTableBody");
-  tbody.innerHTML = "";
-  $("#emptyState").hidden = STATE.bugs.length > 0;
+// v2.4 — tab activeness reflects STATE.activeTab.
+function refreshTypeTabActiveState() {
+  $$(".type-tab[data-tab]").forEach(b => {
+    const on = b.dataset.tab === STATE.activeTab;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-selected", on ? "true" : "false");
+  });
+}
 
-  const frag = document.createDocumentFragment();
-  // v3.1: row-level pencil button is gone. Clicking the row opens the
-  // unified bug modal (which is editable inline, Jira-style). The only
-  // row-level action is delete, and that's admin-only per the new
-  // permission policy.
-  // Delete is allowed for org admins AND project leads (the backend
-  // enforces this via can_delete_bug). We surface it whenever the user
-  // is an admin OR has manage rights on the bug's project — the project
-  // list's `can_manage` flag captures the second case for us.
-  const isAdmin = STATE.currentUser?.role === "admin";
-  const manageableProjectIds = new Set(
-    (STATE.projects || []).filter(p => p.can_manage).map(p => p.id)
-  );
-  for (const bug of STATE.bugs) {
-    const canDeleteRow = isAdmin || manageableProjectIds.has(bug.project_id);
-    const tr = document.createElement("tr");
-    tr.dataset.bugId = String(bug.id);
-    const assigneesHtml = bug.assignees.length
-      ? bug.assignees.map(a => `<span class="assignee-chip" title="${escapeHtml(a.email)}"><span class="avatar">${initials(a.name)}</span>${escapeHtml(a.name)}</span>`).join("")
-      : `<span class="muted">—</span>`;
-    // Title cell carries the bug's `updated_at` as a small timestamp under
-    // the title, so we can drop the dedicated "Updated" column without
-    // losing the freshness signal entirely.
-    tr.innerHTML = `
-      <td class="col-id">${bug.project_key ? escapeHtml(bug.project_key) + "-" : "#"}${bug.id}</td>
-      <td class="col-title">
+// v2.4 — switch tabs. Persists to localStorage so a reload lands you
+// back on the same tab. The tab is NOT written into STATE.filters
+// (it's implicit at request time in refreshBugs) so clearing the
+// filter bar doesn't fight the tab choice.
+function setActiveTab(tab) {
+  STATE.activeTab = tab;
+  try { localStorage.setItem("activeTab", tab); } catch {}
+  STATE.page = 1;
+  refreshTypeTabActiveState();
+  refreshFilterBarVisibility();
+  document.dispatchEvent(new CustomEvent("bh:tab-change", { detail: { tab } }));
+  refreshBugs();
+  refreshStats();
+}
+
+// v2.4 — hide filters that don't apply for the active tab.
+function refreshFilterBarVisibility() {
+  const tab = STATE.activeTab || "all";
+  const typeFilter = document.querySelector('.ms-wrap[data-filter="item_type"]');
+  if (typeFilter) typeFilter.style.display = tab === "all" ? "" : "none";
+  const envFilter = document.querySelector('.ms-wrap[data-filter="environment"]');
+  if (envFilter) envFilter.style.display = (tab === "Requirement" || tab === "Task") ? "none" : "";
+}
+
+// v2.4 — table head + cell rendering reacts to the active tab.
+// Each tab defines its own column set; numbering stays global.
+const TAB_COLUMNS = {
+  all:         ["id", "title-with-type", "project", "status", "priority", "env", "assignees", "att", "actions"],
+  Bug:         ["id", "title", "project", "status", "priority", "env", "assignees", "att", "actions"],
+  Requirement: ["id", "title", "project", "status", "priority", "assignees", "att", "actions"],
+  Task:        ["id", "title", "project", "status", "priority", "due", "event", "assignees", "actions"],
+};
+
+const COL_HEAD_LABEL = {
+  id: "#", title: "Title", "title-with-type": "Title",
+  project: "Project", status: "Status", priority: "Priority",
+  env: "Env", due: "Due", event: "Event",
+  assignees: "Assignees", att: "📎", actions: "Actions",
+};
+
+const ITEM_TYPE_EMOJI = { Bug: "🐞", Requirement: "📐", Task: "✅" };
+function itemTypeEmoji(t) { return ITEM_TYPE_EMOJI[t] || "📝"; }
+
+function _renderBugCell(col, bug, canDeleteRow) {
+  const assigneesHtml = bug.assignees.length
+    ? bug.assignees.map(a => `<span class="assignee-chip" title="${escapeHtml(a.email)}"><span class="avatar">${initials(a.name)}</span>${escapeHtml(a.name)}</span>`).join("")
+    : `<span class="muted">—</span>`;
+  switch (col) {
+    case "id":
+      return `<td class="col-id">${bug.project_key ? escapeHtml(bug.project_key) + "-" : "#"}${bug.id}</td>`;
+    case "title":
+      return `<td class="col-title">
         <div class="title-cell">
           <strong class="title-text" title="${escapeHtml(bug.title)}">${escapeHtml(bug.title)}</strong>
           <span class="title-meta">Updated ${formatDate(bug.updated_at)}</span>
         </div>
-      </td>
-      <td class="col-project">${escapeHtml(bug.project_name || "")}</td>
-      <td class="col-status"><span class="badge" data-status="${escapeHtml(bug.status)}">${escapeHtml(bug.status)}</span></td>
-      <td class="col-priority"><span class="badge" data-priority="${escapeHtml(bug.priority)}">${escapeHtml(bug.priority)}</span></td>
-      <td class="col-env"><span class="badge" data-env="${escapeHtml(bug.environment)}">${escapeHtml(bug.environment)}</span></td>
-      <td class="col-assignees"><div class="assignee-stack">${assigneesHtml}</div></td>
-      <td class="col-att">${bug.attachment_count > 0 ? `<span class="att-count">📎 ${bug.attachment_count}</span>` : '<span class="muted">—</span>'}</td>
-      <td class="col-actions">
+      </td>`;
+    case "title-with-type": {
+      const t = bug.item_type || "Bug";
+      return `<td class="col-title">
+        <div class="title-cell">
+          <strong class="title-text" title="${escapeHtml(bug.title)}"><span class="type-marker" title="${escapeHtml(t)}">${itemTypeEmoji(t)}</span> ${escapeHtml(bug.title)}</strong>
+          <span class="title-meta">Updated ${formatDate(bug.updated_at)}</span>
+        </div>
+      </td>`;
+    }
+    case "project":
+      return `<td class="col-project">${escapeHtml(bug.project_name || "")}</td>`;
+    case "status":
+      return `<td class="col-status"><span class="badge" data-status="${escapeHtml(bug.status)}">${escapeHtml(bug.status)}</span></td>`;
+    case "priority":
+      return `<td class="col-priority"><span class="badge" data-priority="${escapeHtml(bug.priority)}">${escapeHtml(bug.priority)}</span></td>`;
+    case "env":
+      return `<td class="col-env"><span class="badge" data-env="${escapeHtml(bug.environment)}">${escapeHtml(bug.environment)}</span></td>`;
+    case "due":
+      return `<td class="col-due">${bug.due_date ? escapeHtml(bug.due_date) : '<span class="muted">—</span>'}</td>`;
+    case "event":
+      return `<td class="col-event">${bug.event_name
+        ? `<span class="event-pill" title="${escapeHtml(bug.event_name)}">📅 ${escapeHtml(bug.event_name)}</span>`
+        : '<span class="muted">—</span>'}</td>`;
+    case "assignees":
+      return `<td class="col-assignees"><div class="assignee-stack">${assigneesHtml}</div></td>`;
+    case "att":
+      return `<td class="col-att">${bug.attachment_count > 0 ? `<span class="att-count">📎 ${bug.attachment_count}</span>` : '<span class="muted">—</span>'}</td>`;
+    case "actions":
+      return `<td class="col-actions">
         <div class="row-actions">
           ${canDeleteRow ? `<button class="icon-btn danger" data-act="delete" data-id="${bug.id}" title="Delete">🗑</button>` : ""}
         </div>
       </td>`;
-    frag.appendChild(tr);
+    default:
+      return `<td>—</td>`;
   }
-  tbody.appendChild(frag);
+}
+
+function renderBugTable() {
+  const head = $("#bugTableHead");
+  const tbody = $("#bugTableBody");
+  tbody.innerHTML = "";
+  $("#emptyState").hidden = STATE.bugs.length > 0;
+
+  // v2.4 — column set is keyed by the active tab.
+  const cols = TAB_COLUMNS[STATE.activeTab] || TAB_COLUMNS.all;
+  if (head) {
+    head.innerHTML = "<tr>" +
+      cols.map(c => `<th class="col-${c.replace("-with-type","")}">${COL_HEAD_LABEL[c] || ""}</th>`).join("") +
+      "</tr>";
+  }
+
+  const isAdmin = STATE.currentUser?.role === "admin";
+  for (const bug of STATE.bugs) {
+    // v2.4: delete is admin-only across every item type.
+    const canDeleteRow = isAdmin;
+    const tr = document.createElement("tr");
+    tr.dataset.bugId = String(bug.id);
+    tr.innerHTML = cols.map(c => _renderBugCell(c, bug, canDeleteRow)).join("");
+    tbody.appendChild(tr);
+  }
 }
 
 function renderPagination() {
@@ -620,7 +738,7 @@ function renderPagination() {
   if (STATE.totalPages <= 1) { bar.innerHTML = ""; return; }
   bar.innerHTML = `
     <button id="pgPrev" ${STATE.page <= 1 ? "disabled" : ""}>← Prev</button>
-    <span>Page ${STATE.page} of ${STATE.totalPages} (${STATE.total} bugs)</span>
+    <span>Page ${STATE.page} of ${STATE.totalPages} (${STATE.total} items)</span>
     <button id="pgNext" ${STATE.page >= STATE.totalPages ? "disabled" : ""}>Next →</button>`;
   $("#pgPrev")?.addEventListener("click", () => { STATE.page--; refreshBugs(); });
   $("#pgNext")?.addEventListener("click", () => { STATE.page++; refreshBugs(); });
@@ -732,10 +850,12 @@ const MS_LABELS = {
   priority:    "All Priorities",
   environment: "All Envs",
   assignee_id: "All Assignees",
+  item_type:   "All Types",   // v2.4
 };
 const MS_NOUNS = {
   project_id: "Projects", status: "Statuses", priority: "Priorities",
   environment: "Envs",    assignee_id: "Assignees",
+  item_type: "Types",     // v2.4
 };
 
 function _msOptions(key) {
@@ -750,6 +870,7 @@ function _msOptions(key) {
   if (key === "status")      return (STATE.meta.statuses     || []).map(s => [s, s]);
   if (key === "priority")    return (STATE.meta.priorities   || []).map(s => [s, s]);
   if (key === "environment") return (STATE.meta.environments || ["DEV","UAT","PROD"]).map(s => [s, s]);
+  if (key === "item_type")   return (STATE.meta.item_types   || ["Bug","Requirement","Task"]).map(t => [t, t]);
   return [];
 }
 
@@ -839,36 +960,74 @@ function setView(view) {
   $("#viewAnalytics").hidden = view !== "analytics";
   $("#viewAudit").hidden = view !== "audit";
   $("#viewSessions").hidden = view !== "sessions";
+  const viewEvents = document.getElementById("viewEvents");
+  if (viewEvents) viewEvents.hidden = view !== "events";
   const viewInvitations = document.getElementById("viewInvitations");
   if (viewInvitations) viewInvitations.hidden = view !== "invitations";
   $("#filterBar").hidden = view !== "list";
-  // The bug search, the "+ New Bug" CTA and the KPI strip are bug-only
-  // controls. They make no sense on Audit / Sessions / Invitations, and
-  // showing them there is visual noise. Toggle them in lock-step with
-  // the view.
+  // The search, the "+ New" CTA and the KPI strip are work-item-only
+  // controls. They make no sense on Audit / Sessions / Invitations /
+  // Events, and showing them there is visual noise.
   const searchWrap = document.querySelector(".search-wrap");
   if (searchWrap) searchWrap.style.display = view === "list" ? "" : "none";
-  const newBugBtn = $("#newBugBtn");
-  if (newBugBtn) newBugBtn.style.display = view === "list" ? "" : "none";
+  const newItemWrap = document.querySelector(".new-item-wrap");
+  if (newItemWrap) newItemWrap.style.display = view === "list" ? "" : "none";
   const kpiStrip = $("#kpiStrip");
   if (kpiStrip) kpiStrip.style.display = (view === "list" || view === "analytics") ? "" : "none";
+  // v2.4 — type tabs are the global type-context switch shared by
+  // list + analytics. Hidden everywhere else.
+  const typeTabs = $("#typeTabs");
+  if (typeTabs) typeTabs.style.display = (view === "list" || view === "analytics") ? "" : "none";
   $("#pageTitle").textContent = ({
-    list: "All Bugs", analytics: "Analytics",
+    list: "All Work Items", events: "Events", analytics: "Analytics",
     audit: "Audit Trail", sessions: "Active Sessions",
     invitations: "Invitations",
   }[view] || "Bug Hunter");
-  if (view === "analytics") renderCharts();
+  // Re-fetch on entry. Without this, anything created from another view —
+  // a task added inside an event, a stat changed by Sleuth, etc. — would
+  // require a manual page reload to show up.
+  if (view === "list") {
+    refreshBugs();
+    refreshStats();
+  }
+  if (view === "analytics") {
+    refreshStats().then(renderCharts);
+  }
   if (view === "audit") refreshAudit();
   if (view === "sessions") refreshSessions();
   if (view === "invitations") refreshInvitations();
+  if (view === "events") {
+    STATE.currentEventId = null;
+    STATE.currentEvent = null;
+    showEventsListMode();
+    refreshEvents();
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Charts
 // ---------------------------------------------------------------------------
+const _TAB_NOUNS = {
+  all: "Items", Bug: "Bugs", Requirement: "Requirements", Task: "Tasks",
+};
+
 function renderCharts() {
   if (!STATE.stats) return;
   const s = STATE.stats;
+  const tab = STATE.activeTab || "all";
+  const noun = _TAB_NOUNS[tab] || "Items";
+  // v2.4 — chart titles update per tab so the user knows what's being
+  // plotted at a glance.
+  const setTitle = (id, text) => { const el = $(id); if (el) el.textContent = text; };
+  setTitle("#chartTimelineTitle",    `${noun} over the last 14 days`);
+  setTitle("#chartStatusTitle",      `By Status (${noun})`);
+  setTitle("#chartPriorityTitle",    `By Priority (${noun})`);
+  setTitle("#chartEnvironmentTitle", `By Environment (${noun})`);
+  setTitle("#chartProjectTitle",     `By Project (${noun})`);
+  setTitle("#chartAssigneeTitle",    `Top Assignees (${noun})`);
+  // Environment doesn't apply to Requirements / Tasks — hide that card.
+  const envCard = $("#chartEnvironmentCard");
+  if (envCard) envCard.hidden = (tab === "Requirement" || tab === "Task");
   drawTimeline("#chartTimeline", s.timeline);
   drawBars("#chartStatus", s.by_status, "status");
   drawBars("#chartPriority", s.by_priority, "priority");
@@ -979,52 +1138,34 @@ function drawAssigneeBars(sel, rows) {
 // ---------------------------------------------------------------------------
 function openBugForm(bug = null) {
   const form = $("#formBug");
-  const isEdit = !!bug;
-  STATE.currentBugId = bug ? bug.id : null;
+  // v2.4: bug may be either { id, ... } (edit) or a hint object
+  // { _defaultType, _defaultEventId } from the "+ New X" menu.
+  const isEdit = !!(bug && bug.id);
+  STATE.currentBugId = isEdit ? bug.id : null;
   form.reset();
 
-  // Header: short numeric label + the saved title as a faded subtitle so
-  // the user can see what they originally filed without it getting
-  // muddled with the editable input below.
   if (isEdit) {
-    $("#modalBugTitle").textContent = `Bug #${bug.id}`;
+    const t = bug.item_type || "Bug";
+    $("#modalBugTitle").textContent = `${itemTypeEmoji(t)} ${t} #${bug.id}`;
     $("#modalBugSubtitle").textContent = bug.title || "";
     $("#bugSubmitBtn").textContent = "Save changes";
   } else {
-    $("#modalBugTitle").textContent = "New Bug";
+    const t = bug?._defaultType || STATE.defaultNewType || "Bug";
+    $("#modalBugTitle").textContent = `${itemTypeEmoji(t)} New ${t}`;
     $("#modalBugSubtitle").textContent = "";
     $("#bugSubmitBtn").textContent = "Create";
   }
   form.elements.id.value = isEdit ? bug.id : "";
 
-  // Delete button — admin only, edit mode only. The HTML already has
-  // data-needs-role="admin" on it; applyRoleVisibility() at boot stripped
-  // that attribute for admins, so we just need to flip its hidden state
-  // for create/edit modes.
+  // v2.4 — delete is admin-only across every item type.
   const delBtn = $("#bugDeleteBtn");
   if (delBtn) {
-    // Delete is allowed for org admins or project leads of the bug's
-    // project. The backend's `can_delete_bug` enforces it; we mirror
-    // the rule here so the button is only visible when it'll work.
     const isAdmin = STATE.currentUser?.role === "admin";
-    let canDelete = isAdmin;
-    if (isEdit && !isAdmin) {
-      const p = (STATE.projects || []).find(p => p.id === bug.project_id);
-      canDelete = !!(p && p.can_manage);
-    }
-    delBtn.hidden = !(isEdit && canDelete);
+    delBtn.hidden = !(isEdit && isAdmin);
   }
 
   fillFormSelect(form.elements.project_id, STATE.projects.map(p => [p.id, p.name]),
                  isEdit ? bug.project_id : "");
-  // Reporter is fixed to whoever is currently logged in. We populate the
-  // (disabled) select with just one option — the current user — so it
-  // always shows their name. The actual reporter_id sent on submit comes
-  // from STATE.currentUser.id, not from this select, so even if a
-  // browser oddly omits disabled-select values we still send something
-  // valid. For an existing bug, we additionally inject the original
-  // reporter as a second option so the bug's true reporter still
-  // displays correctly when someone else opens it.
   const me = STATE.currentUser;
   let reporterOptions = me ? [[me.id, me.name, me.email]] : [];
   if (isEdit && bug.reporter && (!me || bug.reporter.id !== me.id)) {
@@ -1036,8 +1177,50 @@ function openBugForm(bug = null) {
                  isEdit ? bug.status : "New");
   fillFormSelect(form.elements.priority, STATE.meta.priorities.map(s => [s, s]),
                  isEdit ? bug.priority : "Medium");
-  // Environment - already DEV/UAT/PROD options in the HTML, just set value
   form.elements.environment.value = isEdit ? bug.environment : "DEV";
+
+  // v2.4 — item_type select.
+  const presetType = isEdit
+    ? (bug.item_type || "Bug")
+    : (bug?._defaultType || STATE.defaultNewType || "Bug");
+  if (form.elements.item_type) {
+    fillFormSelect(form.elements.item_type,
+      (STATE.meta.item_types || ["Bug","Requirement","Task"]).map(t => [t, t]),
+      presetType);
+  }
+
+  // v2.4 — event select. Seed the current event so it shows up even
+  // before the async list refresh lands. Fetch a fresh list on every
+  // open so newly-created events appear.
+  if (form.elements.event_id) {
+    const presetEventId = isEdit
+      ? (bug.event_id || "")
+      : (bug?._defaultEventId || "");
+    form.elements.event_id.innerHTML = `<option value="">— No event —</option>`;
+    if (isEdit && bug.event_id && bug.event_name) {
+      const opt = document.createElement("option");
+      opt.value = String(bug.event_id);
+      opt.textContent = bug.event_name;
+      opt.selected = true;
+      form.elements.event_id.appendChild(opt);
+    } else if (!isEdit && bug?._defaultEventId) {
+      // create-mode preset from the "+ Add to event" flow.
+      form.elements.event_id.value = String(bug._defaultEventId);
+    }
+    api("/events").then((events) => {
+      if (!form.elements.event_id) return;
+      const sel = form.elements.event_id;
+      const current = String(sel.value || presetEventId || "");
+      sel.innerHTML = `<option value="">— No event —</option>` +
+        (events || []).map(ev => {
+          const label = ev.scheduled_for
+            ? `${ev.name} · ${ev.scheduled_for}`
+            : ev.name;
+          return `<option value="${ev.id}">${escapeHtml(label)}</option>`;
+        }).join("");
+      if (current) sel.value = current;
+    }).catch(() => { /* leave the placeholder if /events fails */ });
+  }
 
   const assignedIds = new Set(isEdit && bug.assignees ? bug.assignees.map(a => a.id) : []);
   renderChips("#assigneePicker",
@@ -1049,23 +1232,154 @@ function openBugForm(bug = null) {
     form.elements.title.value = bug.title || "";
     form.elements.description.value = bug.description || "";
     form.elements.due_date.value = bug.due_date || "";
-    // Read-only timestamps in the side rail.
     $("#bugSideMeta").hidden = false;
     $("#bugMetaCreated").textContent = formatDate(bug.created_at);
     $("#bugMetaUpdated").textContent = formatDate(bug.updated_at);
-    // Render the inline detail sections (comments, attachments, activity).
+    const createAttach = $("#bugCreateAttachSection");
+    if (createAttach) {
+      createAttach.hidden = true;
+      clearStagedFiles("createBug", "#createFilePreview", "#createFileLabel");
+      const cf = $("#createBugFiles"); if (cf) cf.value = "";
+    }
+    clearStagedFiles("comment", "#filePreview", "#fileLabel");
     renderBugInlineSections(bug);
   } else {
-    // Create mode — hide all detail sections (comments need a saved bug
-    // id to attach to). Reset side meta panel.
     $("#bugSideMeta").hidden = true;
     $("#bugCommentsSection").hidden = true;
     $("#bugAttachmentsSection").hidden = true;
     $("#bugActivitySection").hidden = true;
+    const createAttach = $("#bugCreateAttachSection");
+    if (createAttach) {
+      createAttach.hidden = false;
+      clearStagedFiles("createBug", "#createFilePreview", "#createFileLabel");
+      const cf = $("#createBugFiles"); if (cf) cf.value = "";
+    }
   }
 
+  // v2.4 — apply read-only mode if the user can't edit this item type.
+  applyBugFormReadOnly(form, bug, isEdit);
+
   openModal("modalBug");
-  setTimeout(() => form.elements.title.focus(), 50);
+  if (!form.dataset.readOnly) {
+    setTimeout(() => form.elements.title.focus(), 50);
+  }
+}
+
+// v2.4 — mirror the backend can_edit_bug rule on the frontend. Members
+// (regular users) can edit Bugs only; Requirements/Tasks are
+// admin/manager-only. The backend still 403s if this is bypassed.
+function canEditItem(item) {
+  const role = STATE.currentUser?.role || "";
+  if (role === "admin" || role === "manager") return true;
+  const t = (item && item.item_type) || "Bug";
+  return t === "Bug";
+}
+
+function applyBugFormReadOnly(form, bug, isEdit) {
+  const readOnly = isEdit && !canEditItem(bug);
+  form.dataset.readOnly = readOnly ? "1" : "";
+  const fields = form.querySelectorAll("input, select, textarea");
+  fields.forEach(el => {
+    if (el.name === "id") return;
+    if (el.classList.contains("reporter-select")) return;  // always disabled by design
+    if (readOnly) {
+      el.dataset.roSetByUs = "1";
+      el.disabled = true;
+    } else if (el.dataset.roSetByUs === "1") {
+      el.disabled = false;
+      el.dataset.roSetByUs = "";
+    }
+  });
+  const picker = $("#assigneePicker");
+  if (picker) picker.classList.toggle("locked", readOnly);
+  const submit = $("#bugSubmitBtn");
+  if (submit) submit.hidden = readOnly;
+  const delBtn = $("#bugDeleteBtn");
+  if (delBtn && readOnly) delBtn.hidden = true;
+  const composer = $("#commentForm");
+  if (composer) composer.hidden = readOnly;
+  let banner = form.querySelector(".bug-readonly-banner");
+  if (readOnly && !banner) {
+    banner = document.createElement("div");
+    banner.className = "bug-readonly-banner";
+    const itype = (bug?.item_type || "item").toLowerCase();
+    banner.textContent = `Read-only — only admins and managers can edit ${itype}s.`;
+    form.insertBefore(banner, form.firstChild);
+  } else if (!readOnly && banner) {
+    banner.remove();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// v2.4 — Staged-files system (for the create modal + comment composer)
+//
+// FileList is read-only so we keep a parallel array that backs the
+// previews. The X button on hover removes individual entries; clicking
+// the thumbnail opens the file via URL.createObjectURL for preview
+// before submit.
+// ---------------------------------------------------------------------------
+function _revokeBlobs(arr) {
+  for (const it of arr || []) {
+    if (it && it._blobUrl) { try { URL.revokeObjectURL(it._blobUrl); } catch {} }
+  }
+}
+
+function clearStagedFiles(bucket, previewSel, labelSel) {
+  _revokeBlobs(STATE.stagedFiles[bucket]);
+  STATE.stagedFiles[bucket] = [];
+  if (previewSel) { const el = $(previewSel); if (el) el.innerHTML = ""; }
+  if (labelSel)   { const el = $(labelSel);   if (el) el.textContent = "Attach files"; }
+}
+
+function _renderStagedFiles(bucket, previewSel, labelSel) {
+  const host = $(previewSel);
+  if (!host) return;
+  const files = STATE.stagedFiles[bucket] || [];
+  host.innerHTML = files.map((f, idx) => {
+    const isImg = (f.file?.type || "").startsWith("image/");
+    const thumb = isImg
+      ? `<img src="${f._blobUrl}" alt="" class="attach-staged-thumb" />`
+      : `<span class="attach-staged-icon">${fileIcon(f.file?.type, f.file?.name)}</span>`;
+    return `<div class="attach-staged" data-idx="${idx}">
+      <button type="button" class="attach-staged-remove" aria-label="Remove" data-act="remove">✕</button>
+      <a class="attach-staged-link" href="${f._blobUrl}" target="_blank" rel="noopener" data-act="preview">${thumb}</a>
+      <div class="attach-staged-meta">
+        <span class="attach-staged-name">${escapeHtml(f.file?.name || "file")}</span>
+        <span class="attach-staged-size muted">${formatBytes(f.file?.size || 0)}</span>
+      </div>
+    </div>`;
+  }).join("");
+  if (labelSel) {
+    const el = $(labelSel);
+    if (el) el.textContent = files.length
+      ? `${files.length} file${files.length === 1 ? "" : "s"} attached`
+      : "Attach files";
+  }
+}
+
+function handleStagedInputChange(bucket, inputEl, previewSel, labelSel) {
+  if (!inputEl?.files) return;
+  for (const f of inputEl.files) {
+    const blobUrl = URL.createObjectURL(f);
+    STATE.stagedFiles[bucket].push({ file: f, _blobUrl: blobUrl });
+  }
+  inputEl.value = "";  // allow re-adding the same file after removing
+  _renderStagedFiles(bucket, previewSel, labelSel);
+}
+
+function handleStagedListClick(bucket, previewSel, labelSel, e) {
+  const removeBtn = e.target.closest('[data-act="remove"]');
+  if (removeBtn) {
+    e.preventDefault();
+    const row = removeBtn.closest(".attach-staged");
+    const idx = parseInt(row.dataset.idx, 10);
+    const arr = STATE.stagedFiles[bucket] || [];
+    const gone = arr.splice(idx, 1);
+    _revokeBlobs(gone);
+    _renderStagedFiles(bucket, previewSel, labelSel);
+    return;
+  }
+  // Click on the thumbnail link — let the default <a target=_blank> open the file.
 }
 
 // Inline render of comments + attachments + activity inside the bug
@@ -1167,17 +1481,11 @@ async function submitBugForm(e) {
   e.preventDefault();
   const form = e.target;
   const id = form.elements.id.value;
-  // Reporter is always the logged-in user — the field in the modal is
-  // disabled and we read the id from STATE here so the request is
-  // independent of the form element's state.
-  // For EDIT, we preserve whoever the original reporter was: the disabled
-  // select still carries `bug.reporter.id` (set by openBugForm), so
-  // form.elements.reporter_id.value is the right value.
   const reporterFromForm = form.elements.reporter_id.value
     ? parseInt(form.elements.reporter_id.value, 10) : null;
   const reporterFromMe = STATE.currentUser?.id || null;
-  // For NEW bugs use the current user; for EDIT use whatever the form
-  // already has (which is the bug's existing reporter).
+  const eventVal = form.elements.event_id ? form.elements.event_id.value : "";
+  const itemTypeVal = form.elements.item_type ? form.elements.item_type.value : "Bug";
   const payload = {
     project_id: parseInt(form.elements.project_id.value, 10),
     title: form.elements.title.value.trim(),
@@ -1188,6 +1496,8 @@ async function submitBugForm(e) {
     environment: form.elements.environment.value,
     due_date: form.elements.due_date.value || null,
     assignee_ids: readChips("#assigneePicker"),
+    item_type: itemTypeVal || "Bug",
+    event_id: eventVal ? parseInt(eventVal, 10) : null,
   };
   if (!payload.project_id) { toast("Please pick a project", "error"); return; }
   if (!payload.title) { toast("Title is required", "error"); return; }
@@ -1195,22 +1505,215 @@ async function submitBugForm(e) {
 
   try {
     if (id) {
-      // EDIT — save, then close the modal and return to the Bugs list.
-      // (Earlier v3.1 builds kept the modal open Jira-style; reverted
-      // here because users prefer the explicit close-and-return flow.)
       await api(`/bugs/${id}`, { method: "PUT", body: JSON.stringify(payload) });
-      toast(`Bug #${id} updated`, "success");
+      toast(`${payload.item_type} #${id} updated`, "success");
       closeModal("modalBug");
       setView("list");
       await refreshAll();
     } else {
-      // CREATE — close the modal and refresh the list.
-      await api("/bugs", { method: "POST", body: JSON.stringify(payload) });
-      toast("Bug created", "success");
+      const created = await api("/bugs", { method: "POST", body: JSON.stringify(payload) });
+      // v2.4 — remember last-chosen type for next "+ New" click.
+      STATE.defaultNewType = payload.item_type || "Bug";
+      try { localStorage.setItem("defaultNewType", STATE.defaultNewType); } catch {}
+      // Upload any staged create-mode attachments to the new item via a
+      // body-less comment (the existing path for inline attachments).
+      const staged = STATE.stagedFiles.createBug || [];
+      if (staged.length && created && created.id) {
+        try {
+          const fd = new FormData();
+          for (const it of staged) fd.append("files", it.file);
+          await api(`/bugs/${created.id}/comments?empty_body=true`, {
+            method: "POST", body: fd, headers: {},  // FormData sets boundary
+          });
+        } catch (uploadErr) {
+          // Don't block the toast — the item was created successfully.
+          console.warn("attachment upload failed", uploadErr);
+        }
+      }
+      clearStagedFiles("createBug", "#createFilePreview", "#createFileLabel");
+      toast(`${payload.item_type} created`, "success");
       closeModal("modalBug");
-      setView("list");
-      await refreshAll();
+      // If the user created an item INSIDE an event-detail view, refresh
+      // that detail rather than dumping them on the list.
+      if (STATE.view === "events" && STATE.currentEventId) {
+        await openEventDetail(STATE.currentEventId);
+      } else {
+        setView("list");
+        await refreshAll();
+      }
     }
+  } catch (err) {
+    toastError(err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Events — v2.4
+//
+// List mode: card grid of every event in the org. Click a card to
+// drill into detail mode (a "← Back" control returns to list mode).
+// Detail mode shows the event's items as the same bug-table component
+// so the rows look identical to the work-items list. The +Add Task
+// button defaults to item_type=Task and pre-populates event_id.
+// ---------------------------------------------------------------------------
+function showEventsListMode() {
+  $("#eventsListMode").hidden = false;
+  $("#eventsDetailMode").hidden = true;
+}
+function showEventsDetailMode() {
+  $("#eventsListMode").hidden = true;
+  $("#eventsDetailMode").hidden = false;
+}
+
+async function refreshEvents() {
+  try {
+    const events = await api("/events");
+    STATE.events = events || [];
+    renderEventsList();
+  } catch (err) {
+    toastError(err);
+  }
+}
+
+function renderEventsList() {
+  const host = $("#eventsGrid");
+  const empty = $("#eventsEmpty");
+  const summary = $("#eventsSummary");
+  if (!host) return;
+  const events = STATE.events || [];
+  if (summary) summary.textContent = events.length
+    ? `${events.length} event${events.length === 1 ? "" : "s"}`
+    : "";
+  if (!events.length) {
+    host.innerHTML = "";
+    if (empty) empty.hidden = false;
+    return;
+  }
+  if (empty) empty.hidden = true;
+  host.innerHTML = events.map(ev => {
+    const managersHtml = (ev.managers || []).slice(0, 3).map(m =>
+      `<span class="event-mgr-chip" title="${escapeHtml(m.email)}"><span class="avatar">${initials(m.name)}</span>${escapeHtml(m.name)}</span>`
+    ).join("");
+    const moreCount = Math.max(0, (ev.managers || []).length - 3);
+    return `<button type="button" class="event-card" data-event-id="${ev.id}">
+      <div class="event-card-head">
+        <span class="event-card-icon">📅</span>
+        <h3 class="event-card-name">${escapeHtml(ev.name)}</h3>
+      </div>
+      ${ev.scheduled_for ? `<div class="event-card-date">${escapeHtml(ev.scheduled_for)}</div>` : ""}
+      <div class="event-card-meta">
+        <span class="event-card-stat"><strong>${ev.item_count || 0}</strong> item${(ev.item_count || 0) === 1 ? "" : "s"}</span>
+      </div>
+      ${managersHtml ? `<div class="event-card-managers">${managersHtml}${moreCount ? `<span class="event-mgr-more">+${moreCount}</span>` : ""}</div>` : ""}
+    </button>`;
+  }).join("");
+}
+
+async function openEventDetail(eventId) {
+  try {
+    const ev = await api(`/events/${eventId}`);
+    STATE.currentEventId = ev.id;
+    STATE.currentEvent = ev;
+    showEventsDetailMode();
+    renderEventDetail(ev);
+  } catch (err) {
+    toastError(err);
+  }
+}
+
+function renderEventDetail(ev) {
+  $("#eventDetailName").textContent = ev.name;
+  const meta = $("#eventDetailMeta");
+  const mgrHtml = (ev.managers || []).map(m =>
+    `<span class="event-mgr-chip" title="${escapeHtml(m.email)}"><span class="avatar">${initials(m.name)}</span>${escapeHtml(m.name)}</span>`
+  ).join("");
+  meta.innerHTML = `
+    ${ev.scheduled_for ? `<div class="events-detail-row"><span class="k">Scheduled for</span><span class="v">${escapeHtml(ev.scheduled_for)}</span></div>` : ""}
+    ${ev.description ? `<div class="events-detail-row events-detail-desc">${escapeHtml(ev.description)}</div>` : ""}
+    ${mgrHtml ? `<div class="events-detail-row event-detail-managers"><span class="k">Managers</span><div class="v">${mgrHtml}</div></div>` : ""}
+  `;
+  // Items list — same column shape as the work-items table.
+  const items = ev.items || [];
+  const host = $("#eventDetailItems");
+  if (!items.length) {
+    host.innerHTML = `<p class="no-content">No items in this event yet — click <strong>+ Add Task</strong> to create one</p>`;
+    return;
+  }
+  // Build a table mirroring the bug-table so the rows look identical.
+  const headRow = ["id", "title-with-type", "project", "status", "priority", "due", "assignees", "att"]
+    .map(c => `<th class="col-${c.replace("-with-type","")}">${COL_HEAD_LABEL[c] || ""}</th>`).join("");
+  const bodyRows = items.map(it => {
+    // EventItemBrief from the server has the same shape as a bug for
+    // the columns we render. Re-use _renderBugCell.
+    return `<tr data-bug-id="${it.id}">` +
+      ["id", "title-with-type", "project", "status", "priority", "due", "assignees", "att"]
+        .map(c => _renderBugCell(c, it, false)).join("") +
+      `</tr>`;
+  }).join("");
+  host.innerHTML = `<table class="bug-table"><thead><tr>${headRow}</tr></thead><tbody>${bodyRows}</tbody></table>`;
+}
+
+function openEventForm(ev = null) {
+  const form = $("#formEvent");
+  form.reset();
+  const isEdit = !!(ev && ev.id);
+  $("#modalEventTitle").textContent = isEdit ? `📅 Edit Event` : "📅 New Event";
+  form.elements.id.value = isEdit ? ev.id : "";
+  if (isEdit) {
+    form.elements.name.value = ev.name || "";
+    form.elements.description.value = ev.description || "";
+    form.elements.scheduled_for.value = ev.scheduled_for || "";
+  }
+  // Manager picker — filter to admin/manager users only (the server
+  // also enforces this).
+  const eligible = (STATE.users || [])
+    .filter(u => u.is_active && (u.role === "admin" || u.role === "manager"));
+  const selectedIds = new Set(isEdit && ev.managers ? ev.managers.map(m => m.id) : []);
+  renderChips("#eventManagerPicker", eligible,
+    (u) => ({ id: u.id, label: u.name, sub: u.role }),
+    selectedIds);
+  openModal("modalEvent");
+  setTimeout(() => form.elements.name.focus(), 50);
+}
+
+async function submitEventForm(e) {
+  e.preventDefault();
+  const form = e.target;
+  const id = form.elements.id.value;
+  const payload = {
+    name: form.elements.name.value.trim(),
+    description: form.elements.description.value,
+    scheduled_for: form.elements.scheduled_for.value || null,
+    manager_ids: readChips("#eventManagerPicker"),
+  };
+  if (!payload.name) { toast("Event name is required", "error"); return; }
+  try {
+    if (id) {
+      await api(`/events/${id}`, { method: "PUT", body: JSON.stringify(payload) });
+      toast("Event updated", "success");
+    } else {
+      await api("/events", { method: "POST", body: JSON.stringify(payload) });
+      toast("Event created", "success");
+    }
+    closeModal("modalEvent");
+    await refreshEvents();
+    if (id && STATE.currentEventId === parseInt(id, 10)) {
+      await openEventDetail(parseInt(id, 10));
+    }
+  } catch (err) {
+    toastError(err);
+  }
+}
+
+async function handleDeleteEvent(eventId) {
+  if (!confirm("Delete this event? Items inside will survive but lose the event link.")) return;
+  try {
+    await api(`/events/${eventId}`, { method: "DELETE" });
+    toast("Event deleted", "success");
+    STATE.currentEventId = null;
+    STATE.currentEvent = null;
+    showEventsListMode();
+    await refreshEvents();
   } catch (err) {
     toastError(err);
   }
@@ -1548,27 +2051,25 @@ async function postComment() {
       body: JSON.stringify({ body }),
     });
 
-    // Upload any attached files to this comment
-    const files = filesEl?.files;
-    if (files && files.length) {
-      for (const f of files) {
+    // v2.4 — upload any staged files (hover-X / click-preview flow).
+    const staged = STATE.stagedFiles.comment || [];
+    if (staged.length) {
+      for (const it of staged) {
         const fd = new FormData();
-        fd.append("file", f);
+        fd.append("file", it.file);
         fd.append("comment_id", String(comment.id));
         try {
           await api(`/bugs/${STATE.currentBugId}/attachments`, { method: "POST", body: fd });
         } catch (err) {
-          toast(`Attachment ${f.name}: ${err.message}`, "error");
+          toast(`Attachment ${it.file.name}: ${err.message}`, "error");
         }
       }
     }
 
     toast("Comment posted", "success");
-    // Clear the inputs so the next comment starts fresh.
     if (bodyEl) bodyEl.value = "";
     if (filesEl) filesEl.value = "";
-    $("#filePreview").innerHTML = "";
-    $("#fileLabel").textContent = "Attach files";
+    clearStagedFiles("comment", "#filePreview", "#fileLabel");
 
     const bug = await api(`/bugs/${STATE.currentBugId}`);
     renderBugInlineSections(bug);
@@ -2046,9 +2547,50 @@ async function refreshAudit() {
 // ---------------------------------------------------------------------------
 // Global listeners (event delegation)
 // ---------------------------------------------------------------------------
+function _resolveNewType() {
+  // v2.4 — pick the default type for the "+ New" main click. Maps tab
+  // to type, falling back to the user's last-chosen default.
+  const tabMap = { Bug: "Bug", Requirement: "Requirement", Task: "Task" };
+  return tabMap[STATE.activeTab] || STATE.defaultNewType || "Bug";
+}
+
+function _refreshNewItemLabel() {
+  const t = _resolveNewType();
+  const btn = $("#newBugBtn");
+  if (btn) btn.textContent = `+ New ${t}`;
+}
+
 function bindGlobalListeners() {
   // Top-bar buttons
-  $("#newBugBtn").addEventListener("click", () => openBugForm());
+  $("#newBugBtn").addEventListener("click", () => {
+    openBugForm({ _defaultType: _resolveNewType() });
+  });
+  // v2.4 — split-button caret menu.
+  $("#newItemCaretBtn")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const menu = $("#newItemMenu");
+    const btn = e.currentTarget;
+    const willOpen = menu.hidden;
+    menu.hidden = !willOpen;
+    btn.setAttribute("aria-expanded", String(willOpen));
+  });
+  $("#newItemMenu")?.addEventListener("click", (e) => {
+    const item = e.target.closest("[data-new-type]");
+    if (!item) return;
+    const t = item.dataset.newType;
+    $("#newItemMenu").hidden = true;
+    $("#newItemCaretBtn")?.setAttribute("aria-expanded", "false");
+    STATE.defaultNewType = t;
+    try { localStorage.setItem("defaultNewType", t); } catch {}
+    _refreshNewItemLabel();
+    openBugForm({ _defaultType: t });
+  });
+  document.addEventListener("click", () => {
+    const menu = $("#newItemMenu");
+    if (menu) menu.hidden = true;
+    $("#newItemCaretBtn")?.setAttribute("aria-expanded", "false");
+  });
+  document.addEventListener("bh:tab-change", _refreshNewItemLabel);
   $("#newProjectBtn").addEventListener("click", () => openProjectForm());
   $("#newUserBtn").addEventListener("click", () => openUserForm());
   $("#exportCsvBtn").addEventListener("click", () => { window.location.href = "/api/bugs/export.csv"; });
@@ -2145,7 +2687,7 @@ function bindGlobalListeners() {
   $("#clearFiltersBtn").addEventListener("click", () => {
     STATE.filters = {
       project_id: [], status: [], priority: [],
-      environment: [], assignee_id: [],
+      environment: [], assignee_id: [], item_type: [],
       reporter_id: "", q: "",
     };
     $("#search").value = "";
@@ -2153,6 +2695,12 @@ function bindGlobalListeners() {
     refreshMultiSelects();
     renderProjectList();
     refreshBugs();
+  });
+  // v2.4 — type tabs.
+  $("#typeTabs")?.addEventListener("click", (e) => {
+    const btn = e.target.closest(".type-tab[data-tab]");
+    if (!btn) return;
+    setActiveTab(btn.dataset.tab);
   });
   $("#search").addEventListener("input", debounce((e) => {
     STATE.filters.q = e.target.value.trim();
@@ -2240,6 +2788,46 @@ function bindGlobalListeners() {
   $("#formBug").addEventListener("submit", submitBugForm);
   $("#formProject").addEventListener("submit", submitProjectForm);
   $("#formUser").addEventListener("submit", submitUserForm);
+  $("#formEvent")?.addEventListener("submit", submitEventForm);
+
+  // v2.4 — Events view: list-mode card click, refresh, new button.
+  $("#newEventBtn")?.addEventListener("click", () => openEventForm());
+  $("#eventsRefreshBtn")?.addEventListener("click", () => refreshEvents());
+  $("#eventsGrid")?.addEventListener("click", (e) => {
+    const card = e.target.closest(".event-card[data-event-id]");
+    if (card) openEventDetail(parseInt(card.dataset.eventId, 10));
+  });
+  // Detail-mode controls.
+  $("#eventBackBtn")?.addEventListener("click", () => {
+    STATE.currentEventId = null;
+    STATE.currentEvent = null;
+    showEventsListMode();
+    refreshEvents();
+  });
+  $("#editEventBtn")?.addEventListener("click", () => {
+    if (STATE.currentEvent) openEventForm(STATE.currentEvent);
+  });
+  $("#deleteEventBtn")?.addEventListener("click", () => {
+    if (STATE.currentEventId) handleDeleteEvent(STATE.currentEventId);
+  });
+  $("#addItemToEventBtn")?.addEventListener("click", () => {
+    if (STATE.currentEventId) {
+      openBugForm({ _defaultType: "Task", _defaultEventId: STATE.currentEventId });
+    }
+  });
+  // Click row inside event-detail items → open the bug detail modal.
+  $("#eventDetailItems")?.addEventListener("click", (e) => {
+    const tr = e.target.closest("tr[data-bug-id]");
+    if (tr) openBugDetail(parseInt(tr.dataset.bugId, 10));
+  });
+
+  // v2.4 — staged-files for create-mode attachments + comment composer.
+  $("#createBugFiles")?.addEventListener("change", (e) => {
+    handleStagedInputChange("createBug", e.target, "#createFilePreview", "#createFileLabel");
+  });
+  $("#createFilePreview")?.addEventListener("click", (e) => {
+    handleStagedListClick("createBug", "#createFilePreview", "#createFileLabel", e);
+  });
 
   // ----- Unified bug modal: delete + inline comments / attachments -----
   // The Delete button now lives inside the bug modal head (admin-only).
@@ -2258,8 +2846,13 @@ function bindGlobalListeners() {
       postComment();
     }
   });
+  // v2.4 — comment composer uses the staged-files flow too: hover-X
+  // removes, click thumbnail previews.
   $("#commentFiles")?.addEventListener("change", (e) => {
-    updateFilePreview(e.target, "#filePreview", "#fileLabel");
+    handleStagedInputChange("comment", e.target, "#filePreview", "#fileLabel");
+  });
+  $("#filePreview")?.addEventListener("click", (e) => {
+    handleStagedListClick("comment", "#filePreview", "#fileLabel", e);
   });
 
   // Bug-level upload handlers used to live here (drag-drop zone + file

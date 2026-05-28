@@ -9,6 +9,42 @@ Current version: **v2.4**.
 
 ## What's new in v2.4
 
+- **Item types** 🐞📐✅ — Bugs, Requirements and Tasks now live in
+  the same numbering sequence (`#42` bug followed by `#43` task
+  followed by `#44` requirement). The top-of-page tab strip
+  (All / Bugs / Requirements / Tasks) scopes the KPIs, filter bar,
+  table columns and analytics charts to one type so a team filing 15-20
+  tasks per day doesn't drown the bug view. Numbering stays global —
+  the tabs are pure UI filtering.
+- **Events** 📅 — containers for groups of work items (a daily
+  standup, a sprint meeting, an incident debrief). Each event can be
+  assigned to one or more **managers** who get emailed on event
+  create / edit / delete. Tasks created *inside* an event email only
+  the task's own assignees — adding someone as event manager doesn't
+  subscribe them to every task in the event. Items can be moved in
+  and out of events freely; deleting an event preserves the items.
+  Org-scoped — events are invisible across tenants.
+- **Type-aware permissions** — admins do everything; managers can
+  edit any item *and* events but can never delete; members can edit
+  and create bugs only. Tasks, requirements and events are
+  read-only for members. The restriction is enforced both server-side
+  (403) **and** in the SPA: when a member opens a Task or Requirement
+  the form fields render disabled with a clear "Read-only" banner —
+  no surprises after typing.
+- **Bug deletion is admin-only** across every item type. Project
+  leads can still edit but no longer delete (pre-v2.4 they could).
+  This protects the audit story and aligns with the OSS spec.
+- **Per-tab KPIs and analytics** — `/api/stats?item_type=Bug` (etc.)
+  scopes the Total / Open / Resolved / Closed / Resolve-Later strip
+  and the chart titles + Environment-card visibility to the active
+  type. `by_type` stays global so the tab badges always reflect
+  reality.
+- **Attachment hover-X / click-preview** — while filing a new item or
+  composing a comment, hover an attachment to remove it (✕) or click
+  the thumbnail to preview the file before saving. Nothing uploads
+  until you submit.
+- **Type-aware email subjects** — a new task says "task", a new
+  requirement says "requirement", never "bug".
 - **First-run bootstrap admin** — set `BOOTSTRAP_ADMIN_EMAIL` and
   `BOOTSTRAP_ADMIN_PASSWORD` in `.env` and the app auto-creates one
   organization + one admin user on first boot. Lets a fresh Docker /
@@ -289,26 +325,18 @@ Notable additions over time:
   the route handler detaches activity rows (`UPDATE activity_log SET
   bug_id = NULL`) before issuing the bug delete, so the same retention
   behaviour applies on legacy schemas without a DDL change.
+- `bugs.item_type` (v2.4) — three flavours of work item sharing one
+  numbering sequence. Added with a server-side default of `'Bug'` so
+  every pre-v2.4 row backfills as Bug at the DB level (no NULL
+  surprises in app code).
+- `bugs.event_id` (v2.4) — nullable FK to the new `events` table.
+  `ON DELETE SET NULL` so removing an event preserves its items.
+- `events` + `event_managers` (v2.4) — new table for the event
+  containers and the many-to-many association with their notified
+  managers. Org-scoped via `events.org_id`.
 - Cookies issued by older builds (which don't carry a `jti`) are still
   accepted and treated as legacy sessions, so a redeploy doesn't kick
   every user out at once.
-
-### Roadmap items deferred from v2.4
-
-The OSS / internal edition of Bug Hunter ships three features the
-enterprise edition does NOT yet have, because adding them touches the
-multi-tenant scoping logic, custom fields and webhook contracts and
-deserves its own release:
-
-- **Item types** (Bug / Requirement / Task) sharing one numbering
-  system. Requires a new `bugs.item_type` column, type-aware emails,
-  per-type permissions and per-type analytics.
-- **Events** — containers for groups of work items with per-event
-  manager email notifications. Requires `events` + `event_managers`
-  tables and a new `/api/events` router scoped to the org.
-- **Type tabs in the SPA** (All / Bug / Requirement / Task) with
-  per-tab KPIs, per-tab filters, per-tab table columns and tab-aware
-  analytics. Depends on the two items above.
 
 Sleuth (the AI assistant) **adds no new tables and modifies no existing
 columns**. It uses the same `bugs`, `comments`, `users`, `projects` and

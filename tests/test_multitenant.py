@@ -404,7 +404,9 @@ class TestBugPermissions:
         }).json()
         assert client.delete(f"/api/bugs/{bug['id']}").status_code == 200
 
-    def test_lead_can_delete_bug(self, client, make_invite):
+    def test_lead_cannot_delete_bug(self, client, make_invite):
+        """v2.4: bug deletion is now admin-only — project leads can
+        edit and manage members but no longer delete bugs."""
         client.post("/api/auth/signup", json={
             "organization_name": "Acme", "name": "Ada", "email": "a@x.test", "password": PASS,
         })
@@ -412,7 +414,6 @@ class TestBugPermissions:
         bug = client.post("/api/bugs", json={
             "project_id": p["id"], "title": "Test Bug Title", "description": "Test description",
         }).json()
-        # Promote a teammate to LEAD via the invite.
         tok = make_invite(client, "lead@x.test", role="member",
                           project_ids=[p["id"]], as_lead=True)
         from fastapi.testclient import TestClient
@@ -422,7 +423,8 @@ class TestBugPermissions:
                 "token": tok, "name": "Liz", "password": PASS,
             })
             r = lead.delete(f"/api/bugs/{bug['id']}")
-            assert r.status_code == 200, r.text
+            assert r.status_code == 403, r.text
+            assert "admin" in r.json()["detail"].lower()
 
     def test_cross_org_bug_assignee_rejected(self, two_orgs):
         c_a, c_b, _, me_b = two_orgs

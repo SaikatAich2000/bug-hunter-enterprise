@@ -49,6 +49,21 @@ class BugSnapshot:
     description: str
     reporter: UserSnapshot | None
     assignees: tuple[UserSnapshot, ...]
+    # v2.4 — item flavour for type-aware subject lines. Default Bug so
+    # any caller that hasn't been updated still gets the legacy subject.
+    item_type: str = "Bug"
+
+
+@dataclass(frozen=True)
+class EventSnapshot:
+    """Pre-built immutable view of an Event for background-task email
+    delivery. Mirrors BugSnapshot's role — no ORM objects past this
+    point so worker threads never touch the SQLAlchemy session."""
+    id: int
+    name: str
+    description: str
+    scheduled_for: str | None
+    managers: tuple[UserSnapshot, ...]
 
 
 # ---------------------------------------------------------------------------
@@ -168,12 +183,20 @@ def _bug_meta_lines(bug: BugSnapshot) -> list[str]:
     ]
 
 
+def _item_type_word(bug: BugSnapshot) -> str:
+    """Lower-case noun used in subjects/bodies — 'bug' / 'task' /
+    'requirement'. Falls back to 'bug' for legacy callers that haven't
+    set item_type on the snapshot."""
+    return (getattr(bug, "item_type", None) or "Bug").lower()
+
+
 def notify_bug_created(bug: BugSnapshot, actor_user_id: int | None) -> None:
     to = _recipients(bug, exclude_user_id=actor_user_id)
     if not to:
         return
-    subject = f"[Bug Hunter] New bug #{bug.id}: {bug.title}"
-    lines = ["A new bug has been reported.", ""]
+    noun = _item_type_word(bug)
+    subject = f"[Bug Hunter] New {noun} #{bug.id}: {bug.title}"
+    lines = [f"A new {noun} has been reported.", ""]
     lines += _bug_meta_lines(bug)
     if bug.description:
         lines += ["", "Description:", bug.description]
@@ -192,8 +215,9 @@ def notify_bug_updated(
     to = _recipients(bug, exclude_user_id=actor_user_id)
     if not to:
         return
-    subject = f"[Bug Hunter] Bug #{bug.id} updated: {bug.title}"
-    lines = [f"{actor_name} updated bug #{bug.id}.", "", "Changes:"]
+    noun = _item_type_word(bug)
+    subject = f"[Bug Hunter] {noun.capitalize()} #{bug.id} updated: {bug.title}"
+    lines = [f"{actor_name} updated {noun} #{bug.id}.", "", "Changes:"]
     for field, old, new in changes:
         lines.append(f"  • {field}: {old or '(empty)'} → {new or '(empty)'}")
     lines += [""] + _bug_meta_lines(bug)
@@ -207,14 +231,15 @@ def notify_assignment(
     actor_name: str,
 ) -> None:
     """Send a personalized 'you've been assigned' email to each new assignee."""
+    noun = _item_type_word(bug)
     for user in newly_assigned:
         if not user.email:
             continue
-        subject = f"[Bug Hunter] You've been assigned to bug #{bug.id}: {bug.title}"
+        subject = f"[Bug Hunter] You've been assigned to {noun} #{bug.id}: {bug.title}"
         lines = [
             f"Hi {user.name},",
             "",
-            f"{actor_name} assigned you to a bug.",
+            f"{actor_name} assigned you to a {noun}.",
             "",
         ]
         lines += _bug_meta_lines(bug)
@@ -233,9 +258,10 @@ def notify_comment_added(
     to = _recipients(bug, exclude_user_id=comment_author_id)
     if not to:
         return
-    subject = f"[Bug Hunter] New comment on bug #{bug.id}: {bug.title}"
+    noun = _item_type_word(bug)
+    subject = f"[Bug Hunter] New comment on {noun} #{bug.id}: {bug.title}"
     lines = [
-        f"{comment_author_name} commented on bug #{bug.id}:",
+        f"{comment_author_name} commented on {noun} #{bug.id}:",
         "",
         comment_body,
         "",
@@ -243,6 +269,80 @@ def notify_comment_added(
     ]
     lines += _bug_meta_lines(bug)
     lines += ["", f"View: {_bug_link(bug.id)}"]
+    deliver(subject, to, "\n".join(lines))
+
+
+def _event_recipients(ev: "EventSnapshot", exclude_user_id: int | None) -> list[str]:
+    """Dedupe the event's manager emails, excluding the acting user
+    (no point notifying yourself of your own action)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in ev.managers:
+        if not m.email:
+            continue
+        if exclude_user_id is not None and m.id == exclude_user_id:
+            continue
+        key = m.email.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(m.email)
+    return out
+
+
+def _event_meta_lines(ev: "EventSnapshot") -> list[str]:
+    lines = [f"Event: {ev.name}"]
+    if ev.scheduled_for:
+        lines.append(f"Scheduled for: {ev.scheduled_for}")
+    if ev.managers:
+        lines.append("Managers: " + ", ".join(m.display for m in ev.managers))
+    return lines
+
+
+def notify_event_created(ev: "EventSnapshot", actor_name: str, actor_user_id: int | None) -> None:
+    """Email managers when an event is created. Member-tier users are
+    NOT recipients — events are a manager-tier coordination tool."""
+    to = _event_recipients(ev, exclude_user_id=actor_user_id)
+    if not to:
+        return
+    subject = f"[Bug Hunter] New event: {ev.name}"
+    lines = [f"{actor_name} created a new event.", ""]
+    lines += _event_meta_lines(ev)
+    if ev.description:
+        lines += ["", "Description:", ev.description]
+    deliver(subject, to, "\n".join(lines))
+
+
+def notify_event_updated(
+    ev: "EventSnapshot",
+    changes: list[tuple[str, str, str]],
+    actor_name: str,
+    actor_user_id: int | None,
+) -> None:
+    if not changes:
+        return
+    to = _event_recipients(ev, exclude_user_id=actor_user_id)
+    if not to:
+        return
+    subject = f"[Bug Hunter] Event updated: {ev.name}"
+    lines = [f"{actor_name} updated event '{ev.name}'.", "", "Changes:"]
+    for field, old, new in changes:
+        lines.append(f"  • {field}: {old or '(empty)'} → {new or '(empty)'}")
+    lines += [""] + _event_meta_lines(ev)
+    deliver(subject, to, "\n".join(lines))
+
+
+def notify_event_deleted(ev: "EventSnapshot", actor_name: str, actor_user_id: int | None) -> None:
+    to = _event_recipients(ev, exclude_user_id=actor_user_id)
+    if not to:
+        return
+    subject = f"[Bug Hunter] Event deleted: {ev.name}"
+    lines = [
+        f"{actor_name} deleted event '{ev.name}'.",
+        "",
+        "The items previously attached to this event are preserved — "
+        "they're now standalone items without an event link.",
+    ]
     deliver(subject, to, "\n".join(lines))
 
 

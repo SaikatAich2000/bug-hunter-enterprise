@@ -370,20 +370,60 @@ def can_manage_sessions(user: User) -> bool:
 # ---------------------------------------------------------------------------
 # Bug-level permission helpers (called from routes/bugs.py)
 # ---------------------------------------------------------------------------
-def can_edit_bug(db: Session, user: User, project: Project) -> bool:
-    """Anyone with access to the project can edit any bug in it. Same
-    relaxed policy as v3.x — Jira's default is roughly this too."""
-    return can_access_project(db, user, project)
+def can_edit_bug(
+    db: Session, user: User, project: Project, item_type: str = "Bug",
+) -> bool:
+    """Edit policy by item flavour (v2.4):
+
+      - Bug         : any project-accessible user (legacy permissive default)
+      - Requirement : admin or manager role only (still needs project access)
+      - Task        : admin or manager role only (still needs project access)
+
+    Members can keep editing bugs the same as before so the existing
+    bug-triage workflow doesn't regress. Tasks and requirements are
+    typically planning artefacts owned by the manager tier — letting
+    members edit them turned out to be a footgun in v2.3 user testing.
+    """
+    if not can_access_project(db, user, project):
+        return False
+    if item_type in ("Requirement", "Task"):
+        return user.role in (ROLE_ADMIN, ROLE_MANAGER)
+    return True
 
 
-def can_delete_bug(db: Session, user: User, project: Project) -> bool:
-    """Bug deletion: admin OR a project lead of THIS project. Members
-    can edit but not delete — this protects the audit story."""
+def can_delete_bug(
+    db: Session, user: User, project: Project, item_type: str = "Bug",
+) -> bool:
+    """Delete policy: admin only across every type (v2.4 tightening).
+
+    Project leads used to be able to delete bugs in their project;
+    this was simplified after the audit-history-preservation work
+    (v2.4) made delete a less destructive operation but still one
+    that should be admin-gated for accountability.
+    """
     if project.org_id != user.org_id:
         return False
-    if user.role == ROLE_ADMIN:
-        return True
-    return can_manage_project(db, user, project)
+    return user.role == ROLE_ADMIN
+
+
+# ---------------------------------------------------------------------------
+# Event-level permission helpers (v2.4)
+# ---------------------------------------------------------------------------
+def can_create_event(user: User) -> bool:
+    """Event creation is admin/manager. Members consume events but
+    don't define them."""
+    return user.role in (ROLE_ADMIN, ROLE_MANAGER)
+
+
+def can_edit_event(user: User) -> bool:
+    """Admins and managers can edit any event in their org. Members
+    are read-only."""
+    return user.role in (ROLE_ADMIN, ROLE_MANAGER)
+
+
+def can_delete_event(user: User) -> bool:
+    """Event deletion is admin-only — parallels bug deletion."""
+    return user.role == ROLE_ADMIN
 
 
 # ---------------------------------------------------------------------------

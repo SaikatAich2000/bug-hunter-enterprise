@@ -88,11 +88,16 @@ def _attachment_brief(a: Attachment) -> dict:
 
 
 def _bug_to_out_dict(bug: Bug, attachment_count: int = 0, can_edit: bool = False) -> dict:
+    # v2.4: include item_type + event link so the SPA can render the
+    # right tab badge / event pill on the list and detail views.
     return {
         "id": bug.id,
         "project_id": bug.project_id,
         "project_name": bug.project.name if bug.project else None,
         "project_key": bug.project.key if bug.project else None,
+        "item_type": getattr(bug, "item_type", None) or "Bug",
+        "event_id": getattr(bug, "event_id", None),
+        "event_name": (bug.event.name if getattr(bug, "event", None) else None),
         "title": bug.title,
         "description": bug.description,
         "reporter": _user_brief(bug.reporter) if bug.reporter else None,
@@ -117,6 +122,7 @@ def _bug_snapshot(bug: Bug) -> BugSnapshot:
         reporter=(UserSnapshot(id=bug.reporter.id, name=bug.reporter.name, email=bug.reporter.email)
                   if bug.reporter else None),
         assignees=tuple(UserSnapshot(id=a.id, name=a.name, email=a.email) for a in bug.assignees),
+        item_type=getattr(bug, "item_type", None) or "Bug",
     )
 
 
@@ -167,6 +173,9 @@ def _eager_bug() -> "select":
         selectinload(Bug.project),
         selectinload(Bug.reporter),
         selectinload(Bug.assignees),
+        # v2.4: pre-load event so _bug_to_out_dict can return event_name
+        # without an N+1 round-trip per row.
+        selectinload(Bug.event),
     )
 
 
@@ -251,6 +260,8 @@ def list_bugs(
     environment: Optional[list[str]] = Query(default=None),
     reporter_id: Optional[int] = None,
     assignee_id: Optional[list[int]] = Query(default=None),
+    item_type: Optional[list[str]] = Query(default=None),  # v2.4
+    event_id: Optional[int] = Query(default=None),  # v2.4 — 0 means "no event"
     q: Optional[str] = None,
     page: int = 1,
     page_size: int = 50,
@@ -277,9 +288,11 @@ def list_bugs(
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
         return out
 
+    from app.schemas import ALLOWED_ITEM_TYPES
     statuses = _normalize_list(status_filter, ALLOWED_STATUSES, "status")
     priorities = _normalize_list(priority, ALLOWED_PRIORITIES, "priority")
     environments = _normalize_list(environment, ALLOWED_ENVIRONMENTS, "environment")
+    item_types = _normalize_list(item_type, ALLOWED_ITEM_TYPES, "item_type")
 
     # The caller-supplied project filter must be intersected with what
     # they can actually see — otherwise they'd see nothing or, worse,
@@ -307,6 +320,16 @@ def list_bugs(
         stmt, count_stmt = apply((stmt, count_stmt), Bug.priority.in_(priorities))
     if environments:
         stmt, count_stmt = apply((stmt, count_stmt), Bug.environment.in_(environments))
+    # v2.4 — type tabs filter implicitly via this list.
+    if item_types:
+        stmt, count_stmt = apply((stmt, count_stmt), Bug.item_type.in_(item_types))
+    if event_id is not None:
+        # event_id=0 means "show only items NOT attached to an event"
+        # (a convenience for the event-detail drill-in's siblings panel).
+        if event_id == 0:
+            stmt, count_stmt = apply((stmt, count_stmt), Bug.event_id.is_(None))
+        else:
+            stmt, count_stmt = apply((stmt, count_stmt), Bug.event_id == event_id)
     if reporter_id is not None:
         stmt, count_stmt = apply((stmt, count_stmt), Bug.reporter_id == reporter_id)
     if assignee_ids:
@@ -366,7 +389,7 @@ def list_bugs(
         items.append(_bug_to_out_dict(
             b,
             int(att_counts.get(b.id, 0)),
-            can_edit_bug(db, user, b.project),
+            can_edit_bug(db, user, b.project, getattr(b, "item_type", None) or "Bug"),
         ))
 
     return BugListResponse.model_validate({
@@ -411,7 +434,10 @@ def get_bug(
         else:
             by_comment.setdefault(a.comment_id, []).append(a)
 
-    payload = _bug_to_out_dict(bug, len(all_atts), can_edit_bug(db, user, bug.project))
+    payload = _bug_to_out_dict(
+        bug, len(all_atts),
+        can_edit_bug(db, user, bug.project, getattr(bug, "item_type", None) or "Bug"),
+    )
     payload["attachments"] = [_attachment_brief(a) for a in bug_level]
     payload["comments"] = []
     for c in bug.comments:
@@ -449,6 +475,23 @@ def create_bug(
     if not can_access_project(db, actor, project):
         raise HTTPException(status_code=403, detail="You don't have access to this project")
 
+    # v2.4: filing a Task or Requirement is admin/manager-only. Members
+    # can still file Bugs as before.
+    item_type = getattr(payload, "item_type", None) or "Bug"
+    if item_type in ("Task", "Requirement") and actor.role not in (ROLE_ADMIN, ROLE_MANAGER):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Only admins and managers can file {item_type.lower()}s.",
+        )
+
+    # v2.4: validate event_id belongs to the same org if provided.
+    from app.models import Event as _Event
+    event_id_val = getattr(payload, "event_id", None)
+    if event_id_val:
+        ev = db.get(_Event, event_id_val)
+        if ev is None or ev.org_id != actor.org_id:
+            raise HTTPException(status_code=400, detail="Event does not exist")
+
     # Reporter override is only permitted for admins / org managers /
     # project leads of THIS project. Regular members file as themselves.
     if payload.reporter_id is not None and payload.reporter_id != actor.id:
@@ -469,19 +512,21 @@ def create_bug(
         priority=payload.priority,
         environment=payload.environment,
         due_date=payload.due_date,
+        item_type=item_type,
+        event_id=event_id_val,
     )
     bug.assignees = list(assignees)
     db.add(bug)
     db.flush()
-    # v2.4 — bake the bug id+title into the detail string so searching
-    # the audit trail by title hits this row directly (even if the
-    # bug is later renamed or deleted).
+    # v2.4 — bake the item type, id, and title into the detail string
+    # so searching the audit trail by any of those still hits this row
+    # (even if the item is later renamed or deleted).
     _log(db, actor.org_id, bug.id, actor, "bug_created",
-         f"Bug #{bug.id} '{bug.title}' created with status '{bug.status}'.")
+         f"{item_type} #{bug.id} '{bug.title}' created with status '{bug.status}'.")
     if assignees:
         names = ", ".join(a.name for a in assignees)
         _log(db, actor.org_id, bug.id, actor, "assignees_added",
-             f"Bug #{bug.id} '{bug.title}' assigned to: {names}")
+             f"{item_type} #{bug.id} '{bug.title}' assigned to: {names}")
     db.commit()
 
     fresh = db.scalar(_eager_bug().where(Bug.id == bug.id))
@@ -500,7 +545,8 @@ def create_bug(
     )
 
     return BugOut.model_validate(_bug_to_out_dict(
-        fresh, 0, can_edit_bug(db, actor, fresh.project),
+        fresh, 0,
+        can_edit_bug(db, actor, fresh.project, getattr(fresh, "item_type", None) or "Bug"),
     ))
 
 
@@ -516,11 +562,32 @@ def update_bug(
     db: Session = Depends(get_db),
 ) -> BugOut:
     bug = _get_bug_or_404(db, bug_id, actor)
-    if not can_edit_bug(db, actor, bug.project):
-        raise HTTPException(status_code=403, detail="You don't have permission to edit this bug.")
+    current_type = getattr(bug, "item_type", None) or "Bug"
+    if not can_edit_bug(db, actor, bug.project, current_type):
+        raise HTTPException(
+            status_code=403,
+            detail=f"You don't have permission to edit this {current_type.lower()}.",
+        )
 
     fields = payload.model_dump(exclude_unset=True)
     actor_name = actor.name
+
+    # v2.4: changing item_type requires the same role gate as the
+    # destination type (admin/manager for Task/Requirement).
+    if "item_type" in fields and fields["item_type"] is not None:
+        new_type = fields["item_type"]
+        if new_type in ("Task", "Requirement") and actor.role not in (ROLE_ADMIN, ROLE_MANAGER):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Only admins and managers can change item_type to {new_type}.",
+            )
+
+    # v2.4: validate event_id belongs to the same org if provided.
+    if "event_id" in fields and fields["event_id"]:
+        from app.models import Event as _Event
+        ev = db.get(_Event, fields["event_id"])
+        if ev is None or ev.org_id != actor.org_id:
+            raise HTTPException(status_code=400, detail="Event does not exist")
 
     # Validate new project_id (must be same org, user must have access)
     if "project_id" in fields and fields["project_id"] is not None:
@@ -546,7 +613,8 @@ def update_bug(
         )
 
     tracked = ["status", "priority", "environment", "project_id",
-               "due_date", "title", "description"]
+               "due_date", "title", "description",
+               "item_type", "event_id"]  # v2.4
     changes: list[tuple[str, str, str]] = []
     for f in tracked:
         if f in fields and getattr(bug, f) != fields[f]:
@@ -619,7 +687,7 @@ def update_bug(
 
     return BugOut.model_validate(_bug_to_out_dict(
         fresh, _attachment_count(db, bug_id),
-        can_edit_bug(db, actor, fresh.project),
+        can_edit_bug(db, actor, fresh.project, getattr(fresh, "item_type", None) or "Bug"),
     ))
 
 
@@ -634,14 +702,18 @@ def delete_bug(
     db: Session = Depends(get_db),
 ) -> dict[str, str]:
     bug = _get_bug_or_404(db, bug_id, actor)
-    if not can_delete_bug(db, actor, bug.project):
+    item_type = getattr(bug, "item_type", None) or "Bug"
+    if not can_delete_bug(db, actor, bug.project, item_type):
         raise HTTPException(
             status_code=403,
-            detail="Only admins and project leads can delete bugs.",
+            detail=f"Only admins can delete {item_type.lower()}s.",
         )
     title = bug.title
     org_id = actor.org_id
-    deleted_snapshot = {"id": bug.id, "title": title, "project_id": bug.project_id}
+    deleted_snapshot = {
+        "id": bug.id, "title": title, "project_id": bug.project_id,
+        "item_type": item_type,
+    }
     # v2.4: detach the bug's audit history BEFORE the delete so the
     # trail survives. Works on the new schema (ondelete=SET NULL) AND
     # on legacy production DBs that still have ondelete=CASCADE —
@@ -660,14 +732,14 @@ def delete_bug(
         org_id=org_id, bug_id=None, entity_type="bug", entity_id=bug_id,
         actor_user_id=actor.id, actor_name=actor.name,
         action="bug_deleted",
-        detail=f"Deleted bug #{bug_id} '{title}'",
+        detail=f"Deleted {item_type.lower()} #{bug_id} '{title}'",
     ))
     db.commit()
     background.add_task(
         deliver_event, org_id, "bug.deleted",
         {"bug": deleted_snapshot, "actor": _user_brief(actor)},
     )
-    return {"message": "Bug deleted"}
+    return {"message": f"{item_type} deleted"}
 
 
 # ---------------------------------------------------------------------------
@@ -803,7 +875,8 @@ def bulk_delete(
         if bug.project_id not in accessible:
             skipped += 1
             continue
-        if not can_delete_bug(db, actor, bug.project):
+        bulk_item_type = getattr(bug, "item_type", None) or "Bug"
+        if not can_delete_bug(db, actor, bug.project, bulk_item_type):
             skipped += 1
             continue
         bid = bug.id

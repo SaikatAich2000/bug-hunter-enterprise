@@ -38,7 +38,8 @@
       </div>
 
       <nav class="nav">
-        <button class="nav-btn active" data-view="list"><span class="nav-icon">📋</span><span>Bugs</span></button>
+        <button class="nav-btn active" data-view="list"><span class="nav-icon">📋</span><span>Work Items</span></button>
+        <button class="nav-btn" data-view="events"><span class="nav-icon">📅</span><span>Events</span></button>
         <button class="nav-btn" data-view="analytics"><span class="nav-icon">📊</span><span>Analytics</span></button>
         <button class="nav-btn" data-view="invitations" data-needs-role="manager"><span class="nav-icon">📨</span><span>Invitations</span></button>
         <button class="nav-btn" data-view="audit" data-needs-role="manager"><span class="nav-icon">🛡</span><span>Audit Trail</span></button>
@@ -87,12 +88,43 @@
     <main class="main">
       <header class="topbar">
         <button class="icon-btn menu-btn" id="menuBtn" aria-label="Open menu">☰</button>
-        <h1 class="page-title" id="pageTitle">All Bugs</h1>
+        <h1 class="page-title" id="pageTitle">All Work Items</h1>
         <div class="search-wrap">
-          <input id="search" type="search" placeholder="Search bugs (title, description or #id)…" autocomplete="off" />
+          <input id="search" type="search" placeholder="Search bugs, requirements, tasks (title, description or #id)…" autocomplete="off" />
         </div>
-        <button class="btn primary" id="newBugBtn">+ New Bug</button>
+        <!-- Split-button: main click files the default flavour (last
+             used), caret opens a menu for the other types. Label
+             flips to match the active tab. -->
+        <div class="new-item-wrap">
+          <button class="btn primary" id="newBugBtn" type="button">+ New Bug</button>
+          <button class="btn primary new-item-caret" id="newItemCaretBtn" type="button"
+                  aria-haspopup="menu" aria-expanded="false" aria-label="Choose item type">▾</button>
+          <div class="new-item-menu" id="newItemMenu" hidden role="menu">
+            <button type="button" role="menuitem" data-new-type="Bug">🐞 New Bug</button>
+            <button type="button" role="menuitem" data-new-type="Requirement" data-needs-role="manager">📐 New Requirement</button>
+            <button type="button" role="menuitem" data-new-type="Task" data-needs-role="manager">✅ New Task</button>
+          </div>
+        </div>
       </header>
+
+      <!-- Type tabs: All / Bugs / Requirements / Tasks. v2.4. Top-level
+           so they scope both the work-items list and the analytics
+           view. Hidden on audit / sessions / events / invitations via
+           setView(). -->
+      <nav class="type-tabs" id="typeTabs" role="tablist" aria-label="Work item type">
+        <button type="button" class="type-tab active" data-tab="all" role="tab" aria-selected="true">
+          <span>All</span><span class="type-tab-count" id="typeTabCountAll">0</span>
+        </button>
+        <button type="button" class="type-tab" data-tab="Bug" role="tab" aria-selected="false">
+          <span>🐞 Bugs</span><span class="type-tab-count" id="typeTabCountBug">0</span>
+        </button>
+        <button type="button" class="type-tab" data-tab="Requirement" role="tab" aria-selected="false">
+          <span>📐 Requirements</span><span class="type-tab-count" id="typeTabCountRequirement">0</span>
+        </button>
+        <button type="button" class="type-tab" data-tab="Task" role="tab" aria-selected="false">
+          <span>✅ Tasks</span><span class="type-tab-count" id="typeTabCountTask">0</span>
+        </button>
+      </nav>
 
       <!-- KPI strip: Total | Open | Resolved | Closed | Resolve Later
            Each tile is a clickable filter that drives the status multi-select.
@@ -115,11 +147,20 @@
         </button>
       </section>
 
-      <!-- Filter bar (visible only on list view). Multi-select dropdowns. -->
+      <!-- Filter bar (visible only on list view). Multi-select dropdowns.
+           v2.4: item_type filter hidden when a specific tab is active
+           (redundant); environment filter hidden on Requirement / Task
+           tabs (not applicable). -->
       <section class="filter-bar" id="filterBar">
         <div class="ms-wrap" data-filter="project_id">
           <button type="button" class="ms-btn" data-ms-toggle aria-haspopup="listbox" aria-expanded="false">
             <span class="ms-btn-label">All Projects</span><span class="ms-caret">▾</span>
+          </button>
+          <div class="ms-panel" hidden role="listbox" aria-multiselectable="true"></div>
+        </div>
+        <div class="ms-wrap" data-filter="item_type">
+          <button type="button" class="ms-btn" data-ms-toggle aria-haspopup="listbox" aria-expanded="false">
+            <span class="ms-btn-label">All Types</span><span class="ms-caret">▾</span>
           </button>
           <div class="ms-panel" hidden role="listbox" aria-multiselectable="true"></div>
         </div>
@@ -150,57 +191,96 @@
         <button class="btn ghost" id="clearFiltersBtn">Clear</button>
       </section>
 
-      <!-- VIEW: List -->
+      <!-- VIEW: List
+           v2.4: <thead> is rebuilt per active tab so each type shows
+           only the columns relevant to it. Numbering stays global —
+           the bugs table is the single source of truth for #N.
+      -->
       <section class="view" id="viewList">
         <div class="table-scroll">
-          <table class="bug-table">
-            <thead>
-              <tr>
-                <th class="col-id">#</th>
-                <th class="col-title">Title</th>
-                <th class="col-project">Project</th>
-                <th class="col-status">Status</th>
-                <th class="col-priority">Priority</th>
-                <th class="col-env">Env</th>
-                <th class="col-assignees">Assignees</th>
-                <th class="col-att">📎</th>
-                <th class="col-actions">Actions</th>
-              </tr>
-            </thead>
+          <table class="bug-table" id="bugTable">
+            <thead id="bugTableHead"></thead>
             <tbody id="bugTableBody"></tbody>
           </table>
         </div>
         <div id="emptyState" class="empty-state" hidden>
-          <p>No bugs match your filters</p>
+          <p>No items match your filters</p>
         </div>
         <div class="pagination" id="paginationBar"></div>
       </section>
 
-      <!-- VIEW: Analytics -->
+      <!-- VIEW: Events
+           Container for groups of work items — typically a standup or
+           sprint meeting. List mode = card grid; clicking a card opens
+           a detail panel with that event's items rendered as the same
+           bug-table component. Tasks can be created inside an event,
+           or moved in/out of one via the Event field in the bug modal.
+      -->
+      <section class="view" id="viewEvents" hidden>
+        <div class="events-list-mode" id="eventsListMode">
+          <div class="page-intro events-intro">
+            <div class="page-intro-icon" aria-hidden="true">📅</div>
+            <div class="page-intro-text">
+              <h2>Events</h2>
+              <p>Group of work items — like a daily standup, sprint meeting or incident debrief. Open an event to see its items</p>
+            </div>
+          </div>
+          <div class="events-controls">
+            <button class="btn primary" id="newEventBtn" data-needs-role="manager">+ New Event</button>
+            <button class="btn ghost" id="eventsRefreshBtn">Refresh</button>
+            <span class="events-summary" id="eventsSummary"></span>
+          </div>
+          <div class="events-grid" id="eventsGrid"></div>
+          <div class="events-empty" id="eventsEmpty" hidden>
+            <p>No events yet. Click <strong>+ New Event</strong> to create one — a standup, a sprint meeting, whatever you want to track</p>
+          </div>
+        </div>
+        <div class="events-detail-mode" id="eventsDetailMode" hidden>
+          <div class="events-detail-head">
+            <button class="btn ghost" id="eventBackBtn" aria-label="Back to events">← Back</button>
+            <h2 id="eventDetailName">Event</h2>
+            <div class="events-detail-actions">
+              <button class="btn ghost" id="editEventBtn" data-needs-role="manager">✎ Edit</button>
+              <button class="btn danger" id="deleteEventBtn" data-needs-role="admin">🗑 Delete</button>
+            </div>
+          </div>
+          <div class="events-detail-meta" id="eventDetailMeta"></div>
+          <div class="events-detail-controls">
+            <button class="btn primary" id="addItemToEventBtn" data-needs-role="manager">+ Add Task</button>
+          </div>
+          <div class="events-detail-items" id="eventDetailItems"></div>
+        </div>
+      </section>
+
+      <!-- VIEW: Analytics
+           v2.4: chart titles update per active tab (Items / Bugs /
+           Requirements / Tasks). The Environment card hides itself
+           on Requirement / Task tabs because environment doesn't
+           apply to those types. -->
       <section class="view" id="viewAnalytics" hidden>
         <div class="charts-grid">
           <div class="chart-card">
-            <h3>Bugs over the last 14 days</h3>
+            <h3 id="chartTimelineTitle">Items over the last 14 days</h3>
             <div id="chartTimeline" class="chart-host"></div>
           </div>
           <div class="chart-card">
-            <h3>By Status</h3>
+            <h3 id="chartStatusTitle">By Status</h3>
             <div id="chartStatus" class="chart-host"></div>
           </div>
           <div class="chart-card">
-            <h3>By Priority</h3>
+            <h3 id="chartPriorityTitle">By Priority</h3>
             <div id="chartPriority" class="chart-host"></div>
           </div>
-          <div class="chart-card">
-            <h3>By Environment</h3>
+          <div class="chart-card" id="chartEnvironmentCard">
+            <h3 id="chartEnvironmentTitle">By Environment</h3>
             <div id="chartEnvironment" class="chart-host"></div>
           </div>
           <div class="chart-card">
-            <h3>By Project</h3>
+            <h3 id="chartProjectTitle">By Project</h3>
             <div id="chartProject" class="chart-host"></div>
           </div>
           <div class="chart-card">
-            <h3>Top Assignees</h3>
+            <h3 id="chartAssigneeTitle">Top Assignees</h3>
             <div id="chartAssignee" class="chart-host"></div>
           </div>
         </div>
@@ -218,7 +298,8 @@
         <div class="audit-controls">
           <select id="auditEntityFilter">
             <option value="">All entities</option>
-            <option value="bug">Bugs</option>
+            <option value="bug">Bugs / Tasks / Requirements</option>
+            <option value="event">Events</option>
             <option value="user">Users</option>
             <option value="project">Projects</option>
             <option value="attachment">Attachments</option>
@@ -228,7 +309,7 @@
           <select id="auditActorFilter">
             <option value="">All actors</option>
           </select>
-          <input id="auditSearch" type="search" placeholder="Search audit log (try bug #, user name, action…)" />
+          <input id="auditSearch" type="search" placeholder="Search audit log (try #42, user name, title, action…)" />
           <button class="btn ghost" id="auditClearBtn">Clear</button>
           <button class="btn ghost" id="auditRefreshBtn">Refresh</button>
         </div>
@@ -302,7 +383,7 @@
           <span class="bug-modal-subtitle muted small" id="modalBugSubtitle"></span>
         </div>
         <div class="bug-modal-head-actions">
-          <button class="btn danger" id="bugDeleteBtn" hidden>🗑 Delete</button>
+          <button class="btn danger" id="bugDeleteBtn" data-needs-role="admin" hidden>🗑 Delete</button>
           <button class="icon-btn modal-close" data-close-modal aria-label="Close">✕</button>
         </div>
       </div>
@@ -323,6 +404,27 @@
               <textarea name="description" rows="6" maxlength="10000"
                 placeholder="What's happening, expected vs actual, repro steps…"></textarea>
             </label>
+
+            <!-- Create-mode attachment uploader (v2.4).
+                 Only visible when filing a NEW item. openBugForm()
+                 unhides this in create mode and hides it on edit.
+                 After the item is created in submitBugForm(), any
+                 files staged here upload to /api/bugs/{id}/comments
+                 as a body-less comment with attachments. -->
+            <section class="bug-section bug-create-attach-section" id="bugCreateAttachSection" hidden>
+              <div class="comment-form">
+                <div class="comment-form-row">
+                  <label class="comment-attach-btn" title="Attach files">
+                    📎 <span id="createFileLabel">Attach files</span>
+                    <input type="file" multiple id="createBugFiles" aria-label="Attachments for new item" />
+                  </label>
+                  <div class="attach-staged-list" id="createFilePreview"></div>
+                </div>
+                <p class="muted small create-attach-hint">
+                  Hover an attachment to remove it (✕) or click to preview before saving
+                </p>
+              </div>
+            </section>
 
             <!-- Comments + attachments + activity only render when editing
                  an existing bug. The submit handler removes all three from
@@ -371,6 +473,10 @@
           <!-- Side column: metadata — status / priority / env / project / reporter / assignees / due date -->
           <aside class="bug-modal-side">
             <label class="field">
+              <span>Type <em>*</em></span>
+              <select name="item_type" required></select>
+            </label>
+            <label class="field">
               <span>Project <em>*</em></span>
               <select name="project_id" required></select>
             </label>
@@ -401,6 +507,12 @@
             <label class="field">
               <span>Assignees</span>
               <div class="chip-picker" id="assigneePicker"></div>
+            </label>
+            <label class="field">
+              <span>Event</span>
+              <select name="event_id">
+                <option value="">— No event —</option>
+              </select>
             </label>
             <label class="field">
               <span>Due date</span>
@@ -701,6 +813,44 @@
           </div>
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- Event create / edit (v2.4). Manager picker is filtered to
+       admin/manager users only — the server also rejects non-eligible
+       ids with a 400. -->
+  <div class="modal" id="modalEvent" hidden>
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2 id="modalEventTitle">New Event</h2>
+        <button class="icon-btn modal-close" data-close-modal aria-label="Close">✕</button>
+      </div>
+      <form id="formEvent" class="modal-body" novalidate>
+        <input type="hidden" name="id" />
+        <label class="field">
+          <span>Name <em>*</em></span>
+          <input name="name" required minlength="2" maxlength="200"
+                 placeholder="Morning standup · 2026-05-29" />
+        </label>
+        <label class="field">
+          <span>Scheduled for</span>
+          <input name="scheduled_for" type="date" />
+        </label>
+        <label class="field">
+          <span>Managers</span>
+          <div class="chip-picker" id="eventManagerPicker"></div>
+          <small class="hint">Managers get notified when the event is created, edited or deleted — but not for individual tasks inside it. Only admin/manager users can be event managers</small>
+        </label>
+        <label class="field">
+          <span>Description</span>
+          <textarea name="description" rows="3" maxlength="10000"
+            placeholder="Agenda, attendees, notes — whatever's useful"></textarea>
+        </label>
+        <div class="modal-foot">
+          <button type="button" class="btn ghost" data-close-modal>Cancel</button>
+          <button type="submit" class="btn primary">Save</button>
+        </div>
+      </form>
     </div>
   </div>
 

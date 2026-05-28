@@ -89,6 +89,29 @@ bug_assignees = Table(
     Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
 )
 
+# v2.4: events are containers for groups of work items (a standup, a
+# sprint meeting, an incident debrief). Each event can be assigned to
+# one or more "managers" who receive notification emails on event
+# create / edit / delete — but NOT on tasks created inside the event.
+# The managers table is a separate junction so we keep cross-org
+# isolation by enforcing org_id at the route layer (both event and
+# user must belong to the same org).
+event_managers = Table(
+    "event_managers",
+    Base.metadata,
+    Column("event_id", Integer, ForeignKey("events.id", ondelete="CASCADE"), primary_key=True),
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
+)
+
+
+# v2.4: the three flavours of work item that share the same numbering
+# sequence. Bug is the legacy default — every pre-v2.4 row reads back
+# as a Bug because that's the column default. Adding new types is a
+# pure UI/permissions concern; the underlying `bugs` table is the
+# single source of truth for all three.
+VALID_ITEM_TYPES = ("Bug", "Requirement", "Task")
+DEFAULT_ITEM_TYPE = "Bug"
+
 
 # ---------------------------------------------------------------------------
 # Organization
@@ -349,6 +372,55 @@ class ProjectMembership(Base):
 
 
 # ---------------------------------------------------------------------------
+# Event (v2.4)
+#
+# Container for groups of work items — a daily standup, sprint meeting,
+# incident debrief, anything you want to track together. Items can be
+# moved in or out of an event freely. Deleting an event sets
+# bugs.event_id to NULL on every contained item; the items themselves
+# survive (audit-trail invariant).
+#
+# Managers (admin or manager role only, validated at the route layer)
+# receive notification emails when the event is created, edited or
+# deleted. They do NOT receive emails for tasks/items created inside
+# the event — that channel is the per-item assignment notification.
+# ---------------------------------------------------------------------------
+class Event(Base):
+    __tablename__ = "events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # ISO date string (YYYY-MM-DD) — same shape as bugs.due_date. Optional.
+    scheduled_for: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+    managers: Mapped[list["User"]] = relationship(
+        "User", secondary=event_managers, lazy="selectin",
+    )
+    # Items belonging to this event. NOT cascade-deleted — when an
+    # event goes away the items survive with event_id=NULL.
+    items: Mapped[list["Bug"]] = relationship(
+        "Bug", back_populates="event",
+        primaryjoin="Bug.event_id == Event.id",
+    )
+
+    __table_args__ = (
+        Index("idx_events_org_id", "org_id"),
+        Index("idx_events_scheduled", "scheduled_for"),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Bug
 # ---------------------------------------------------------------------------
 class Bug(Base):
@@ -360,6 +432,22 @@ class Bug(Base):
     )
     reporter_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    # v2.4: the three flavours of work item share one numbering sequence
+    # and one table. Bug is the default so existing rows in production
+    # backfill as Bug without a migration. The init_db column-recon pass
+    # adds this column with a server-side default to keep the upgrade
+    # safe on a populated DB.
+    item_type: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=DEFAULT_ITEM_TYPE,
+        server_default=DEFAULT_ITEM_TYPE,
+    )
+    # v2.4: optional container — when set, the item belongs to an
+    # event (standup / sprint / etc). Nullable so items can exist
+    # outside an event. ON DELETE SET NULL preserves items when an
+    # event is removed.
+    event_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("events.id", ondelete="SET NULL"), nullable=True
     )
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
@@ -373,6 +461,9 @@ class Bug(Base):
     )
 
     project: Mapped[Project] = relationship("Project", back_populates="bugs")
+    event: Mapped["Event | None"] = relationship(
+        "Event", back_populates="items", foreign_keys=[event_id],
+    )
     reporter: Mapped["User | None"] = relationship("User", foreign_keys=[reporter_id])
     assignees: Mapped[list["User"]] = relationship(
         "User", secondary=bug_assignees, lazy="selectin"
@@ -400,6 +491,9 @@ class Bug(Base):
         Index("idx_bugs_project_status", "project_id", "status"),
         Index("idx_bugs_status_priority", "status", "priority"),
         Index("idx_bugs_updated_at", "updated_at"),
+        # v2.4 — fast type-tab filtering + event-detail item lookups.
+        Index("idx_bugs_item_type", "item_type"),
+        Index("idx_bugs_event_id", "event_id"),
     )
 
 
