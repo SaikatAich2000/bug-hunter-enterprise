@@ -24,7 +24,7 @@ from fastapi import (
     Query, Response, UploadFile, status,
 )
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from app.auth import (
@@ -473,12 +473,15 @@ def create_bug(
     bug.assignees = list(assignees)
     db.add(bug)
     db.flush()
+    # v2.4 — bake the bug id+title into the detail string so searching
+    # the audit trail by title hits this row directly (even if the
+    # bug is later renamed or deleted).
     _log(db, actor.org_id, bug.id, actor, "bug_created",
-         f"Bug created with status '{bug.status}'.")
+         f"Bug #{bug.id} '{bug.title}' created with status '{bug.status}'.")
     if assignees:
         names = ", ".join(a.name for a in assignees)
         _log(db, actor.org_id, bug.id, actor, "assignees_added",
-             f"Assigned to: {names}")
+             f"Bug #{bug.id} '{bug.title}' assigned to: {names}")
     db.commit()
 
     fresh = db.scalar(_eager_bug().where(Bug.id == bug.id))
@@ -583,9 +586,12 @@ def update_bug(
             bug.assignees = new_users
 
     if changes:
+        # v2.4 — prefix each change with the bug id+title so audit
+        # search by title catches update events too.
+        prefix = f"#{bug.id} '{bug.title}' — "
         for field, old, new in changes:
             _log(db, actor.org_id, bug.id, actor, f"{field}_changed",
-                 f"{field}: '{old}' → '{new}'")
+                 f"{prefix}{field}: '{old}' → '{new}'")
         db.commit()
     else:
         db.rollback()
@@ -636,12 +642,25 @@ def delete_bug(
     title = bug.title
     org_id = actor.org_id
     deleted_snapshot = {"id": bug.id, "title": title, "project_id": bug.project_id}
+    # v2.4: detach the bug's audit history BEFORE the delete so the
+    # trail survives. Works on the new schema (ondelete=SET NULL) AND
+    # on legacy production DBs that still have ondelete=CASCADE —
+    # by the time the DELETE runs, no activity row references this
+    # bug, so cascade has nothing left to cascade. The audit rows keep
+    # entity_id pointing at the original bug id and the detail string
+    # preserves the title, so the trail stays searchable.
+    db.execute(
+        update(Activity)
+        .where(Activity.bug_id == bug_id)
+        .values(bug_id=None)
+    )
+    db.flush()
     db.delete(bug)
     db.add(Activity(
         org_id=org_id, bug_id=None, entity_type="bug", entity_id=bug_id,
         actor_user_id=actor.id, actor_name=actor.name,
         action="bug_deleted",
-        detail=f"Deleted bug #{bug_id}: {title}",
+        detail=f"Deleted bug #{bug_id} '{title}'",
     ))
     db.commit()
     background.add_task(
@@ -789,12 +808,20 @@ def bulk_delete(
             continue
         bid = bug.id
         title = bug.title
+        # v2.4 audit retention — same detach-before-delete pattern as
+        # the single-bug delete handler above. Keeps history intact.
+        db.execute(
+            update(Activity)
+            .where(Activity.bug_id == bid)
+            .values(bug_id=None)
+        )
+        db.flush()
         db.delete(bug)
         db.add(Activity(
             org_id=actor.org_id, bug_id=None, entity_type="bug", entity_id=bid,
             actor_user_id=actor.id, actor_name=actor.name,
             action="bug_deleted",
-            detail=f"Deleted bug #{bid}: {title} (bulk)",
+            detail=f"Deleted bug #{bid} '{title}' (bulk)",
         ))
         deleted_ids.append(bid)
         deleted += 1
@@ -857,7 +884,7 @@ def add_comment(
     db.add(c)
     db.flush()
     _log(db, author.org_id, bug_id, author, "comment_added",
-         f"Comment by {author.name}: {payload.body[:80]}")
+         f"#{bug.id} '{bug.title}' — comment by {author.name}: {payload.body[:80]}")
     db.commit()
     db.refresh(c)
 

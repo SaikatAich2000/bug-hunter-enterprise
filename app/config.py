@@ -31,7 +31,7 @@ class Settings:
     ]
 
     APP_NAME: str = os.getenv("APP_NAME", "Bug Hunter")
-    APP_VERSION: str = os.getenv("APP_VERSION", "2.2")
+    APP_VERSION: str = os.getenv("APP_VERSION", "2.4")
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
     APP_BASE_URL: str = os.getenv("APP_BASE_URL", "http://localhost:8000")
@@ -51,6 +51,22 @@ class Settings:
     # When true, anyone hitting /signup can create a new organization.
     # Set to false on locked-down installs that only want invited users.
     ALLOW_PUBLIC_SIGNUP: bool = _env_bool("ALLOW_PUBLIC_SIGNUP", True)
+
+    # --- First-run bootstrap admin ---
+    # On boot, if the database has zero users and BOOTSTRAP_ADMIN_EMAIL is
+    # set, we auto-create one organization + one admin user with this
+    # email and password. This lets a fresh deployment (Docker / Render /
+    # whatever) be logged into immediately without manually hitting
+    # /signup or running raw SQL. After first login, change the password
+    # via the Account panel.
+    #
+    # The bootstrap is strictly idempotent: it never runs if a user
+    # already exists with the bootstrap email, and the lifespan hook
+    # only consults these settings during a single startup pass.
+    BOOTSTRAP_ADMIN_EMAIL: str = os.getenv("BOOTSTRAP_ADMIN_EMAIL", "")
+    BOOTSTRAP_ADMIN_PASSWORD: str = os.getenv("BOOTSTRAP_ADMIN_PASSWORD", "")
+    BOOTSTRAP_ADMIN_NAME: str = os.getenv("BOOTSTRAP_ADMIN_NAME", "Admin")
+    BOOTSTRAP_ORG_NAME: str = os.getenv("BOOTSTRAP_ORG_NAME", "Default Organization")
 
     # --- Email ---
     EMAIL_BACKEND: str = os.getenv("EMAIL_BACKEND", "console").strip().lower()

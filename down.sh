@@ -62,7 +62,7 @@ fi
 # ── Optional: remove built image ─────────────────────────────────────────────
 if [[ "$REMOVE_IMAGES" == true ]]; then
   info "Removing bugtracker_app image..."
-  docker rmi bugtracker_app:2.2 2>/dev/null && info "Image removed." \
+  docker rmi bugtracker_app:2.4 2>/dev/null && info "Image removed." \
     || warn "Image not found or already removed."
 fi
 

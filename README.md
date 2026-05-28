@@ -5,6 +5,46 @@ PostgreSQL + a zero-framework JavaScript SPA. One Docker command to run, no
 external auth, no external file storage — attachments live in the database
 itself.
 
+Current version: **v2.4**.
+
+## What's new in v2.4
+
+- **First-run bootstrap admin** — set `BOOTSTRAP_ADMIN_EMAIL` and
+  `BOOTSTRAP_ADMIN_PASSWORD` in `.env` and the app auto-creates one
+  organization + one admin user on first boot. Lets a fresh Docker /
+  Render deployment be logged-into immediately without going through
+  the multi-tenant `/signup` flow or running raw SQL. The bootstrap is
+  **strictly idempotent**: once that user exists, the env vars are
+  ignored — re-running with a different password will never overwrite
+  the live user's credentials.
+- **Audit history survives bug deletion**. Pre-v2.4, deleting a bug
+  cascade-deleted every activity row it owned, so the trail kept only a
+  single `bug_deleted` summary line. Now the delete handler detaches
+  activity rows (`bug_id → NULL`) before issuing the DELETE, so the
+  full original story — create / update / comment / assignment /
+  delete — survives. Works on existing production databases without a
+  DDL change (the application-level detach runs before the legacy
+  `ON DELETE CASCADE` constraint fires; the constraint is also
+  upgraded to `SET NULL` on fresh installs).
+- **Audit search hits live bug titles** via a `LEFT JOIN` on bugs,
+  so renaming a bug after the fact doesn't hide its history from a
+  title search. The free-text search now ORs against the action,
+  detail, actor name, entity type, the *live* bug title from the
+  join, plus numeric `#id` matches against entity_id, bug_id, and a
+  substring cast of entity_id (for partial-number searches).
+- **Form-field visual refresh**. Every input, select, textarea, the
+  top search bar, the audit filter strip and the multi-select filter
+  buttons got a contrast pass — visible borders, hover lift to the
+  accent colour, focus ring, and a *truly* disabled state (opacity +
+  dashed border + not-allowed cursor) so the difference between "you
+  can type here" and "you can't" finally reads at a glance.
+- **Top search placeholder updated** to make it obvious that the box
+  searches title, description and `#id` together.
+
+Migrations remain **strictly additive** — existing production
+databases are never altered or destroyed on deploy. See
+"[Live-data safety](#live-data-safety)" below.
+
 ## Features
 
 - **Multi-tenant from the ground up** — anyone can sign up and create their
@@ -28,7 +68,16 @@ itself.
   (Gmail / Outlook / SMTP)
 - **Forgot-password** flow via email reset link
 - **Per-org audit trail** — every create / update / delete / login logged,
-  viewable by admins and managers
+  viewable by admins and managers. **Audit history survives bug deletion**:
+  deleting a bug doesn't shrink the trail. The delete handler detaches
+  activity rows before issuing the DELETE, so the original create /
+  update / comment events stay searchable alongside the new
+  `bug_deleted` row.
+- **Powerful audit search** — paste anything into the search box: bug
+  number (`#42` / `42` / `bug 42`), assignee name, current or historical
+  title, action keyword. The query OR's against action / detail / actor
+  name / entity type / live bug title (via LEFT JOIN). Org-scoped — never
+  leaks across tenants.
 - **Strict security headers** (CSP, HSTS, X-Frame-Options) on every response
 - **Light / dark themes**, fully responsive (mobile, tablet, desktop)
 - **CSV export** of all bugs
@@ -64,9 +113,28 @@ holds your live data and is **never** removed by `./deploy.sh` or by a plain
 ### First login
 
 Bug Hunter v4 is **multi-tenant**: anyone can visit `/signup` and create their
-own organization with themselves as the first admin. No bootstrap admin, no
-env-vars-with-passwords — just go to the home page, click *Create an
-organization*, and you're in.
+own organization with themselves as the first admin.
+
+For a single-org deployment (Render, internal Docker host) where signup
+hassle is overkill, set these in `.env` before the first boot:
+
+```env
+BOOTSTRAP_ADMIN_EMAIL=you@yourcompany.com
+BOOTSTRAP_ADMIN_PASSWORD=<a strong password>
+BOOTSTRAP_ADMIN_NAME=Admin
+BOOTSTRAP_ORG_NAME=Your Company
+```
+
+On the first boot the app will create one organization and one admin
+user with that email/password. Go straight to `/login.html`, sign in,
+and **change the password from the Account panel** — leaving the
+bootstrap password in your env is a credential-in-disk risk. The
+bootstrap is **strictly idempotent**: once the user exists, the env
+vars are ignored. Re-running with a different password will not
+modify the live user.
+
+Leave `BOOTSTRAP_ADMIN_EMAIL` empty to disable the bootstrap entirely
+and rely on `/signup` + invitations.
 
 ```
 http://localhost:8765/signup
@@ -151,13 +219,50 @@ The only ways to lose data are:
 - `docker compose down -v` — manual destructive call
 - Manually deleting the named volume
 
-Schema changes in v3.1 are **purely additive**:
+Schema changes are **purely additive** across every release. `init_db()`
+does three passes on every boot — all idempotent, none destructive:
 
-- A new `sessions` table is created on first start (idempotent, only if
-  it doesn't already exist). No existing table's columns or indexes change.
+  1. `create_all()` — adds new tables.
+  2. Index reconciliation — `CREATE INDEX IF NOT EXISTS` for any index
+     the model declares but the DB lacks.
+  3. Column reconciliation — `ALTER TABLE ... ADD COLUMN` for any
+     column the model declares but the DB lacks (with a NULL-tolerant
+     definition so existing rows backfill cleanly).
+
+Notable additions over time:
+
+- `sessions` (v3.1) — created on first start if missing.
+- Branding columns (v2.2) — `organizations.logo_data_url`,
+  `accent_color`, `email_from_override`.
+- TOTP columns (v2.2) — `users.totp_secret`, `totp_enabled`,
+  `totp_enrolled_at`.
+- `activity_log.bug_id` (v2.4) — for fresh installs the FK changes
+  from `ON DELETE CASCADE` to `ON DELETE SET NULL` so audit history
+  outlives the bug it describes. **Existing production databases are
+  not touched** — the legacy `CASCADE` constraint stays in place, and
+  the route handler detaches activity rows (`UPDATE activity_log SET
+  bug_id = NULL`) before issuing the bug delete, so the same retention
+  behaviour applies on legacy schemas without a DDL change.
 - Cookies issued by older builds (which don't carry a `jti`) are still
   accepted and treated as legacy sessions, so a redeploy doesn't kick
   every user out at once.
+
+### Roadmap items deferred from v2.4
+
+The OSS / internal edition of Bug Hunter ships three features the
+enterprise edition does NOT yet have, because adding them touches the
+multi-tenant scoping logic, custom fields and webhook contracts and
+deserves its own release:
+
+- **Item types** (Bug / Requirement / Task) sharing one numbering
+  system. Requires a new `bugs.item_type` column, type-aware emails,
+  per-type permissions and per-type analytics.
+- **Events** — containers for groups of work items with per-event
+  manager email notifications. Requires `events` + `event_managers`
+  tables and a new `/api/events` router scoped to the org.
+- **Type tabs in the SPA** (All / Bug / Requirement / Task) with
+  per-tab KPIs, per-tab filters, per-tab table columns and tab-aware
+  analytics. Depends on the two items above.
 
 Sleuth (the AI assistant) **adds no new tables and modifies no existing
 columns**. It uses the same `bugs`, `comments`, `users`, `projects` and

@@ -438,18 +438,25 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
 }
 .search-wrap input {
   width: 100%;
-  padding: 9px 14px;
+  padding: 10px 14px;
   border-radius: 10px;
-  border: 1px solid var(--border);
-  background: var(--bg-elev-2);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elev);
   color: var(--text);
   font-size: 14px;
   outline: none;
   font-family: inherit;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02),
+              0 1px 2px rgba(0, 0, 0, 0.18);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+.search-wrap input:hover:not(:focus) {
+  border-color: var(--accent);
+  background: var(--bg-elev-3);
 }
 .search-wrap input:focus {
   border-color: var(--accent);
+  background: var(--bg-elev-3);
   box-shadow: var(--shadow-focus);
 }
 .search-wrap input::placeholder { color: var(--text-faint); }
@@ -550,17 +557,19 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
   gap: 6px;
   background: var(--bg-elev);
   color: var(--text);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: 9px;
-  padding: 8px 12px;
+  padding: 9px 12px;
   font-size: 13px;
   font-family: inherit;
   cursor: pointer;
   min-width: 140px;
   max-width: 220px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02),
+              0 1px 2px rgba(0, 0, 0, 0.18);
   transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
 }
-.ms-btn:hover { border-color: var(--border-strong); background: var(--bg-elev-2); }
+.ms-btn:hover { border-color: var(--accent); background: var(--bg-elev-3); }
 .ms-btn.active {
   border-color: var(--accent);
   color: var(--accent);
@@ -982,17 +991,27 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
 .audit-controls select, .audit-controls input {
   background: var(--bg-elev);
   color: var(--text);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: 9px;
-  padding: 8px 12px;
+  padding: 9px 12px;
   font-size: 13px;
   font-family: inherit;
   min-width: 140px;
   outline: none;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02),
+              0 1px 2px rgba(0, 0, 0, 0.18);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+.audit-controls select:hover, .audit-controls input:hover {
+  border-color: var(--accent);
+  background: var(--bg-elev-3);
 }
 .audit-controls select:focus,
-.audit-controls input:focus { border-color: var(--accent); box-shadow: var(--shadow-focus); }
+.audit-controls input:focus {
+  border-color: var(--accent);
+  background: var(--bg-elev-3);
+  box-shadow: var(--shadow-focus);
+}
 .audit-controls input { flex: 1; }
 
 .audit-list {
@@ -1322,21 +1341,42 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
 }
 .field span em { color: var(--danger); font-style: normal; margin-left: 1px; }
 .field input, .field select, .field textarea {
-  background: var(--bg-elev-2);
+  background: var(--bg-elev);
   color: var(--text);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: 9px;
-  padding: 9px 12px;
+  padding: 10px 13px;
   font-size: 13.5px;
   font-family: inherit;
   outline: none;
   width: 100%;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+  /* v2.4: subtle inner highlight + drop shadow give fields a visible
+     "you can type here" boundary. Pre-v2.4 the field background was
+     barely distinguishable from the panel below it which made every
+     field read as disabled. */
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02),
+              0 1px 2px rgba(0, 0, 0, 0.18);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease,
+              background 0.15s ease;
 }
 .field input::placeholder, .field textarea::placeholder { color: var(--text-faint); }
+.field input:hover:not(:disabled):not(:focus),
+.field select:hover:not(:disabled):not(:focus),
+.field textarea:hover:not(:disabled):not(:focus) {
+  border-color: var(--border-strong);
+  background: var(--bg-elev-3);
+}
 .field input:focus, .field select:focus, .field textarea:focus {
   border-color: var(--accent);
+  background: var(--bg-elev-3);
   box-shadow: var(--shadow-focus);
+}
+/* Disabled state — must look DIFFERENT from enabled, not the same. */
+.field input:disabled, .field select:disabled, .field textarea:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  background: var(--bg-elev);
+  border-style: dashed;
 }
 .field input[type="color"] { padding: 2px; height: 38px; cursor: pointer; }
 .field.check-row {
@@ -1485,9 +1525,9 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
   gap: 10px;
 }
 .comment-form textarea {
-  background: var(--bg-elev-2);
+  background: var(--bg-elev);
   color: var(--text);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: 10px;
   padding: 12px 14px;
   font-family: inherit;
@@ -1495,9 +1535,16 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
   min-height: 84px;
   resize: vertical;
   outline: none;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02),
+              0 1px 2px rgba(0, 0, 0, 0.18);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
 }
-.comment-form textarea:focus { border-color: var(--accent); box-shadow: var(--shadow-focus); }
+.comment-form textarea:hover:not(:focus) { border-color: var(--accent); background: var(--bg-elev-3); }
+.comment-form textarea:focus {
+  border-color: var(--accent);
+  background: var(--bg-elev-3);
+  box-shadow: var(--shadow-focus);
+}
 .comment-form-row {
   display: flex;
   align-items: center;

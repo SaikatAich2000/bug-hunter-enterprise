@@ -473,8 +473,15 @@ class Activity(Base):
     org_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
     )
+    # bug_id uses ON DELETE SET NULL on fresh installs (v2.4) so audit
+    # history outlives the bug it describes. Existing prod DBs still
+    # have the legacy ON DELETE CASCADE constraint; the delete handler
+    # in routes/bugs.py detaches rows (UPDATE bug_id=NULL) before the
+    # bug delete fires, so the same retention behaviour applies on
+    # both schemas without a DDL change. The entity_id stays set so
+    # searching for the original bug number still works.
     bug_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("bugs.id", ondelete="CASCADE"), nullable=True
+        Integer, ForeignKey("bugs.id", ondelete="SET NULL"), nullable=True
     )
     entity_type: Mapped[str] = mapped_column(String(40), nullable=False, default="bug")
     entity_id: Mapped[int | None] = mapped_column(Integer, nullable=True)

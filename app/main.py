@@ -19,11 +19,13 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from app.auth import COOKIE_NAME, parse_session_token
+from app.auth import COOKIE_NAME, hash_password, parse_session_token
 from app.config import get_settings
 from app.csrf import CSRFMiddleware
 from app.database import SessionLocal, init_db
-from app.models import Activity, Session as SessionRow
+from app.models import (
+    Activity, Organization, ROLE_ADMIN, Session as SessionRow, User,
+)
 from app.observability import (
     ObservabilityMiddleware, configure_logging, render_prometheus,
 )
@@ -104,10 +106,94 @@ async def _audit_retention_loop(retention_days: int):
         await asyncio.sleep(24 * 3600)
 
 
+_SLUG_BAD = __import__("re").compile(r"[^a-z0-9]+")
+
+
+def _bootstrap_admin() -> None:
+    """Idempotent first-run bootstrap.
+
+    When all of the following are true, create one organization + one
+    admin user with the configured email/password:
+
+      - `BOOTSTRAP_ADMIN_EMAIL` is set.
+      - `BOOTSTRAP_ADMIN_PASSWORD` is set.
+      - No user with that email already exists.
+
+    This mirrors the OSS edition's behaviour: a fresh deployment
+    (Docker / Render / etc.) is loggable-in immediately without poking
+    at SQL or going through the multi-tenant signup flow.
+
+    Safe to call on every boot — once the user exists, this is a no-op.
+    Never overwrites or modifies an existing user. Never overwrites or
+    modifies an existing org with the same name.
+    """
+    s = get_settings()
+    if not s.BOOTSTRAP_ADMIN_EMAIL or not s.BOOTSTRAP_ADMIN_PASSWORD:
+        return
+
+    email = s.BOOTSTRAP_ADMIN_EMAIL.strip().lower()
+    if not email:
+        return
+
+    db = SessionLocal()
+    try:
+        from sqlalchemy import select as _sel
+        existing = db.scalar(_sel(User).where(User.email == email))
+        if existing is not None:
+            return  # Nothing to do.
+
+        # Reuse the bootstrap org if it already exists by name, otherwise
+        # create a fresh one. Reusing makes re-bootstrapping after a
+        # manual user-row deletion work without piling up empty orgs.
+        org = db.scalar(
+            _sel(Organization).where(Organization.name == s.BOOTSTRAP_ORG_NAME)
+        )
+        if org is None:
+            base_slug = _SLUG_BAD.sub("-", s.BOOTSTRAP_ORG_NAME.lower()).strip("-") or "default"
+            base_slug = base_slug[:60]
+            slug = base_slug
+            # Race-safe slug collision handler — extremely unlikely to
+            # collide on a fresh DB but keeps us robust.
+            import secrets as _secrets
+            while db.scalar(_sel(Organization.id).where(Organization.slug == slug)):
+                slug = f"{base_slug}-{_secrets.token_hex(3)}"
+            org = Organization(
+                name=s.BOOTSTRAP_ORG_NAME,
+                slug=slug,
+                description="Created automatically on first boot.",
+            )
+            db.add(org)
+            db.flush()  # need org.id
+
+        admin = User(
+            org_id=org.id,
+            name=s.BOOTSTRAP_ADMIN_NAME or "Admin",
+            email=email,
+            role=ROLE_ADMIN,
+            is_active=True,
+            password_hash=hash_password(s.BOOTSTRAP_ADMIN_PASSWORD),
+        )
+        db.add(admin)
+        db.commit()
+        logger.warning(
+            "Bootstrap: created default admin %s (org: %s). CHANGE THE PASSWORD.",
+            email, org.name,
+        )
+    except Exception:
+        logger.exception("Bootstrap admin creation failed")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import asyncio
     init_db()
+    _bootstrap_admin()
 
     settings = get_settings()
     if not settings.SESSION_SECRET:
@@ -124,7 +210,10 @@ async def lifespan(app: FastAPI):
             _audit_retention_loop(settings.AUDIT_RETENTION_DAYS)
         )
 
-    logger.info("Bug Hunter v2.2 started. asset_version=%s", app.state.asset_version)
+    logger.info(
+        "Bug Hunter v%s started. asset_version=%s",
+        settings.APP_VERSION, app.state.asset_version,
+    )
     try:
         yield
     finally:
