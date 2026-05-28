@@ -110,22 +110,39 @@ _SLUG_BAD = __import__("re").compile(r"[^a-z0-9]+")
 
 
 def _bootstrap_admin() -> None:
-    """Idempotent first-run bootstrap.
+    """First-run bootstrap of an organization + admin user.
 
-    When all of the following are true, create one organization + one
-    admin user with the configured email/password:
+    Three outcomes depending on the database state:
 
-      - `BOOTSTRAP_ADMIN_EMAIL` is set.
-      - `BOOTSTRAP_ADMIN_PASSWORD` is set.
-      - No user with that email already exists.
+      1. No user with `BOOTSTRAP_ADMIN_EMAIL` exists → create the org
+         (reusing one with the bootstrap name if present) AND create
+         the admin user with the configured password.
+      2. The user exists AND `BOOTSTRAP_ADMIN_RESET_PASSWORD=true` →
+         RESET that user's password to `BOOTSTRAP_ADMIN_PASSWORD` and
+         re-activate them, and bump session_version (which invalidates
+         existing sessions). The user is logged in via the env-var
+         password on the next request. Logs a loud warning so this
+         doesn't go unnoticed.
+      3. The user exists AND `BOOTSTRAP_ADMIN_RESET_PASSWORD=false`
+         (the safe default) → leave the user untouched. Log a clear
+         info-level line so operators can see why the bootstrap is a
+         no-op (e.g. "I changed BOOTSTRAP_ADMIN_PASSWORD but can't
+         log in" → this log tells them to set the reset flag).
 
-    This mirrors the OSS edition's behaviour: a fresh deployment
-    (Docker / Render / etc.) is loggable-in immediately without poking
-    at SQL or going through the multi-tenant signup flow.
+    Outcome 2 is the escape hatch for the common deployment situation
+    where the prod DB already had a user with this email (from an
+    earlier deployment, a manual signup, or a previous bootstrap with
+    a different password) and the operator is locked out. After
+    logging in with the new password, the operator should:
 
-    Safe to call on every boot — once the user exists, this is a no-op.
-    Never overwrites or modifies an existing user. Never overwrites or
-    modifies an existing org with the same name.
+      a. Change the password via the Account panel.
+      b. Flip `BOOTSTRAP_ADMIN_RESET_PASSWORD` back to false (or remove
+         it) so the next redeploy doesn't keep stomping the password.
+
+    No-op behaviour is guaranteed in both safe paths:
+      - Returns immediately if email or password is empty.
+      - Never modifies an existing user when the reset flag is off.
+      - Never creates a duplicate user / org.
     """
     s = get_settings()
     if not s.BOOTSTRAP_ADMIN_EMAIL or not s.BOOTSTRAP_ADMIN_PASSWORD:
@@ -140,7 +157,33 @@ def _bootstrap_admin() -> None:
         from sqlalchemy import select as _sel
         existing = db.scalar(_sel(User).where(User.email == email))
         if existing is not None:
-            return  # Nothing to do.
+            if s.BOOTSTRAP_ADMIN_RESET_PASSWORD:
+                existing.password_hash = hash_password(s.BOOTSTRAP_ADMIN_PASSWORD)
+                # Reactivate in case the account was disabled. Promote
+                # to admin if downgraded — the env-var bootstrap is
+                # meant for an admin so we should restore that role.
+                existing.is_active = True
+                existing.role = ROLE_ADMIN
+                # Bump session_version so any cached cookies fail
+                # validation. The operator gets a fresh session via
+                # the env-var password.
+                existing.session_version = (existing.session_version or 0) + 1
+                db.commit()
+                logger.warning(
+                    "Bootstrap: RESET password for existing admin %s "
+                    "(BOOTSTRAP_ADMIN_RESET_PASSWORD=true). "
+                    "Log in with the env-var password, change it, "
+                    "then unset the reset flag.",
+                    email,
+                )
+            else:
+                logger.info(
+                    "Bootstrap: user %s already exists; leaving untouched. "
+                    "Set BOOTSTRAP_ADMIN_RESET_PASSWORD=true and redeploy "
+                    "if you need to reset the password.",
+                    email,
+                )
+            return
 
         # Reuse the bootstrap org if it already exists by name, otherwise
         # create a fresh one. Reusing makes re-bootstrapping after a

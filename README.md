@@ -14,9 +14,18 @@ Current version: **v2.4**.
   organization + one admin user on first boot. Lets a fresh Docker /
   Render deployment be logged-into immediately without going through
   the multi-tenant `/signup` flow or running raw SQL. The bootstrap is
-  **strictly idempotent**: once that user exists, the env vars are
-  ignored — re-running with a different password will never overwrite
-  the live user's credentials.
+  **strictly idempotent by default** — once that user exists, the env
+  vars are ignored.
+- **Locked-out recovery** — for the common deployment where the prod
+  DB already has a user with the bootstrap email but the password is
+  unknown (stale from a prior boot, manual signup, etc.), set
+  `BOOTSTRAP_ADMIN_RESET_PASSWORD=true` and redeploy. On the next
+  boot the app *resets* the user's password to the env-var value,
+  re-promotes them to admin, re-activates them if disabled, and
+  invalidates outstanding sessions. After logging in, change the
+  password from the Account panel and flip the flag back off. See
+  "[Locked out of the bootstrap admin?](#locked-out-of-the-bootstrap-admin)"
+  below for the full procedure.
 - **Audit history survives bug deletion**. Pre-v2.4, deleting a bug
   cascade-deleted every activity row it owned, so the trail kept only a
   single `bug_deleted` summary line. Now the delete handler detaches
@@ -135,6 +144,43 @@ modify the live user.
 
 Leave `BOOTSTRAP_ADMIN_EMAIL` empty to disable the bootstrap entirely
 and rely on `/signup` + invitations.
+
+#### Locked out of the bootstrap admin?
+
+If a previous deployment created a user with `BOOTSTRAP_ADMIN_EMAIL`
+but a different password, the bootstrap leaves that user untouched on
+later boots — so re-deploying with a new `BOOTSTRAP_ADMIN_PASSWORD`
+won't help on its own. To recover:
+
+1. Set `BOOTSTRAP_ADMIN_RESET_PASSWORD=true` alongside the same
+   `BOOTSTRAP_ADMIN_EMAIL` and your *new* `BOOTSTRAP_ADMIN_PASSWORD`.
+2. Redeploy. On boot the app resets the existing user's password to
+   the new env value, re-promotes them to admin, re-activates them if
+   disabled, and invalidates existing sessions.
+3. Log in with the new password.
+4. **Change the password from the Account panel.**
+5. Set `BOOTSTRAP_ADMIN_RESET_PASSWORD=false` (or remove it) and
+   redeploy once more. Otherwise every redeploy stomps the password
+   back to whatever's in the env var.
+
+Watch the boot logs to confirm — a successful reset emits a `WARNING`
+line like:
+
+```
+Bootstrap: RESET password for existing admin you@example.com
+(BOOTSTRAP_ADMIN_RESET_PASSWORD=true). Log in with the env-var
+password, change it, then unset the reset flag.
+```
+
+If you instead see:
+
+```
+Bootstrap: user you@example.com already exists; leaving untouched.
+Set BOOTSTRAP_ADMIN_RESET_PASSWORD=true and redeploy if you need to
+reset the password.
+```
+
+…then the reset flag isn't picked up — double-check the env var.
 
 ```
 http://localhost:8765/signup

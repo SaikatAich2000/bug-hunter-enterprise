@@ -67,6 +67,19 @@ class Settings:
     BOOTSTRAP_ADMIN_PASSWORD: str = os.getenv("BOOTSTRAP_ADMIN_PASSWORD", "")
     BOOTSTRAP_ADMIN_NAME: str = os.getenv("BOOTSTRAP_ADMIN_NAME", "Admin")
     BOOTSTRAP_ORG_NAME: str = os.getenv("BOOTSTRAP_ORG_NAME", "Default Organization")
+    # Escape hatch — when true AND a user with BOOTSTRAP_ADMIN_EMAIL
+    # already exists, the bootstrap RESETS that user's password to
+    # BOOTSTRAP_ADMIN_PASSWORD and bumps their session_version (logging
+    # out other devices for that account). Off by default because
+    # overwriting a real user's password on every deploy is a footgun:
+    # if you leave the env var set, every redeploy re-resets the
+    # password to whatever's in the env.
+    #
+    # Flip to true exactly when you've locked yourself out of an
+    # existing bootstrap account and need to recover. Log in, change
+    # the password from the Account panel, then set this back to false
+    # (or remove it) before the next redeploy.
+    BOOTSTRAP_ADMIN_RESET_PASSWORD: bool = _env_bool("BOOTSTRAP_ADMIN_RESET_PASSWORD", False)
 
     # --- Email ---
     EMAIL_BACKEND: str = os.getenv("EMAIL_BACKEND", "console").strip().lower()

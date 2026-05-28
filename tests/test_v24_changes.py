@@ -152,6 +152,136 @@ def test_bootstrap_disabled_when_password_blank(monkeypatch, tmp_path):
         assert r.status_code == 401
 
 
+def test_bootstrap_reset_password_overwrites_existing(monkeypatch, tmp_path):
+    """The escape-hatch flag: when an existing user is found AND
+    BOOTSTRAP_ADMIN_RESET_PASSWORD=true, their password is reset to
+    the env-var value. This is the recovery path for deployments where
+    the user was created with a stale password by an earlier run."""
+    db_path = tmp_path / "reset.db"
+
+    def _set_env(extra):
+        monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+        monkeypatch.setenv("EMAIL_BACKEND", "disabled")
+        monkeypatch.setenv("SESSION_SECRET", "v24_reset_secret")
+        monkeypatch.setenv("BCRYPT_ROUNDS", "4")
+        monkeypatch.setenv("CSRF_PROTECTION", "false")
+        for k, v in extra.items():
+            monkeypatch.setenv(k, v)
+        for mod in list(sys.modules):
+            if mod == "app" or mod.startswith("app."):
+                del sys.modules[mod]
+        from app.config import get_settings
+        get_settings.cache_clear()  # type: ignore[attr-defined]
+
+    # Boot 1: create the user with the original password.
+    _set_env({
+        "BOOTSTRAP_ADMIN_EMAIL": "boot@bh.test",
+        "BOOTSTRAP_ADMIN_PASSWORD": "OriginalPW123",
+        "BOOTSTRAP_ADMIN_RESET_PASSWORD": "false",
+    })
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        r = client.post("/api/auth/login", json={
+            "email": "boot@bh.test", "password": "OriginalPW123",
+        })
+        assert r.status_code == 200
+
+    # Boot 2: same email, different password, RESET FLAG OFF — the
+    # bootstrap should be a NO-OP. Original password must still work.
+    _set_env({
+        "BOOTSTRAP_ADMIN_EMAIL": "boot@bh.test",
+        "BOOTSTRAP_ADMIN_PASSWORD": "NewPW456",
+        "BOOTSTRAP_ADMIN_RESET_PASSWORD": "false",
+    })
+    from app.main import app as app2
+    with TestClient(app2) as client2:
+        r = client2.post("/api/auth/login", json={
+            "email": "boot@bh.test", "password": "OriginalPW123",
+        })
+        assert r.status_code == 200, "original password should still work when reset flag is OFF"
+        r2 = client2.post("/api/auth/login", json={
+            "email": "boot@bh.test", "password": "NewPW456",
+        })
+        assert r2.status_code == 401, "new password must NOT be accepted when reset flag is OFF"
+
+    # Boot 3: same email, RESET FLAG ON — the bootstrap should reset
+    # the password to the env value. New password works, old one does not.
+    _set_env({
+        "BOOTSTRAP_ADMIN_EMAIL": "boot@bh.test",
+        "BOOTSTRAP_ADMIN_PASSWORD": "NewPW456",
+        "BOOTSTRAP_ADMIN_RESET_PASSWORD": "true",
+    })
+    from app.main import app as app3
+    with TestClient(app3) as client3:
+        r = client3.post("/api/auth/login", json={
+            "email": "boot@bh.test", "password": "NewPW456",
+        })
+        assert r.status_code == 200, "reset password should be accepted after BOOTSTRAP_ADMIN_RESET_PASSWORD=true boot"
+        r2 = client3.post("/api/auth/login", json={
+            "email": "boot@bh.test", "password": "OriginalPW123",
+        })
+        assert r2.status_code == 401, "original password must NOT work after reset"
+
+
+def test_bootstrap_reset_promotes_disabled_user(monkeypatch, tmp_path):
+    """The reset path also re-activates a disabled user and re-promotes
+    them to admin — so a deactivated bootstrap user can be recovered."""
+    db_path = tmp_path / "reset_disabled.db"
+
+    def _set_env(extra):
+        monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+        monkeypatch.setenv("EMAIL_BACKEND", "disabled")
+        monkeypatch.setenv("SESSION_SECRET", "v24_reset_disabled")
+        monkeypatch.setenv("BCRYPT_ROUNDS", "4")
+        monkeypatch.setenv("CSRF_PROTECTION", "false")
+        for k, v in extra.items():
+            monkeypatch.setenv(k, v)
+        for mod in list(sys.modules):
+            if mod == "app" or mod.startswith("app."):
+                del sys.modules[mod]
+        from app.config import get_settings
+        get_settings.cache_clear()  # type: ignore[attr-defined]
+
+    _set_env({
+        "BOOTSTRAP_ADMIN_EMAIL": "boot@bh.test",
+        "BOOTSTRAP_ADMIN_PASSWORD": "Initial123",
+        "BOOTSTRAP_ADMIN_RESET_PASSWORD": "false",
+    })
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        client.post("/api/auth/login", json={
+            "email": "boot@bh.test", "password": "Initial123",
+        })
+
+    # Manually disable + downgrade the user in the DB.
+    from sqlalchemy import create_engine, text
+    eng = create_engine(f"sqlite:///{db_path}")
+    with eng.begin() as conn:
+        conn.execute(text(
+            "UPDATE users SET is_active = 0, role = 'member' "
+            "WHERE email = 'boot@bh.test'"
+        ))
+    eng.dispose()
+
+    # Boot again with the reset flag ON.
+    _set_env({
+        "BOOTSTRAP_ADMIN_EMAIL": "boot@bh.test",
+        "BOOTSTRAP_ADMIN_PASSWORD": "Restored456",
+        "BOOTSTRAP_ADMIN_RESET_PASSWORD": "true",
+    })
+    from app.main import app as app2
+    with TestClient(app2) as client2:
+        r = client2.post("/api/auth/login", json={
+            "email": "boot@bh.test", "password": "Restored456",
+        })
+        assert r.status_code == 200, r.text
+        # Role should be admin again.
+        assert r.json()["role"] == "admin"
+        assert r.json()["is_active"] is True
+
+
 # ---------------------------------------------------------------------------
 # 2. Audit history retention on bug delete
 # ---------------------------------------------------------------------------
