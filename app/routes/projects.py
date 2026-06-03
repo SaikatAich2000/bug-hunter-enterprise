@@ -31,6 +31,9 @@ from app.schemas import ProjectIn, ProjectOut
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
+# S1192: extract duplicated detail string into a module constant.
+_DETAIL_PROJECT_NOT_FOUND = "Project not found"
+
 
 def _audit(db: Session, org_id: int, actor: User, action: str, entity_id: int, detail: str) -> None:
     db.add(Activity(
@@ -194,7 +197,7 @@ def get_project(
 ) -> dict:
     p = get_org_project_or_404(db, project_id, user)
     if not can_access_project(db, user, p):
-        raise HTTPException(status_code=404, detail="Project not found")
+        raise HTTPException(status_code=404, detail=_DETAIL_PROJECT_NOT_FOUND)
     cnt = db.scalar(
         select(func.count(ProjectMembership.id))
         .where(ProjectMembership.project_id == p.id)

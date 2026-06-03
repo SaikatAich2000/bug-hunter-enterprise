@@ -109,6 +109,43 @@ async def _audit_retention_loop(retention_days: int):
 _SLUG_BAD = __import__("re").compile(r"[^a-z0-9]+")
 
 
+def _bootstrap_handle_existing(db, existing, s, email: str) -> None:
+    """Handle the 'admin user already exists' branch of _bootstrap_admin.
+
+    Extracted to keep _bootstrap_admin's cognitive complexity under the
+    SonarQube python:S3776 threshold. Behaviour preserved byte-for-byte:
+      - If BOOTSTRAP_ADMIN_RESET_PASSWORD is true → reset password,
+        re-activate, promote to admin, bump session_version, log warning.
+      - Otherwise → log an info line explaining the no-op.
+    """
+    if s.BOOTSTRAP_ADMIN_RESET_PASSWORD:
+        existing.password_hash = hash_password(s.BOOTSTRAP_ADMIN_PASSWORD)
+        # Reactivate in case the account was disabled. Promote
+        # to admin if downgraded — the env-var bootstrap is
+        # meant for an admin so we should restore that role.
+        existing.is_active = True
+        existing.role = ROLE_ADMIN
+        # Bump session_version so any cached cookies fail
+        # validation. The operator gets a fresh session via
+        # the env-var password.
+        existing.session_version = (existing.session_version or 0) + 1
+        db.commit()
+        logger.warning(
+            "Bootstrap: RESET password for existing admin %s "
+            "(BOOTSTRAP_ADMIN_RESET_PASSWORD=true). "
+            "Log in with the env-var password, change it, "
+            "then unset the reset flag.",
+            email,
+        )
+    else:
+        logger.info(
+            "Bootstrap: user %s already exists; leaving untouched. "
+            "Set BOOTSTRAP_ADMIN_RESET_PASSWORD=true and redeploy "
+            "if you need to reset the password.",
+            email,
+        )
+
+
 def _bootstrap_admin() -> None:
     """First-run bootstrap of an organization + admin user.
 
@@ -157,32 +194,7 @@ def _bootstrap_admin() -> None:
         from sqlalchemy import select as _sel
         existing = db.scalar(_sel(User).where(User.email == email))
         if existing is not None:
-            if s.BOOTSTRAP_ADMIN_RESET_PASSWORD:
-                existing.password_hash = hash_password(s.BOOTSTRAP_ADMIN_PASSWORD)
-                # Reactivate in case the account was disabled. Promote
-                # to admin if downgraded — the env-var bootstrap is
-                # meant for an admin so we should restore that role.
-                existing.is_active = True
-                existing.role = ROLE_ADMIN
-                # Bump session_version so any cached cookies fail
-                # validation. The operator gets a fresh session via
-                # the env-var password.
-                existing.session_version = (existing.session_version or 0) + 1
-                db.commit()
-                logger.warning(
-                    "Bootstrap: RESET password for existing admin %s "
-                    "(BOOTSTRAP_ADMIN_RESET_PASSWORD=true). "
-                    "Log in with the env-var password, change it, "
-                    "then unset the reset flag.",
-                    email,
-                )
-            else:
-                logger.info(
-                    "Bootstrap: user %s already exists; leaving untouched. "
-                    "Set BOOTSTRAP_ADMIN_RESET_PASSWORD=true and redeploy "
-                    "if you need to reset the password.",
-                    email,
-                )
+            _bootstrap_handle_existing(db, existing, s, email)
             return
 
         # Reuse the bootstrap org if it already exists by name, otherwise

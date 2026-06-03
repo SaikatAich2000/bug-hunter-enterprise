@@ -162,62 +162,81 @@ def _scope_to_actor(stmt, count_stmt, db: Session, actor: User):
     )
 
 
+_CREATED_AT_KEYWORDS = (
+    "created", "filed", "reported", "opened", "raised",
+    "logged", "submitted", "registered",
+)
+
+
+def _apply_both(stmt, count_stmt, clause):
+    """Apply the same WHERE clause to both the select and the count statement."""
+    return stmt.where(clause), count_stmt.where(clause)
+
+
+def _apply_text_search(stmt, count_stmt, needle_raw: str):
+    """Build the title/description LIKE clause for the text-search filter.
+
+    Same LIKE-escape the bugs route uses — keep `_` and `%` literal.
+    """
+    needle = needle_raw.lower().replace("\\", "\\\\")
+    needle = needle.replace("%", "\\%").replace("_", "\\_")
+    like = f"%{needle}%"
+    clause = or_(
+        func.lower(Bug.title).like(like, escape="\\"),
+        func.lower(Bug.description).like(like, escape="\\"),
+    )
+    return _apply_both(stmt, count_stmt, clause)
+
+
+def _apply_time_window(stmt, count_stmt, pq: ParsedQuery):
+    """Layer the time-window filter onto the statement pair, picking the
+    right timestamp column based on the verbs the user used.
+
+    If the user said "created" / "filed" / "reported" / "opened" we use
+    created_at; otherwise default to updated_at because "what's been
+    touched recently" is usually what people want when they ask vaguely
+    about "the last N days".
+    """
+    msg_l = (pq.raw_message or "").lower()
+    use_created = any(k in msg_l for k in _CREATED_AT_KEYWORDS)
+    col = Bug.created_at if use_created else Bug.updated_at
+    if pq.time_window.start:
+        stmt, count_stmt = _apply_both(stmt, count_stmt, col >= pq.time_window.start)
+    if pq.time_window.end:
+        stmt, count_stmt = _apply_both(stmt, count_stmt, col <= pq.time_window.end)
+    return stmt, count_stmt
+
+
 def _apply_bug_filters(stmt, count_stmt, pq: ParsedQuery):
     """Layer the parsed filters onto a select+count statement pair.
 
     Returned as a tuple so the caller can run COUNT and SELECT side by
     side (we always want the total even when paginating to a slice).
+
+    NOTE: tenant / project-access scoping is NOT applied here — call
+    _scope_to_actor() afterwards. Keeping the two concerns separate
+    means user-supplied filters can narrow but never broaden the
+    actor's project scope.
     """
     if pq.statuses:
-        stmt = stmt.where(Bug.status.in_(pq.statuses))
-        count_stmt = count_stmt.where(Bug.status.in_(pq.statuses))
+        stmt, count_stmt = _apply_both(stmt, count_stmt, Bug.status.in_(pq.statuses))
     if pq.priorities:
-        stmt = stmt.where(Bug.priority.in_(pq.priorities))
-        count_stmt = count_stmt.where(Bug.priority.in_(pq.priorities))
+        stmt, count_stmt = _apply_both(stmt, count_stmt, Bug.priority.in_(pq.priorities))
     if pq.environments:
-        stmt = stmt.where(Bug.environment.in_(pq.environments))
-        count_stmt = count_stmt.where(Bug.environment.in_(pq.environments))
+        stmt, count_stmt = _apply_both(stmt, count_stmt, Bug.environment.in_(pq.environments))
     if pq.project_ids:
-        stmt = stmt.where(Bug.project_id.in_(pq.project_ids))
-        count_stmt = count_stmt.where(Bug.project_id.in_(pq.project_ids))
+        stmt, count_stmt = _apply_both(stmt, count_stmt, Bug.project_id.in_(pq.project_ids))
     if pq.reporter_ids:
-        stmt = stmt.where(Bug.reporter_id.in_(pq.reporter_ids))
-        count_stmt = count_stmt.where(Bug.reporter_id.in_(pq.reporter_ids))
+        stmt, count_stmt = _apply_both(stmt, count_stmt, Bug.reporter_id.in_(pq.reporter_ids))
     if pq.assignee_ids:
         # Many-to-many: a bug matches if ANY of its assignees is in the set.
-        stmt = stmt.where(Bug.assignees.any(User.id.in_(pq.assignee_ids)))
-        count_stmt = count_stmt.where(
-            Bug.assignees.any(User.id.in_(pq.assignee_ids))
+        stmt, count_stmt = _apply_both(
+            stmt, count_stmt, Bug.assignees.any(User.id.in_(pq.assignee_ids)),
         )
     if pq.text_search:
-        # Same LIKE-escape the bugs route uses — keep `_` and `%` literal.
-        needle = pq.text_search.lower().replace("\\", "\\\\")
-        needle = needle.replace("%", "\\%").replace("_", "\\_")
-        like = f"%{needle}%"
-        clause = or_(
-            func.lower(Bug.title).like(like, escape="\\"),
-            func.lower(Bug.description).like(like, escape="\\"),
-        )
-        stmt = stmt.where(clause)
-        count_stmt = count_stmt.where(clause)
+        stmt, count_stmt = _apply_text_search(stmt, count_stmt, pq.text_search)
     if pq.time_window and (pq.time_window.start or pq.time_window.end):
-        # Decide which timestamp column to filter on. If the user said
-        # "created" / "filed" / "reported" / "opened" we use created_at;
-        # otherwise default to updated_at because "what's been touched
-        # recently" is usually what people want when they ask vaguely
-        # about "the last N days".
-        msg_l = (pq.raw_message or "").lower()
-        use_created = any(k in msg_l for k in (
-            "created", "filed", "reported", "opened", "raised",
-            "logged", "submitted", "registered",
-        ))
-        col = Bug.created_at if use_created else Bug.updated_at
-        if pq.time_window.start:
-            stmt = stmt.where(col >= pq.time_window.start)
-            count_stmt = count_stmt.where(col >= pq.time_window.start)
-        if pq.time_window.end:
-            stmt = stmt.where(col <= pq.time_window.end)
-            count_stmt = count_stmt.where(col <= pq.time_window.end)
+        stmt, count_stmt = _apply_time_window(stmt, count_stmt, pq)
     return stmt, count_stmt
 
 
@@ -593,24 +612,16 @@ def _handle_stats(db: Session, actor: User) -> Response:
     )
 
 
-def _suggest_user(phrase: str, ctx: Optional[Context]) -> str:
-    """Return a short suggestion string for an unresolved user phrase.
+def _build_user_suggest_pool(ctx: Context) -> dict[str, str]:
+    """Pool of (lookup-key -> display-name) for the user-suggestion matcher.
+    Keys are normalized names and email local-parts.
 
-    Uses stdlib difflib to find the closest 1-2 matches against the display
-    names and email local-parts already loaded into the parser context.
-    Empty string if nothing's close enough. Phrased as a helpful nudge,
-    never as a guess we apply on the user's behalf."""
-    if not ctx or not phrase:
-        return ""
-    import difflib
-    needle = phrase.strip().lower()
-    if not needle:
-        return ""
+    Context.users tuples may be (id, normalized_name, email_local,
+    display_name) or (id, normalized_name, display_name) depending on
+    the build — be defensive.
+    """
     pool: dict[str, str] = {}
     for entry in ctx.users:
-        # Context.users tuples may be (id, normalized_name, email_local,
-        # display_name) or (id, normalized_name, display_name) depending on
-        # the build — be defensive.
         if len(entry) >= 4:
             _uid, norm_name, email_local, display = entry[0], entry[1], entry[2], entry[3]
         else:
@@ -620,18 +631,40 @@ def _suggest_user(phrase: str, ctx: Optional[Context]) -> str:
             pool.setdefault(norm_name, display)
         if email_local:
             pool.setdefault(email_local, display)
-    if not pool:
-        return ""
-    matches = difflib.get_close_matches(needle, list(pool.keys()), n=2, cutoff=0.6)
-    if not matches:
-        return ""
-    suggestions: list[str] = []
-    seen_display: set[str] = set()
+    return pool
+
+
+def _dedupe_display_names(matches: list[str], pool: dict[str, str]) -> list[str]:
+    """Map raw matches back to display names, dropping duplicates while
+    preserving order."""
+    out: list[str] = []
+    seen: set[str] = set()
     for m in matches:
         d = pool.get(m)
-        if d and d not in seen_display:
-            suggestions.append(d)
-            seen_display.add(d)
+        if d and d not in seen:
+            out.append(d)
+            seen.add(d)
+    return out
+
+
+def _suggest_user(phrase: str, ctx: Optional[Context]) -> str:
+    """Return a short suggestion string for an unresolved user phrase.
+
+    Uses stdlib difflib to find the closest 1-2 matches against the display
+    names and email local-parts already loaded into the parser context.
+    Empty string if nothing's close enough. Phrased as a helpful nudge,
+    never as a guess we apply on the user's behalf."""
+    if not ctx or not phrase:
+        return ""
+    needle = phrase.strip().lower()
+    if not needle:
+        return ""
+    pool = _build_user_suggest_pool(ctx)
+    if not pool:
+        return ""
+    import difflib
+    matches = difflib.get_close_matches(needle, list(pool.keys()), n=2, cutoff=0.6)
+    suggestions = _dedupe_display_names(matches, pool) if matches else []
     if not suggestions:
         return ""
     if len(suggestions) == 1:
@@ -639,131 +672,163 @@ def _suggest_user(phrase: str, ctx: Optional[Context]) -> str:
     return f"Did you mean **{suggestions[0]}** or **{suggestions[1]}**?"
 
 
+_LIST_BUGS_HEADERS = ["#", "Title", "Project", "Status", "Priority", "Env",
+                      "Reporter", "Assignees", "Due"]
+
+
+def _clarify_ambiguous_names(pq: ParsedQuery) -> Optional[Response]:
+    """Return a clarification Response if the parser saw an ambiguous name,
+    otherwise None."""
+    if not pq.ambiguous_names:
+        return None
+    first = pq.ambiguous_names[0]
+    names_str = ", ".join(first[1])
+    return Response(
+        blocks=[Block("text", {"text":
+            f"More than one user matches **{first[0]}**: {names_str}. "
+            "Could you give the full name (e.g. *assigned to Alice "
+            "Wong*)?"})],
+        summary="Ambiguous name",
+        intent="clarify",
+    )
+
+
+def _clarify_unresolved_user(pq: ParsedQuery, ctx: Optional[Context]) -> Optional[Response]:
+    """Return a clarification Response when a named user couldn't be
+    resolved; otherwise None.
+
+    BUG FIX: when the user named a specific person but the name didn't
+    match anyone in the system, the old code silently dropped the filter
+    and returned every bug — which looked like the bot ignored the user's
+    intent. Now we stop and ask, with a suggested correction if one is
+    close enough.
+    """
+    if not (pq.unresolved_assignee_names or pq.unresolved_reporter_names):
+        return None
+    role = "assignee" if pq.unresolved_assignee_names else "reporter"
+    phrase = (pq.unresolved_assignee_names
+              or pq.unresolved_reporter_names)[0]
+    suggestion_msg = _suggest_user(phrase, ctx)
+    verb = "assigned to" if role == "assignee" else "reported by"
+    body = (f"I couldn't find a user named **{phrase}** — so I'm "
+            f"not running this as a *{verb}* query. ")
+    body += suggestion_msg or (
+        "Try the full name, the email local-part, or *list users* to see who exists"
+    )
+    return Response(
+        blocks=[Block("text", {"text": body})],
+        summary=f"Unknown {role}",
+        intent="clarify",
+    )
+
+
+def _format_bug_row(b: Bug) -> list[str]:
+    """One bug → one row of the rendered table."""
+    return [
+        f"#{b.id}",
+        (b.title or "")[:80],
+        (b.project.name if b.project else "")[:40],
+        b.status,
+        b.priority,
+        b.environment,
+        (b.reporter.name if b.reporter else "")[:40],
+        (", ".join(a.name for a in b.assignees))[:60],
+        b.due_date or "",
+    ]
+
+
+def _build_export_suggestion_block(pq: ParsedQuery) -> Block:
+    """Build the "Export to Excel" suggestion block tacked onto every
+    non-empty inline list. We re-send the user's original query with
+    ", export to excel" appended so the parser keeps the original
+    filters. Earlier builds used parentheses which the name regex
+    absorbed into the assignee phrase ("alice (export" → unknown user);
+    a comma terminator side-steps that.
+    """
+    base = (pq.raw_message or "").strip().rstrip("?.!,;:")
+    export_send = f"{base}, export to excel" if base else "export to excel"
+    return Block("suggestions", {
+        "items": [{"label": "Export to Excel", "send": export_send}],
+    })
+
+
+def _build_count_response(total: int, descr: str) -> Response:
+    verb = "is" if total == 1 else "are"
+    s = "" if total == 1 else "s"
+    return Response(
+        blocks=[Block("text", {"text": f"There {verb} **{total}** bug{s} {descr}"})],
+        summary=f"{total} bugs",
+        intent="count_bugs",
+    )
+
+
+def _build_no_results_response(descr: str) -> Response:
+    empty_text = (
+        "There are no bugs in the system yet"
+        if descr == "(no filters)"
+        else f"No bugs found {descr}"
+    )
+    return Response(
+        blocks=[Block("text", {"text": empty_text})],
+        summary="0 bugs",
+        intent="list_bugs",
+    )
+
+
+def _build_inline_list_response(rows: list[Bug], total: int, limit: int,
+                                pq: ParsedQuery, descr: str) -> Response:
+    data = [_format_bug_row(b) for b in rows]
+    summary_text = f"Found **{total}** bug{'' if total == 1 else 's'} {descr}"
+    if total > limit:
+        summary_text += f" — showing the most recent {limit}"
+    blocks = [
+        Block("text", {"text": summary_text}),
+        Block("table", {
+            "headers": _LIST_BUGS_HEADERS,
+            "rows": data,
+            # Each row is clickable to open the bug detail.
+            "row_bug_ids": [b.id for b in rows],
+        }),
+        _build_export_suggestion_block(pq),
+    ]
+    return Response(blocks=blocks, summary=f"{total} bugs", intent="list_bugs")
+
+
+def _list_bugs_order(_pq: ParsedQuery):
+    """Default sort: most-recently-updated first."""
+    return (Bug.updated_at.desc(), Bug.id.desc())
+
+
 def _handle_list_bugs(db: Session, pq: ParsedQuery, actor: User, ctx: Optional[Context] = None) -> Response:
     """Run the parsed bug filter and render either count / list / file."""
-    # If the parser flagged ambiguous names, ask before running.
-    if pq.ambiguous_names:
-        first = pq.ambiguous_names[0]
-        names_str = ", ".join(first[1])
-        return Response(
-            blocks=[Block("text", {"text":
-                f"More than one user matches **{first[0]}**: {names_str}. "
-                "Could you give the full name (e.g. *assigned to Alice "
-                "Wong*)?"})],
-            summary="Ambiguous name",
-            intent="clarify",
-        )
-
-    # BUG FIX: when the user named a specific person but the name didn't
-    # match anyone in the system, the old code silently dropped the filter
-    # and returned every bug — which looked like the bot ignored the user's
-    # intent. Now we stop and ask, with a suggested correction if one is
-    # close enough.
-    if pq.unresolved_assignee_names or pq.unresolved_reporter_names:
-        role = "assignee" if pq.unresolved_assignee_names else "reporter"
-        phrase = (pq.unresolved_assignee_names
-                  or pq.unresolved_reporter_names)[0]
-        suggestion_msg = _suggest_user(phrase, ctx)
-        verb = "assigned to" if role == "assignee" else "reported by"
-        body = (f"I couldn't find a user named **{phrase}** — so I'm "
-                f"not running this as a *{verb}* query. ")
-        if suggestion_msg:
-            body += suggestion_msg
-        else:
-            body += "Try the full name, the email local-part, or *list users* to see who exists"
-        return Response(
-            blocks=[Block("text", {"text": body})],
-            summary=f"Unknown {role}",
-            intent="clarify",
-        )
+    clarify = _clarify_ambiguous_names(pq) or _clarify_unresolved_user(pq, ctx)
+    if clarify is not None:
+        return clarify
 
     stmt, count_stmt = _apply_bug_filters(_eager_bug_query(), select(func.count(Bug.id)), pq)
     # Tenant + project-access scope — always applied after the parsed
     # filters so user input can narrow but never broaden.
     stmt, count_stmt = _scope_to_actor(stmt, count_stmt, db, actor)
     total = db.scalar(count_stmt) or 0
-
     descr = describe_filters(pq) or "(no filters)"
 
-    # Count-only path -----------------------------------------------------
     if pq.wants_count and not pq.wants_export:
-        text = f"There {'is' if total == 1 else 'are'} **{total}** bug{'' if total==1 else 's'} {descr}"
-        return Response(
-            blocks=[Block("text", {"text": text})],
-            summary=f"{total} bugs",
-            intent="count_bugs",
-        )
+        return _build_count_response(total, descr)
 
-    # Pull rows ----------------------------------------------------------
-    # Excel export is its own path so we don't double-page the data.
+    order_cols = _list_bugs_order(pq)
+
     if pq.wants_export:
+        # Hard cap exports so a low-resource box doesn't fall over on
+        # "give me everything". The CSV route handles bigger pulls.
         export_cap = 5000
-        rows = list(db.scalars(
-            stmt.order_by(Bug.updated_at.desc(), Bug.id.desc()).limit(export_cap)
-        ).all())
+        rows = list(db.scalars(stmt.order_by(*order_cols).limit(export_cap)).all())
         return _build_export_response(rows, pq, total, export_cap)
 
-    # Inline list path ---------------------------------------------------
     limit = max(5, min(pq.limit or 100, 200))
-    rows = list(db.scalars(
-        stmt.order_by(Bug.updated_at.desc(), Bug.id.desc()).limit(limit)
-    ).all())
+    rows = list(db.scalars(stmt.order_by(*order_cols).limit(limit)).all())
     if total == 0:
-        return Response(
-            blocks=[Block("text", {"text":
-                f"No bugs found {descr}" if descr != "(no filters)" else
-                "There are no bugs in the system yet"})],
-            summary="0 bugs",
-            intent="list_bugs",
-        )
-    headers = ["#", "Title", "Project", "Status", "Priority", "Env",
-               "Reporter", "Assignees", "Due"]
-    data: list[list[str]] = []
-    for b in rows:
-        data.append([
-            f"#{b.id}",
-            (b.title or "")[:80],
-            (b.project.name if b.project else "")[:40],
-            b.status,
-            b.priority,
-            b.environment,
-            (b.reporter.name if b.reporter else "")[:40],
-            (", ".join(a.name for a in b.assignees))[:60],
-            b.due_date or "",
-        ])
-
-    summary_text = (
-        f"Found **{total}** bug{'' if total == 1 else 's'} {descr}"
-    )
-    if total > limit:
-        summary_text += f" — showing the most recent {limit}"
-    blocks = [
-        Block("text", {"text": summary_text}),
-        Block("table", {
-            "headers": headers,
-            "rows": data,
-            # Each row is clickable to open the bug detail.
-            "row_bug_ids": [b.id for b in rows],
-        }),
-    ]
-    # Offer an export shortcut when the result set is non-trivial. We
-    # re-send the user's original query with ", export to excel" appended
-    # so the parser keeps the original filters. Earlier builds used
-    # parentheses which the name regex absorbed into the assignee phrase
-    # ("alice (export" → unknown user); a comma terminator side-steps that.
-    if total > 0 and not pq.wants_export:
-        base = (pq.raw_message or "").strip().rstrip("?.!,;:")
-        export_send = f"{base}, export to excel" if base else "export to excel"
-        blocks.append(Block("suggestions", {
-            "items": [
-                {"label": "Export to Excel", "send": export_send},
-            ],
-        }))
-    return Response(
-        blocks=blocks,
-        summary=f"{total} bugs",
-        intent="list_bugs",
-    )
+        return _build_no_results_response(descr)
+    return _build_inline_list_response(rows, total, limit, pq, descr)
 
 
 def _build_export_response(rows: list[Bug], pq: ParsedQuery, total: int, cap: int) -> Response:
@@ -847,6 +912,98 @@ def _resolve_pronouns(pq, actor: User) -> None:
             pq.bug_id = sess.last_bug_id
 
 
+_ACTIONS_NEEDING_BUG = frozenset({
+    "assign", "unassign", "set_status", "set_priority",
+    "set_environment", "set_due_date", "add_comment",
+})
+
+
+def _plan_assign(plan, pq, kind):
+    if not pq.assignee_ids:
+        return None, ("I need a name. Try *assign bug 5 to alice* "
+                      "or *unassign bob from #5*.")
+    plan.target_user_ids = list(pq.assignee_ids)
+    plan.target_user_names = list(pq.assignee_names)
+    verb = "Assign" if kind == "assign" else "Unassign"
+    names = ", ".join(plan.target_user_names) or "user(s)"
+    direction = "to" if kind == "assign" else "from"
+    plan.summary_human = f"{verb} {names} {direction} bug #{pq.bug_id}"
+    return plan, None
+
+
+def _plan_set_status(plan, pq):
+    if not pq.action_value:
+        return None, ("What status? e.g. *mark bug 5 as resolved* or "
+                      "*close bug 5*.")
+    plan.new_value = pq.action_value
+    plan.summary_human = f"Set bug #{pq.bug_id} status to {pq.action_value}"
+    return plan, None
+
+
+def _plan_set_priority(plan, pq):
+    if not pq.action_value:
+        return None, ("What priority? e.g. *set bug 5 priority to high*.")
+    plan.new_value = pq.action_value
+    plan.summary_human = f"Set bug #{pq.bug_id} priority to {pq.action_value}"
+    return plan, None
+
+
+def _plan_set_environment(plan, pq):
+    if not pq.environments:
+        return None, ("Which environment? DEV / UAT / PROD")
+    plan.new_value = pq.environments[0]
+    plan.summary_human = f"Set bug #{pq.bug_id} environment to {plan.new_value}"
+    return plan, None
+
+
+def _plan_set_due_date(plan, pq):
+    if not pq.action_value:
+        return None, ("What date? Use YYYY-MM-DD format, e.g. "
+                      "*due bug 5 2026-06-15*.")
+    plan.new_value = pq.action_value
+    plan.summary_human = f"Set bug #{pq.bug_id} due date to {pq.action_value}"
+    return plan, None
+
+
+def _plan_add_comment(plan, pq):
+    if not pq.action_comment:
+        return None, ("What should the comment say? Use a colon, e.g. "
+                      "*comment on #5: works for me*.")
+    plan.comment_body = pq.action_comment
+    preview = pq.action_comment if len(pq.action_comment) < 60 \
+        else pq.action_comment[:57] + "..."
+    plan.summary_human = f'Comment on bug #{pq.bug_id}: "{preview}"'
+    return plan, None
+
+
+def _plan_create_bug(plan, pq):
+    if not pq.action_title:
+        return None, ("I need a title. Try *create a bug titled "
+                      '"Login broken" in project Apollo*.')
+    plan.new_title = pq.action_title
+    if pq.priorities:
+        plan.new_value = pq.priorities[0]   # priority for new bug
+    if pq.project_ids:
+        plan.new_project_id = pq.project_ids[0]
+        plan.new_project_name = pq.project_names[0]
+    if pq.assignee_ids:
+        plan.target_user_ids = list(pq.assignee_ids)
+        plan.target_user_names = list(pq.assignee_names)
+    proj_part = (f" in project {plan.new_project_name}"
+                 if plan.new_project_name else "")
+    plan.summary_human = f'Create bug "{pq.action_title[:60]}"{proj_part}'
+    return plan, None
+
+
+def _plan_create_project(plan, pq):
+    if not pq.action_title:
+        return None, ("I need a project name, e.g. "
+                      "*create project Mercury*.")
+    plan.new_project_name = pq.action_title
+    plan.summary_human = f'Create project "{pq.action_title}"'
+    return plan, None
+
+
 def _build_action_plan(pq, actor: User) -> "tuple[Any, Optional[str]]":
     """Translate a parsed write-intent into an ActionPlan.
 
@@ -859,9 +1016,7 @@ def _build_action_plan(pq, actor: User) -> "tuple[Any, Optional[str]]":
     plan = ActionPlan(kind=kind, actor_user_id=actor.id)
 
     # Most actions need a bug id. create_bug / create_project don't.
-    needs_bug = kind in ("assign", "unassign", "set_status", "set_priority",
-                         "set_environment", "set_due_date", "add_comment")
-    if needs_bug and pq.bug_id is None:
+    if kind in _ACTIONS_NEEDING_BUG and pq.bug_id is None:
         if pq.used_pronoun_bug:
             return None, ("I don't know which bug you mean. "
                           "Try mentioning the bug id, e.g. *close bug 5*.")
@@ -870,81 +1025,25 @@ def _build_action_plan(pq, actor: User) -> "tuple[Any, Optional[str]]":
     plan.bug_id = pq.bug_id
 
     if kind in ("assign", "unassign"):
-        if not pq.assignee_ids:
-            return None, ("I need a name. Try *assign bug 5 to alice* "
-                          "or *unassign bob from #5*.")
-        plan.target_user_ids = list(pq.assignee_ids)
-        plan.target_user_names = list(pq.assignee_names)
-        verb = "Assign" if kind == "assign" else "Unassign"
-        names = ", ".join(plan.target_user_names) or "user(s)"
-        plan.summary_human = f"{verb} {names} {'to' if kind=='assign' else 'from'} bug #{pq.bug_id}"
-
-    elif kind == "set_status":
-        if not pq.action_value:
-            return None, ("What status? e.g. *mark bug 5 as resolved* or "
-                          "*close bug 5*.")
-        plan.new_value = pq.action_value
-        plan.summary_human = f"Set bug #{pq.bug_id} status to {pq.action_value}"
-
-    elif kind == "set_priority":
-        if not pq.action_value:
-            return None, ("What priority? e.g. *set bug 5 priority to high*.")
-        plan.new_value = pq.action_value
-        plan.summary_human = f"Set bug #{pq.bug_id} priority to {pq.action_value}"
-
-    elif kind == "set_environment":
-        if not pq.environments:
-            return None, ("Which environment? DEV / UAT / PROD")
-        plan.new_value = pq.environments[0]
-        plan.summary_human = f"Set bug #{pq.bug_id} environment to {plan.new_value}"
-
-    elif kind == "set_due_date":
-        if not pq.action_value:
-            return None, ("What date? Use YYYY-MM-DD format, e.g. "
-                          "*due bug 5 2026-06-15*.")
-        plan.new_value = pq.action_value
-        plan.summary_human = f"Set bug #{pq.bug_id} due date to {pq.action_value}"
-
-    elif kind == "add_comment":
-        if not pq.action_comment:
-            return None, ("What should the comment say? Use a colon, e.g. "
-                          "*comment on #5: works for me*.")
-        plan.comment_body = pq.action_comment
-        preview = pq.action_comment if len(pq.action_comment) < 60 \
-            else pq.action_comment[:57] + "..."
-        plan.summary_human = f'Comment on bug #{pq.bug_id}: "{preview}"'
-
-    elif kind == "create_bug":
-        if not pq.action_title:
-            return None, ("I need a title. Try *create a bug titled "
-                          '"Login broken" in project Apollo*.')
-        plan.new_title = pq.action_title
-        if pq.priorities:
-            plan.new_value = pq.priorities[0]   # priority for new bug
-        if pq.project_ids:
-            plan.new_project_id = pq.project_ids[0]
-            plan.new_project_name = pq.project_names[0]
-        if pq.assignee_ids:
-            plan.target_user_ids = list(pq.assignee_ids)
-            plan.target_user_names = list(pq.assignee_names)
-        proj_part = (f" in project {plan.new_project_name}"
-                     if plan.new_project_name else "")
-        plan.summary_human = f'Create bug "{pq.action_title[:60]}"{proj_part}'
-
-    elif kind == "create_project":
-        if not pq.action_title:
-            return None, ("I need a project name, e.g. "
-                          "*create project Mercury*.")
-        plan.new_project_name = pq.action_title
-        plan.summary_human = f'Create project "{pq.action_title}"'
-
-    else:
-        return None, f"I don't know how to do '{kind}'."
-
-    return plan, None
+        return _plan_assign(plan, pq, kind)
+    if kind == "set_status":
+        return _plan_set_status(plan, pq)
+    if kind == "set_priority":
+        return _plan_set_priority(plan, pq)
+    if kind == "set_environment":
+        return _plan_set_environment(plan, pq)
+    if kind == "set_due_date":
+        return _plan_set_due_date(plan, pq)
+    if kind == "add_comment":
+        return _plan_add_comment(plan, pq)
+    if kind == "create_bug":
+        return _plan_create_bug(plan, pq)
+    if kind == "create_project":
+        return _plan_create_project(plan, pq)
+    return None, f"I don't know how to do '{kind}'."
 
 
-def _handle_action_request(pq, db: Session, actor: User) -> Response:
+def _handle_action_request(pq, actor: User) -> Response:
     """Route an action_* intent to plan-building + confirmation staging."""
     from app.chatbot import actions as _actions
     from app.chatbot.memory import store as _mem
@@ -994,6 +1093,116 @@ def _handle_confirm_no(actor: User) -> Response:
     )
 
 
+def _empty_intent_response() -> Response:
+    return Response(
+        blocks=[Block("text", {"text":
+            "Type a question to get started — e.g. *open bugs assigned "
+            "to me* or *summary*."})],
+        summary="Empty input",
+        intent="empty",
+    )
+
+
+def _dispatch_read_intent(intent: str, db: Session, pq, actor: User, ctx) -> Optional[Response]:
+    """Dispatch a read-side parser intent to its handler.
+
+    Returns None if the intent isn't a known read intent. Every handler
+    that touches the DB receives `actor` so the tenant + project-access
+    scope is preserved end-to-end — never broaden in this layer.
+    """
+    if intent == "empty":
+        return _empty_intent_response()
+    if intent == "greeting":
+        return _handle_greeting(actor)
+    if intent == "thanks":
+        return _handle_thanks()
+    if intent == "help":
+        return _handle_help()
+    if intent == "about":
+        return _handle_about(pq.raw_message or "")
+    if intent == "list_users":
+        return _handle_list_users(db, pq, actor)
+    if intent == "list_projects":
+        return _handle_list_projects(db, actor)
+    if intent == "bug_detail":
+        # Remember the bug for follow-up pronouns.
+        from app.chatbot.memory import store as _mem
+        if pq.bug_id:
+            _mem.remember_bug(actor.id, pq.bug_id)
+        return _handle_bug_detail(db, pq, actor)
+    if intent == "stats":
+        return _handle_stats(db, actor)
+    if intent == "recent_activity":
+        return _handle_recent_activity(db, pq, actor)
+    if intent == "list_bugs":
+        return _handle_list_bugs(db, pq, actor, ctx)
+    return None
+
+
+def _classifier_action_invalid(pred_intent: str) -> Response:
+    """Friendly "tell me more" response when the classifier guesses an
+    action intent but the rule parser couldn't fill in the slots.
+
+    The rule parser would have set intent itself if it had enough info,
+    so a classifier-only action match means the user's phrasing was
+    understood but a slot is missing — never silently skip.
+    """
+    verb = pred_intent[len("action_"):]
+    return Response(
+        blocks=[Block("text", {"text":
+            f"I think you want to **{verb}** "
+            f"something, but I couldn't pin down which bug or who. "
+            f"Try a more concrete phrasing — for example: "
+            f"*assign bug 5 to alice* or *close #12*."})],
+        summary=f"Classifier guessed {pred_intent}",
+        intent="action_invalid",
+    )
+
+
+def _try_classifier(message: str, db: Session, pq, actor: User, ctx) -> Optional[Response]:
+    """Layer 2 fallback: ask the statistical classifier whether the
+    message looks like a known read intent. Returns the handler's
+    Response or None.
+
+    We map the classifier's prediction onto the existing handlers
+    directly so we don't lose the structured filters the rule parser
+    already extracted.
+    """
+    from app.chatbot import classifier as _clf
+    pred = _clf.predict(message)
+    if pred is None:
+        return None
+    read_resp = _dispatch_read_intent(pred.intent, db, pq, actor, ctx)
+    if read_resp is not None:
+        return read_resp
+    if pred.intent.startswith("action_"):
+        return _classifier_action_invalid(pred.intent)
+    return None
+
+
+def _try_llm(message: str, db: Session, actor: User) -> Optional[Response]:
+    """Layer 3 (optional) fallback: local LLM. Returns None if unavailable
+    or if it failed — an LLM fault must NEVER take down the chat path.
+
+    is_available() handles the RAM check and logs a single
+    operator-facing warning if the model exists but won't fit. The
+    chat UI never shows technical details to the user — callers fall
+    through to _handle_unknown() so the user sees the same friendly
+    "didn't understand" reply they'd get if no model file were
+    installed at all.
+    """
+    try:
+        from app.chatbot import llm as _llm
+        if _llm.is_available():
+            return _llm.try_understand(message, db, actor)
+    except Exception:
+        import logging
+        logging.getLogger("bug_hunter.sleuth").exception(
+            "Sleuth LLM fallback raised — swallowing and returning unknown."
+        )
+    return None
+
+
 def execute(message: str, db: Session, actor: User,
             now: Optional[datetime] = None) -> Response:
     """Parse the message and dispatch to the right handler.
@@ -1016,105 +1225,20 @@ def execute(message: str, db: Session, actor: User,
     if pq.intent == "confirm_no":
         return _handle_confirm_no(actor)
 
-    # Write actions are dispatched as "action_<kind>".
     if pq.intent.startswith("action_"):
-        return _handle_action_request(pq, db, actor)
+        return _handle_action_request(pq, actor)
 
-    # Read-side intents -----------------------------------------------------
-    if pq.intent == "empty":
-        return Response(
-            blocks=[Block("text", {"text":
-                "Type a question to get started — e.g. *open bugs assigned "
-                "to me* or *summary*."})],
-            summary="Empty input",
-            intent="empty",
-        )
-    if pq.intent == "greeting":
-        return _handle_greeting(actor)
-    if pq.intent == "thanks":
-        return _handle_thanks()
-    if pq.intent == "help":
-        return _handle_help()
-    if pq.intent == "about":
-        return _handle_about(message)
-    if pq.intent == "list_users":
-        return _handle_list_users(db, pq, actor)
-    if pq.intent == "list_projects":
-        return _handle_list_projects(db, actor)
-    if pq.intent == "bug_detail":
-        # Remember the bug for follow-up pronouns.
-        from app.chatbot.memory import store as _mem
-        if pq.bug_id:
-            _mem.remember_bug(actor.id, pq.bug_id)
-        return _handle_bug_detail(db, pq, actor)
-    if pq.intent == "stats":
-        return _handle_stats(db, actor)
-    if pq.intent == "recent_activity":
-        return _handle_recent_activity(db, pq, actor)
-    if pq.intent == "list_bugs":
-        return _handle_list_bugs(db, pq, actor, ctx)
+    read_resp = _dispatch_read_intent(pq.intent, db, pq, actor, ctx)
+    if read_resp is not None:
+        return read_resp
 
-    # Layer 2 fallback: the rule parser said "unknown". Ask the
-    # statistical classifier whether the message looks like one of the
-    # known intents. If it does (above the confidence threshold), re-run
-    # the message through parse() with that intent forced — well, not
-    # quite: we map the classifier's prediction onto the existing
-    # handlers directly so we don't lose the structured filters.
-    from app.chatbot import classifier as _clf
-    pred = _clf.predict(message)
-    if pred is not None:
-        # The classifier may surface read intents that don't need any
-        # filters (greeting, help, thanks, stats, recent_activity,
-        # list_users, list_projects, list_bugs).
-        if pred.intent == "greeting":
-            return _handle_greeting(actor)
-        if pred.intent == "thanks":
-            return _handle_thanks()
-        if pred.intent == "help":
-            return _handle_help()
-        if pred.intent == "stats":
-            return _handle_stats(db, actor)
-        if pred.intent == "recent_activity":
-            return _handle_recent_activity(db, pq, actor)
-        if pred.intent == "list_users":
-            return _handle_list_users(db, pq, actor)
-        if pred.intent == "list_projects":
-            return _handle_list_projects(db, actor)
-        if pred.intent == "list_bugs":
-            return _handle_list_bugs(db, pq, actor, ctx)
-        # For action intents the classifier surfaces, we still need a
-        # bug id / target / value to build a plan. The rule parser has
-        # already extracted those and would have set intent if it had
-        # enough info — so a classifier-only action match means the
-        # user's phrasing was understood but a slot is missing. Surface
-        # a friendly "tell me more" so we never silently skip.
-        if pred.intent.startswith("action_"):
-            return Response(
-                blocks=[Block("text", {"text":
-                    f"I think you want to **{pred.intent[len('action_'):]}** "
-                    f"something, but I couldn't pin down which bug or who. "
-                    f"Try a more concrete phrasing — for example: "
-                    f"*assign bug 5 to alice* or *close #12*."})],
-                summary=f"Classifier guessed {pred.intent}",
-                intent="action_invalid",
-            )
+    classifier_resp = _try_classifier(message, db, pq, actor, ctx)
+    if classifier_resp is not None:
+        return classifier_resp
 
-    # Layer 3 (optional): if a local LLM model file is present AND the
-    # box has enough RAM, give it a shot. is_available() handles the
-    # RAM check and logs a single operator-facing warning if the model
-    # exists but won't fit. The chat UI never shows technical details
-    # to the user — we just fall through to _handle_unknown() so the
-    # user sees the same friendly "didn't understand" reply they'd get
-    # if no model file were installed at all.
-    try:
-        from app.chatbot import llm as _llm
-        if _llm.is_available():
-            llm_resp = _llm.try_understand(message, db, actor)
-            if llm_resp is not None:
-                return llm_resp
-    except Exception:
-        # Defensive: an LLM failure must NEVER take down the chat path.
-        pass
+    llm_resp = _try_llm(message, db, actor)
+    if llm_resp is not None:
+        return llm_resp
 
     return _handle_unknown()
 

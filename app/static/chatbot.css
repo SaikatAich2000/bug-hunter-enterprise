@@ -34,8 +34,7 @@
   padding: 0;
   transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1),
               box-shadow 0.18s ease;
-  /* Subtle pulse ring drawn via ::after */
-  position: fixed;
+  /* Subtle pulse ring drawn via ::after (position: fixed is set above). */
 }
 .sleuth-fab::after {
   content: "";
@@ -89,8 +88,8 @@
   height: 20px;
   padding: 0 6px;
   border-radius: 999px;
-  background: var(--danger, #ef4444);
-  color: white;
+  background: var(--danger-strong, #b91c1c);
+  color: #fff;
   font-size: 11px;
   font-weight: 700;
   display: flex;
@@ -776,8 +775,8 @@ a.sleuth-file-btn:active,
   transition: all 0.15s ease;
 }
 .sleuth-clear-btn:hover {
-  background: var(--danger, #f43f5e);
-  color: white;
+  background: var(--danger-strong, #b91c1c);
+  color: #fff;
 }
 
 /* Excel-export button (rendered inline by chatbot.js when relevant) */

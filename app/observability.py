@@ -87,8 +87,10 @@ def configure_logging(json_logging: bool, level: str = "INFO") -> None:
     root = logging.getLogger()
     root.setLevel(level)
     # Remove any handlers we previously installed (basicConfig adds a
-    # default StreamHandler; we replace it).
-    for h in list(root.handlers):
+    # default StreamHandler; we replace it). Slice-copy the handler list
+    # before iterating because `removeHandler` mutates `root.handlers`
+    # in place.
+    for h in root.handlers[:]:
         root.removeHandler(h)
     handler = logging.StreamHandler()
     if json_logging:
@@ -150,21 +152,10 @@ def render_prometheus() -> str:
         lines.append("# TYPE bh_http_request_duration_ms histogram")
         for path, buckets in sorted(_request_latency_buckets.items()):
             safe_path = path.replace('"', "")
-            cumulative = 0
-            for upper in _LATENCY_BUCKETS_MS:
-                # Histograms accumulate, but we already stored
-                # per-bucket counts as cumulative (each record falls
-                # into every bucket >= its value). We'll recompute the
-                # standard Prometheus cumulative shape inline.
-                pass
-            # Walk the buckets in order, accumulating.
-            running = 0
-            for upper in _LATENCY_BUCKETS_MS:
-                running += buckets.get(upper, 0) - sum(
-                    buckets.get(b, 0) for b in _LATENCY_BUCKETS_MS if b < upper
-                )
-            # Simpler: just emit each bucket's own count + the running sum.
-            # Cumulative is required by Prom, so we walk strictly increasing.
+            # Histograms accumulate, but we already stored per-bucket
+            # counts as cumulative (each record falls into every bucket
+            # >= its value). Emit each bucket's own count — Prometheus
+            # requires cumulative, so we walk strictly increasing.
             cum = 0
             for upper in _LATENCY_BUCKETS_MS:
                 cum = buckets.get(upper, 0)

@@ -10,7 +10,7 @@
 
   // Theme persistence.
   const stored = localStorage.getItem("theme") || "dark";
-  document.documentElement.setAttribute("data-theme", stored);
+  document.documentElement.dataset.theme = stored;
 
   const params = new URLSearchParams(location.search);
   const token = (params.get("token") || "").trim();
@@ -53,7 +53,7 @@
     const password = form.elements.password.value;
     if (!name) return "Please enter your name.";
     if (password.length < 8) return "Password needs at least 8 characters.";
-    if (!/[A-Za-z]/.test(password) || !/[0-9]/.test(password)) {
+    if (!/[A-Za-z]/.test(password) || !/\d/.test(password)) {
       return "Password should mix letters and numbers.";
     }
     return null;
@@ -84,6 +84,7 @@
       showSection("form");
       $("#acceptForm").elements.name.focus();
     } catch (err) {
+      console.error("Invitation preview network error:", err);
       showFatalError("Network error. Please check your connection and reload the page.");
     }
   }
@@ -120,6 +121,7 @@
       // We're logged in now.
       location.href = "/";
     } catch (err) {
+      console.error("Invitation accept network error:", err);
       showAlert("Network error. Try again.");
     } finally {
       btn.disabled = false;

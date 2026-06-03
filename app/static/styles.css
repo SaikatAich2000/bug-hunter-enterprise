@@ -220,6 +220,9 @@ body.sidebar-collapsed .app { grid-template-columns: 64px 1fr; }
   /* Same flex-shrink fix as .org-banner — a tall sidebar (many
      projects/users) would otherwise squash this row's content. */
   flex-shrink: 0;
+  /* Sidebar brand row: keep the collapse button visible on narrow widths
+     (was a duplicate .brand block lower in the file; merged here). */
+  min-width: 0;
 }
 .brand-text { flex: 1; min-width: 0; overflow: hidden; }
 .sidebar-collapse-btn {
@@ -1386,6 +1389,25 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
 }
 .field.check-row input[type="checkbox"] { width: auto; margin: 0; accent-color: var(--accent); }
 
+/* fieldset.field — neutralize the browser's default border/padding/margin
+   so a <fieldset class="field"> looks identical to <label class="field">.
+   Used for chip-picker groups where <label> can't wrap a non-control. */
+fieldset.field {
+  border: 0;
+  padding: 0;
+  margin: 0 0 12px 0;
+  min-inline-size: 0;
+}
+fieldset.field > legend {
+  padding: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 5px;
+}
+
 .row { display: flex; gap: 12px; flex-wrap: wrap; }
 .row .field { flex: 1; }
 .row .f-grow { flex: 2; }
@@ -1567,23 +1589,10 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
 }
 .comment-attach-btn:hover { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
 .comment-attach-btn input[type="file"] { display: none; }
-.attach-staged-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  font-size: 12px;
-}
-.attach-staged {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: var(--accent-soft);
-  color: var(--accent);
-  padding: 4px 11px;
-  border-radius: 999px;
-  border: 1px solid var(--accent);
-  font-weight: 500;
-}
+/* .attach-staged-list and .attach-staged base rules live in the
+   v2.4 staging block lower in this file (canonical definitions).
+   The previous duplicate rules here were overridden by the cascade
+   anyway, so they have been removed to satisfy css:S4666. */
 .attach-staged button {
   background: none;
   border: none;
@@ -2496,10 +2505,10 @@ body.sidebar-collapsed .org-banner { display: none; }
   letter-spacing: 0.06em;
   white-space: nowrap;
 }
-.invite-status-pending  { background: rgba(94, 159, 255, 0.18); color: #6aa9ff; }
-.invite-status-accepted { background: rgba(86, 196, 130, 0.18); color: #6cc98a; }
-.invite-status-revoked  { background: rgba(255, 138, 138, 0.18); color: #ff9090; }
-.invite-status-expired  { background: rgba(255, 200, 100, 0.18); color: #ffc864; }
+.invite-status-pending  { background: #1e3a5f; color: #e0eaf8; }
+.invite-status-accepted { background: #1f4d36; color: #d4f0dd; }
+.invite-status-revoked  { background: #5f1f1f; color: #f8d7d7; }
+.invite-status-expired  { background: #5f4216; color: #fbe7c4; }
 
 /* ---- Invite modal: project picker checkboxes ----
    Themed to look like first-class chips, not raw browser checkboxes. */
@@ -2698,17 +2707,8 @@ body.sidebar-collapsed .org-banner { display: none; }
   .invite-projects { max-height: 160px; }
 }
 
-/* ---- Sidebar brand row: keep the collapse button visible on narrow widths
-   The original CSS sometimes squeezed the » button off-screen because the
-   brand-text + logo + button competed for space without any min-width
-   constraints. ---- */
-.brand {
-  min-width: 0;
-}
-.brand-text {
-  min-width: 0;
-  overflow: hidden;
-}
+/* ---- Sidebar brand row helpers (the .brand / .brand-text min-width fix
+   has been merged into the original rules higher in the file). ---- */
 .brand-title, .brand-version {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2716,16 +2716,10 @@ body.sidebar-collapsed .org-banner { display: none; }
 }
 
 /* CSS variable: accent-rgb. The base theme uses --accent as a hex
-   colour; some gradients above want it as r,g,b. Provide a safe default
-   that works in both themes. Override in your theme block if you've
-   customised --accent. */
-:root { --accent-rgb: 99, 102, 241; }
-[data-theme="light"] { --accent-rgb: 99, 102, 241; }
-
-/* Match --accent-rgb to each theme's --accent so tinted gradients
-   look right in both. */
-:root[data-theme="dark"], :root { --accent-rgb: 129, 140, 248; }   /* #818cf8 */
-:root[data-theme="light"]      { --accent-rgb: 99, 102, 241; }     /* #6366f1 */
+   colour; some gradients above want it as r,g,b. The values below
+   match each theme's --accent so tinted gradients look right in both. */
+:root, :root[data-theme="dark"] { --accent-rgb: 129, 140, 248; }   /* #818cf8 */
+:root[data-theme="light"]       { --accent-rgb: 99, 102, 241; }    /* #6366f1 */
 
 /* ============================================================
  * v2.4 — Type tabs, events, attachment staging, read-only mode
@@ -2928,6 +2922,11 @@ body.sidebar-collapsed .org-banner { display: none; }
 .attach-staged:hover .attach-staged-remove {
   opacity: 1;
   transform: scale(1.05);
+}
+.attach-staged-remove:hover {
+  background: #b91c1c;
+  color: #fff;
+  border-color: #b91c1c;
 }
 .create-attach-hint { margin: 6px 0 0; font-size: 11.5px; }
 

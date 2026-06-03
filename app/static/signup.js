@@ -6,7 +6,7 @@
 
   // Persist theme across pages.
   const stored = localStorage.getItem("theme") || "dark";
-  document.documentElement.setAttribute("data-theme", stored);
+  document.documentElement.dataset.theme = stored;
 
   function showAlert(msg, kind = "error") {
     const el = $("#signupAlert");
@@ -40,9 +40,9 @@
     const password = form.elements.password.value;
     if (!orgName) return "Please enter an organization name.";
     if (!name) return "Please enter your name.";
-    if (!email || !email.includes("@")) return "Please enter a valid email.";
+    if (!email?.includes("@")) return "Please enter a valid email.";
     if (password.length < 8) return "Password needs at least 8 characters.";
-    if (!/[A-Za-z]/.test(password) || !/[0-9]/.test(password)) {
+    if (!/[A-Za-z]/.test(password) || !/\d/.test(password)) {
       return "Password should mix letters and numbers.";
     }
     return null;
@@ -85,6 +85,7 @@
       // Logged in — head into the app.
       location.href = "/";
     } catch (err) {
+      console.error("Signup network error:", err);
       showAlert("Network error. Please try again.");
     } finally {
       btn.disabled = false;

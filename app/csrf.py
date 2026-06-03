@@ -57,22 +57,41 @@ def _new_token() -> str:
 
 def issue_csrf_cookie(response: Response) -> str:
     """Mint a new CSRF token and set it as a cookie on `response`.
-    Returns the token so callers can verify they read what they wrote."""
+    Returns the token so callers can verify they read what they wrote.
+
+    SECURITY NOTE — HttpOnly=False is LOAD-BEARING here, not an oversight:
+    the SPA fetch wrapper MUST read this cookie to echo its value back as
+    the X-CSRF-Token header on every state-changing request (double-submit
+    pattern). Flipping it to HttpOnly=True would silently break CSRF
+    protection — every POST/PUT/DELETE would fail with the SPA unable to
+    populate the header.
+
+    Why this is safe despite HttpOnly=False:
+      1. Same-Origin Policy blocks cross-site JS from reading the cookie.
+      2. SameSite=Lax stops the browser from sending it cross-site at all.
+      3. The cookie value is a non-secret random token; leaking it on the
+         victim's own origin doesn't help an attacker.
+      4. Defense-in-depth: even if some other layer fails open, the
+         compare_digest header/cookie check in CSRFMiddleware still gates
+         every mutating call.
+
+    See: OWASP Cheat Sheet "Cross-Site Request Forgery Prevention" —
+    "Double Submit Cookie" section.
+    """
     settings = get_settings()
     token = _new_token()
+    # SONAR_CSRF_BEGIN — see module docstring + the comment above for why
+    # the HttpOnly=False is correct here; suppressed in sonar-project.properties.
     response.set_cookie(
         key=CSRF_COOKIE,
         value=token,
-        # HttpOnly=False because the SPA JS has to read it. Same-Origin
-        # Policy prevents cross-site JS from seeing it; SameSite=Lax
-        # prevents the browser from leaking it cross-site.
-        httponly=False,
+        httponly=False,  # NOSONAR — see SECURITY NOTE above
         secure=settings.COOKIE_SECURE,
         samesite="lax",
         path="/",
-        # Long-ish — rotating churns the SPA's first-load.
         max_age=settings.SESSION_TTL_SECONDS,
     )
+    # SONAR_CSRF_END
     return token
 
 

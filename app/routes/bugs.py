@@ -46,12 +46,22 @@ from app.models import (
 )
 from app.webhooks_delivery import deliver_event
 from app.schemas import (
-    ALLOWED_ENVIRONMENTS, ALLOWED_PRIORITIES, ALLOWED_STATUSES,
+    ALLOWED_ENVIRONMENTS, ALLOWED_ITEM_TYPES, ALLOWED_PRIORITIES, ALLOWED_STATUSES,
     ActivityOut, AttachmentBrief, BugCreate, BugDetail, BugListResponse,
     BugOut, BugUpdate, CommentIn, CommentOut, normalize_choice,
 )
 
 router = APIRouter(prefix="/api/bugs", tags=["bugs"])
+
+# Repeated HTTPException detail strings — extracted so Sonar's S1192
+# duplicate-string-literal rule stays quiet and so the wording stays
+# consistent across endpoints.
+_DETAIL_BUG_NOT_FOUND = "Bug not found"
+_DEFAULT_MIME = "application/octet-stream"
+# Display label for an empty assignee list in change-tracking diffs.
+# Extracted to a constant so Sonar's S1192 duplicate-literal rule stays
+# quiet and the wording stays consistent across single + bulk updates.
+_NONE_DISPLAY = "(none)"
 
 MAX_FILE_BYTES = 50 * 1024 * 1024
 _UPLOAD_CHUNK = 1024 * 1024
@@ -199,11 +209,11 @@ def _get_bug_or_404(db: Session, bug_id: int, user: User) -> Bug:
     doesn't reveal anything."""
     bug = db.scalar(_eager_bug().where(Bug.id == bug_id))
     if bug is None:
-        raise HTTPException(status_code=404, detail="Bug not found")
+        raise HTTPException(status_code=404, detail=_DETAIL_BUG_NOT_FOUND)
     if bug.project is None or bug.project.org_id != user.org_id:
-        raise HTTPException(status_code=404, detail="Bug not found")
+        raise HTTPException(status_code=404, detail=_DETAIL_BUG_NOT_FOUND)
     if not can_access_project(db, user, bug.project):
-        raise HTTPException(status_code=404, detail="Bug not found")
+        raise HTTPException(status_code=404, detail=_DETAIL_BUG_NOT_FOUND)
     return bug
 
 
@@ -252,6 +262,104 @@ def export_bugs_csv(
 # ---------------------------------------------------------------------------
 # List
 # ---------------------------------------------------------------------------
+def _normalize_choice_list(values: Optional[list[str]], allowed: list[str], label: str) -> list[str]:
+    """Normalize a multi-valued enum query param. Strip empties; reject
+    unknown values with 400 (same behavior as the legacy single-value path)."""
+    if not values:
+        return []
+    out: list[str] = []
+    for v in values:
+        if v is None or v == "":
+            continue
+        try:
+            out.append(normalize_choice(v, allowed, label))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return out
+
+
+def _apply_where_both(stmt, count_stmt, clause):
+    return stmt.where(clause), count_stmt.where(clause)
+
+
+def _apply_q_filter(stmt, count_stmt, q: str):
+    """Bug-id-or-text search: #123 / 123 → exact id match; otherwise on
+    Postgres a tsvector FTS path + ILIKE fallback, on SQLite plain ILIKE."""
+    q_clean = q.strip().lstrip("#")
+    if q_clean.isdigit():
+        return _apply_where_both(stmt, count_stmt, Bug.id == int(q_clean))
+    if not q_clean:
+        return stmt, count_stmt
+    # On Postgres we use the database's full-text search (tsvector over
+    # title || description). It's an order of magnitude faster than
+    # ILIKE on tables >50k rows AND gives us prefix matching + stemming
+    # for free. On SQLite (tests / single-user dev) we fall back to the
+    # older ILIKE path.
+    if engine.dialect.name == "postgresql":
+        # Use plainto_tsquery so user input doesn't have to be
+        # well-formed FTS syntax. We OR with an ILIKE fallback so
+        # short / partial-word searches ("log" → "login") still hit.
+        from sqlalchemy import text as _sqltext
+        tsquery = _sqltext(
+            "to_tsvector('simple', coalesce(title,'') || ' ' || coalesce(description,'')) "
+            "@@ plainto_tsquery('simple', :q)"
+        ).bindparams(q=q_clean)
+        like = f"%{_like_escape(q_clean.lower())}%"
+        clause = or_(
+            tsquery,
+            func.lower(Bug.title).like(like, escape="\\"),
+            func.lower(Bug.description).like(like, escape="\\"),
+        )
+    else:
+        like = f"%{_like_escape(q_clean.lower())}%"
+        clause = or_(
+            func.lower(Bug.title).like(like, escape="\\"),
+            func.lower(Bug.description).like(like, escape="\\"),
+        )
+    return _apply_where_both(stmt, count_stmt, clause)
+
+
+def _apply_event_filter(stmt, count_stmt, event_id: int):
+    """event_id=0 means "show only items NOT attached to an event"
+    (a convenience for the event-detail drill-in's siblings panel)."""
+    if event_id == 0:
+        return _apply_where_both(stmt, count_stmt, Bug.event_id.is_(None))
+    return _apply_where_both(stmt, count_stmt, Bug.event_id == event_id)
+
+
+def _apply_list_filters(stmt, count_stmt, *, statuses, priorities, environments,
+                        item_types, project_ids, assignee_ids, reporter_id,
+                        event_id, q):
+    """Layer every list_bugs filter onto the select+count statement pair.
+
+    NOTE: `project_ids` here is the *already-intersected* set (caller-asked
+    AND user-accessible). Tenant isolation is enforced upstream — this
+    helper just composes the WHERE clauses.
+    """
+    if project_ids:
+        stmt, count_stmt = _apply_where_both(stmt, count_stmt, Bug.project_id.in_(project_ids))
+    if statuses:
+        stmt, count_stmt = _apply_where_both(stmt, count_stmt, Bug.status.in_(statuses))
+    if priorities:
+        stmt, count_stmt = _apply_where_both(stmt, count_stmt, Bug.priority.in_(priorities))
+    if environments:
+        stmt, count_stmt = _apply_where_both(stmt, count_stmt, Bug.environment.in_(environments))
+    # v2.4 — type tabs filter implicitly via this list.
+    if item_types:
+        stmt, count_stmt = _apply_where_both(stmt, count_stmt, Bug.item_type.in_(item_types))
+    if reporter_id is not None:
+        stmt, count_stmt = _apply_where_both(stmt, count_stmt, Bug.reporter_id == reporter_id)
+    if assignee_ids:
+        stmt, count_stmt = _apply_where_both(
+            stmt, count_stmt, Bug.assignees.any(User.id.in_(assignee_ids)),
+        )
+    if event_id is not None:
+        stmt, count_stmt = _apply_event_filter(stmt, count_stmt, event_id)
+    if q:
+        stmt, count_stmt = _apply_q_filter(stmt, count_stmt, q)
+    return stmt, count_stmt
+
+
 @router.get("", response_model=BugListResponse)
 def list_bugs(
     project_id: Optional[list[int]] = Query(default=None),
@@ -271,28 +379,15 @@ def list_bugs(
     if page < 1 or page_size < 1 or page_size > 200:
         raise HTTPException(status_code=400, detail="Invalid pagination parameters")
 
+    # Tenant + per-project access gate. Resolved once per request.
     accessible = accessible_project_ids(db, user)
     if not accessible:
         return BugListResponse(items=[], page=page, page_size=page_size, total=0, pages=0)
 
-    def _normalize_list(values, allowed, label):
-        if not values:
-            return []
-        out: list[str] = []
-        for v in values:
-            if v is None or v == "":
-                continue
-            try:
-                out.append(normalize_choice(v, allowed, label))
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return out
-
-    from app.schemas import ALLOWED_ITEM_TYPES
-    statuses = _normalize_list(status_filter, ALLOWED_STATUSES, "status")
-    priorities = _normalize_list(priority, ALLOWED_PRIORITIES, "priority")
-    environments = _normalize_list(environment, ALLOWED_ENVIRONMENTS, "environment")
-    item_types = _normalize_list(item_type, ALLOWED_ITEM_TYPES, "item_type")
+    statuses = _normalize_choice_list(status_filter, ALLOWED_STATUSES, "status")
+    priorities = _normalize_choice_list(priority, ALLOWED_PRIORITIES, "priority")
+    environments = _normalize_choice_list(environment, ALLOWED_ENVIRONMENTS, "environment")
+    item_types = _normalize_choice_list(item_type, ALLOWED_ITEM_TYPES, "item_type")
 
     # The caller-supplied project filter must be intersected with what
     # they can actually see — otherwise they'd see nothing or, worse,
@@ -308,67 +403,13 @@ def list_bugs(
 
     assignee_ids = [a for a in (assignee_id or []) if a]
 
-    stmt = _eager_bug().where(Bug.project_id.in_(project_ids_to_use))
-    count_stmt = select(func.count(Bug.id)).where(Bug.project_id.in_(project_ids_to_use))
-
-    def apply(both, clause):
-        return both[0].where(clause), both[1].where(clause)
-
-    if statuses:
-        stmt, count_stmt = apply((stmt, count_stmt), Bug.status.in_(statuses))
-    if priorities:
-        stmt, count_stmt = apply((stmt, count_stmt), Bug.priority.in_(priorities))
-    if environments:
-        stmt, count_stmt = apply((stmt, count_stmt), Bug.environment.in_(environments))
-    # v2.4 — type tabs filter implicitly via this list.
-    if item_types:
-        stmt, count_stmt = apply((stmt, count_stmt), Bug.item_type.in_(item_types))
-    if event_id is not None:
-        # event_id=0 means "show only items NOT attached to an event"
-        # (a convenience for the event-detail drill-in's siblings panel).
-        if event_id == 0:
-            stmt, count_stmt = apply((stmt, count_stmt), Bug.event_id.is_(None))
-        else:
-            stmt, count_stmt = apply((stmt, count_stmt), Bug.event_id == event_id)
-    if reporter_id is not None:
-        stmt, count_stmt = apply((stmt, count_stmt), Bug.reporter_id == reporter_id)
-    if assignee_ids:
-        stmt, count_stmt = apply(
-            (stmt, count_stmt),
-            Bug.assignees.any(User.id.in_(assignee_ids)),
-        )
-    if q:
-        q_clean = q.strip().lstrip("#")
-        if q_clean.isdigit():
-            stmt, count_stmt = apply((stmt, count_stmt), Bug.id == int(q_clean))
-        elif q_clean:
-            # On Postgres we use the database's full-text search (tsvector
-            # over title || description). It's an order of magnitude
-            # faster than ILIKE on tables >50k rows AND gives us prefix
-            # matching + stemming for free. On SQLite (tests / single-
-            # user dev) we fall back to the older ILIKE path.
-            if engine.dialect.name == "postgresql":
-                # Use plainto_tsquery so user input doesn't have to be
-                # well-formed FTS syntax. We OR with an ILIKE fallback so
-                # short / partial-word searches ("log" → "login") still hit.
-                from sqlalchemy import text as _sqltext
-                tsquery = _sqltext(
-                    "to_tsvector('simple', coalesce(title,'') || ' ' || coalesce(description,'')) "
-                    "@@ plainto_tsquery('simple', :q)"
-                ).bindparams(q=q_clean)
-                like = f"%{_like_escape(q_clean.lower())}%"
-                clause = or_(
-                    tsquery,
-                    func.lower(Bug.title).like(like, escape="\\"),
-                    func.lower(Bug.description).like(like, escape="\\"),
-                )
-            else:
-                like = f"%{_like_escape(q_clean.lower())}%"
-                clause = or_(
-                    func.lower(Bug.title).like(like, escape="\\"),
-                    func.lower(Bug.description).like(like, escape="\\"),
-                )
-            stmt, count_stmt = apply((stmt, count_stmt), clause)
+    stmt, count_stmt = _apply_list_filters(
+        _eager_bug(), select(func.count(Bug.id)),
+        statuses=statuses, priorities=priorities, environments=environments,
+        item_types=item_types, project_ids=project_ids_to_use,
+        assignee_ids=assignee_ids, reporter_id=reporter_id,
+        event_id=event_id, q=q,
+    )
 
     total = db.scalar(count_stmt) or 0
     offset = (page - 1) * page_size
@@ -416,11 +457,11 @@ def get_bug(
         ).where(Bug.id == bug_id)
     )
     if bug is None:
-        raise HTTPException(status_code=404, detail="Bug not found")
+        raise HTTPException(status_code=404, detail=_DETAIL_BUG_NOT_FOUND)
     if bug.project is None or bug.project.org_id != user.org_id:
-        raise HTTPException(status_code=404, detail="Bug not found")
+        raise HTTPException(status_code=404, detail=_DETAIL_BUG_NOT_FOUND)
     if not can_access_project(db, user, bug.project):
-        raise HTTPException(status_code=404, detail="Bug not found")
+        raise HTTPException(status_code=404, detail=_DETAIL_BUG_NOT_FOUND)
 
     all_atts = list(db.scalars(
         select(Attachment).where(Attachment.bug_id == bug_id)
@@ -462,6 +503,47 @@ def get_bug(
 # ---------------------------------------------------------------------------
 # Create
 # ---------------------------------------------------------------------------
+def _resolve_create_project(db: Session, project_id: int, actor: User) -> Project:
+    """Look up the target project, 400/403 if it isn't real / accessible."""
+    project = db.get(Project, project_id)
+    if project is None or project.org_id != actor.org_id:
+        raise HTTPException(status_code=400, detail="Project does not exist")
+    if not can_access_project(db, actor, project):
+        raise HTTPException(status_code=403, detail="You don't have access to this project")
+    return project
+
+
+def _validate_create_item_type(item_type: str, actor: User) -> None:
+    """v2.4: filing a Task or Requirement is admin/manager-only. Members
+    can still file Bugs as before."""
+    if item_type in ("Task", "Requirement") and actor.role not in (ROLE_ADMIN, ROLE_MANAGER):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Only admins and managers can file {item_type.lower()}s.",
+        )
+
+
+def _validate_create_event(event_id_val: Optional[int], db: Session, actor: User) -> None:
+    """v2.4: validate event_id belongs to the same org if provided."""
+    if not event_id_val:
+        return
+    from app.models import Event as _Event
+    ev = db.get(_Event, event_id_val)
+    if ev is None or ev.org_id != actor.org_id:
+        raise HTTPException(status_code=400, detail="Event does not exist")
+
+
+def _resolve_create_reporter(payload: BugCreate, project: Project,
+                             db: Session, actor: User) -> User:
+    """Reporter override is only permitted for admins / org managers /
+    project leads of THIS project. Regular members file as themselves."""
+    if payload.reporter_id is None or payload.reporter_id == actor.id:
+        return actor
+    if not (actor.role in (ROLE_ADMIN, ROLE_MANAGER) or can_manage_project(db, actor, project)):
+        raise HTTPException(status_code=403, detail="You can only file bugs as yourself")
+    return _resolve_user(db, payload.reporter_id, actor.org_id)
+
+
 @router.post("", response_model=BugOut, status_code=status.HTTP_201_CREATED)
 def create_bug(
     payload: BugCreate,
@@ -469,38 +551,15 @@ def create_bug(
     actor: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> BugOut:
-    project = db.get(Project, payload.project_id)
-    if project is None or project.org_id != actor.org_id:
-        raise HTTPException(status_code=400, detail="Project does not exist")
-    if not can_access_project(db, actor, project):
-        raise HTTPException(status_code=403, detail="You don't have access to this project")
+    project = _resolve_create_project(db, payload.project_id, actor)
 
-    # v2.4: filing a Task or Requirement is admin/manager-only. Members
-    # can still file Bugs as before.
     item_type = getattr(payload, "item_type", None) or "Bug"
-    if item_type in ("Task", "Requirement") and actor.role not in (ROLE_ADMIN, ROLE_MANAGER):
-        raise HTTPException(
-            status_code=403,
-            detail=f"Only admins and managers can file {item_type.lower()}s.",
-        )
+    _validate_create_item_type(item_type, actor)
 
-    # v2.4: validate event_id belongs to the same org if provided.
-    from app.models import Event as _Event
     event_id_val = getattr(payload, "event_id", None)
-    if event_id_val:
-        ev = db.get(_Event, event_id_val)
-        if ev is None or ev.org_id != actor.org_id:
-            raise HTTPException(status_code=400, detail="Event does not exist")
+    _validate_create_event(event_id_val, db, actor)
 
-    # Reporter override is only permitted for admins / org managers /
-    # project leads of THIS project. Regular members file as themselves.
-    if payload.reporter_id is not None and payload.reporter_id != actor.id:
-        if not (actor.role in (ROLE_ADMIN, ROLE_MANAGER) or can_manage_project(db, actor, project)):
-            raise HTTPException(status_code=403, detail="You can only file bugs as yourself")
-        reporter = _resolve_user(db, payload.reporter_id, actor.org_id)
-    else:
-        reporter = actor
-
+    reporter = _resolve_create_reporter(payload, project, db, actor)
     assignees = _resolve_users(db, payload.assignee_ids, actor.org_id)
 
     bug = Bug(
@@ -553,6 +612,176 @@ def create_bug(
 # ---------------------------------------------------------------------------
 # Update
 # ---------------------------------------------------------------------------
+# v2.4 — these are the fields whose old→new transitions get an audit row.
+# `assignee_ids` and `reporter_id` are handled separately because they
+# resolve to relationship rows / human-readable names rather than scalar
+# columns. `item_type` and `event_id` are tracked for the type-tab UX.
+_UPDATE_TRACKED_FIELDS = [
+    "item_type", "status", "priority", "environment", "project_id",
+    "due_date", "title", "description", "event_id",
+]
+
+
+def _validate_update_authorization(bug: Bug, actor: User, db: Session) -> None:
+    """Tenant + per-project + per-type edit gate. Mirrors the same matrix
+    the SPA uses to enable/disable the edit button."""
+    current_type = getattr(bug, "item_type", None) or "Bug"
+    if not can_edit_bug(db, actor, bug.project, current_type):
+        raise HTTPException(
+            status_code=403,
+            detail=f"You don't have permission to edit this {current_type.lower()}.",
+        )
+
+
+def _normalize_update_event_id(fields: dict, db: Session, actor: User) -> None:
+    """Validate event_id belongs to the caller's org (v2.4).
+    `event_id` is currently not normalized to None on 0 in the enterprise
+    flow — clients send JSON null when they want to unlink — but we keep
+    the helper for parity with the internal refactor."""
+    if "event_id" in fields and fields["event_id"]:
+        from app.models import Event as _Event
+        ev = db.get(_Event, fields["event_id"])
+        if ev is None or ev.org_id != actor.org_id:
+            raise HTTPException(status_code=400, detail="Event does not exist")
+
+
+def _validate_update_item_type(fields: dict, actor: User) -> None:
+    """v2.4: changing item_type to Task/Requirement is admin/manager only."""
+    if "item_type" in fields and fields["item_type"] is not None:
+        new_type = fields["item_type"]
+        if new_type in ("Task", "Requirement") and actor.role not in (ROLE_ADMIN, ROLE_MANAGER):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Only admins and managers can change item_type to {new_type}.",
+            )
+
+
+def _validate_update_project(fields: dict, actor: User, db: Session) -> None:
+    """Validate a new project_id: same org AND the actor has access."""
+    if "project_id" in fields and fields["project_id"] is not None:
+        new_proj = db.get(Project, fields["project_id"])
+        if new_proj is None or new_proj.org_id != actor.org_id:
+            raise HTTPException(status_code=400, detail="Project does not exist")
+        if not can_access_project(db, actor, new_proj):
+            raise HTTPException(status_code=403, detail="You don't have access to that project")
+
+
+def _validate_update_status(_fields: dict, _bug: Bug) -> None:
+    """Placeholder for per-type status validation. The enterprise schema
+    currently does not enforce per-type status sets at this layer — the
+    Pydantic union check is sufficient — but the helper is kept here so a
+    future tightening of the matrix has an obvious home.
+
+    Params are prefixed with `_` to satisfy the unused-arg linter while
+    keeping the call-site signature stable for the future tightening."""
+
+
+def _validate_update_payload(fields: dict, bug: Bug, db: Session, actor: User) -> None:
+    """Run every pre-mutation validator. Order matters: item_type/event/
+    project are checked first so we 400 before any DB writes."""
+    _validate_update_item_type(fields, actor)
+    _normalize_update_event_id(fields, db, actor)
+    _validate_update_project(fields, actor, db)
+    _validate_update_status(fields, bug)
+
+
+def _compute_tracked_changes(bug: Bug, fields: dict) -> list[tuple[str, str, str]]:
+    """List of (field, old, new) tuples for every tracked field that
+    differs. Description is included so a description-only edit isn't a
+    no-op."""
+    changes: list[tuple[str, str, str]] = []
+    for f in _UPDATE_TRACKED_FIELDS:
+        if f in fields and getattr(bug, f) != fields[f]:
+            changes.append((f, str(getattr(bug, f) or ""), str(fields[f] or "")))
+    return changes
+
+
+def _apply_reporter_change(bug: Bug, db: Session, actor: User,
+                           new_reporter_id: Optional[int],
+                           changes: list[tuple[str, str, str]]) -> None:
+    """Swap the reporter and append the audit row. Caller has already
+    gated on permission AND verified the reporter actually changes.
+    Resolves through the org-scoped `_resolve_user` so cross-tenant
+    user IDs are rejected."""
+    old_reporter_label = bug.reporter.name if bug.reporter else "—"
+    if new_reporter_id is None:
+        bug.reporter_id = None
+        new_reporter_label = "—"
+    else:
+        new_reporter = _resolve_user(db, new_reporter_id, actor.org_id)
+        bug.reporter_id = new_reporter.id
+        new_reporter_label = new_reporter.name if new_reporter else "—"
+    if old_reporter_label != new_reporter_label:
+        changes.append(("reporter", old_reporter_label, new_reporter_label))
+
+
+def _apply_assignee_diff(bug: Bug, db: Session, actor: User,
+                         assignee_ids: Optional[list[int]],
+                         changes: list[tuple[str, str, str]]) -> list[User]:
+    """Diff and re-bind assignees if the set actually changed. Returns
+    the list of NEWLY-added users so the caller can notify them. Uses
+    the org-scoped `_resolve_users` so cross-tenant IDs 400."""
+    if assignee_ids is None:
+        return []
+    new_users = _resolve_users(db, assignee_ids, actor.org_id)
+    old_ids = {a.id for a in bug.assignees}
+    new_ids = {u.id for u in new_users}
+    added_ids = new_ids - old_ids
+    removed_ids = old_ids - new_ids
+    if not (added_ids or removed_ids):
+        return []
+    old_names = sorted(a.name for a in bug.assignees)
+    new_names = sorted(u.name for u in new_users)
+    changes.append((
+        "assignees",
+        ", ".join(old_names) or _NONE_DISPLAY,
+        ", ".join(new_names) or _NONE_DISPLAY,
+    ))
+    bug.assignees = new_users  # only re-bind when actually different
+    return [u for u in new_users if u.id in added_ids]
+
+
+def _persist_update(db: Session, bug: Bug, actor: User,
+                    changes: list[tuple[str, str, str]]) -> None:
+    """Commit when there are tracked changes; rollback otherwise so a
+    no-op PUT doesn't bump updated_at. Audit rows are org-scoped."""
+    if not changes:
+        db.rollback()
+        return
+    # v2.4 — prefix each change with the bug id+title so audit
+    # search by title catches update events too.
+    prefix = f"#{bug.id} '{bug.title}' — "
+    for field, old, new in changes:
+        _log(db, actor.org_id, bug.id, actor, f"{field}_changed",
+             f"{prefix}{field}: '{old}' → '{new}'")
+    db.commit()
+
+
+def _schedule_update_notifications(background: BackgroundTasks, snap: BugSnapshot,
+                                   changes: list[tuple[str, str, str]],
+                                   newly_assigned: list[User], actor: User,
+                                   fresh: Bug) -> None:
+    """Fan out email notifications, the assignee notification, and the
+    org-scoped outbound webhook. Webhook only fires on genuine changes."""
+    if changes:
+        background.add_task(
+            notify_bug_updated, snap, list(changes), actor.name, actor.id,
+        )
+        # Webhook fire — only if there were genuine changes.
+        background.add_task(
+            deliver_event, actor.org_id, "bug.updated",
+            {"bug": _bug_to_out_dict(fresh),
+             "changes": [{"field": f, "old": o, "new": n} for f, o, n in changes],
+             "actor_name": actor.name},
+        )
+    if newly_assigned:
+        background.add_task(
+            notify_assignment, snap,
+            tuple(UserSnapshot(id=u.id, name=u.name, email=u.email) for u in newly_assigned),
+            actor.name,
+        )
+
+
 @router.put("/{bug_id}", response_model=BugOut)
 def update_bug(
     bug_id: int,
@@ -562,45 +791,18 @@ def update_bug(
     db: Session = Depends(get_db),
 ) -> BugOut:
     bug = _get_bug_or_404(db, bug_id, actor)
-    current_type = getattr(bug, "item_type", None) or "Bug"
-    if not can_edit_bug(db, actor, bug.project, current_type):
-        raise HTTPException(
-            status_code=403,
-            detail=f"You don't have permission to edit this {current_type.lower()}.",
-        )
+    _validate_update_authorization(bug, actor, db)
 
     fields = payload.model_dump(exclude_unset=True)
-    actor_name = actor.name
-
-    # v2.4: changing item_type requires the same role gate as the
-    # destination type (admin/manager for Task/Requirement).
-    if "item_type" in fields and fields["item_type"] is not None:
-        new_type = fields["item_type"]
-        if new_type in ("Task", "Requirement") and actor.role not in (ROLE_ADMIN, ROLE_MANAGER):
-            raise HTTPException(
-                status_code=403,
-                detail=f"Only admins and managers can change item_type to {new_type}.",
-            )
-
-    # v2.4: validate event_id belongs to the same org if provided.
-    if "event_id" in fields and fields["event_id"]:
-        from app.models import Event as _Event
-        ev = db.get(_Event, fields["event_id"])
-        if ev is None or ev.org_id != actor.org_id:
-            raise HTTPException(status_code=400, detail="Event does not exist")
-
-    # Validate new project_id (must be same org, user must have access)
-    if "project_id" in fields and fields["project_id"] is not None:
-        new_proj = db.get(Project, fields["project_id"])
-        if new_proj is None or new_proj.org_id != actor.org_id:
-            raise HTTPException(status_code=400, detail="Project does not exist")
-        if not can_access_project(db, actor, new_proj):
-            raise HTTPException(status_code=403, detail="You don't have access to that project")
+    _validate_update_payload(fields, bug, db, actor)
 
     assignee_ids = fields.pop("assignee_ids", None)
     has_reporter_in_payload = "reporter_id" in fields
     new_reporter_id = fields.pop("reporter_id", None)
 
+    # Only gate on the reporter-change role when it ACTUALLY changes —
+    # otherwise a regular member touching any other field while the
+    # payload still echoes the existing reporter would 403.
     reporter_actually_changes = (
         has_reporter_in_payload and new_reporter_id != bug.reporter_id
     )
@@ -612,78 +814,19 @@ def update_bug(
             detail="Only admins, managers, or project leads can change the reporter",
         )
 
-    tracked = ["status", "priority", "environment", "project_id",
-               "due_date", "title", "description",
-               "item_type", "event_id"]  # v2.4
-    changes: list[tuple[str, str, str]] = []
-    for f in tracked:
-        if f in fields and getattr(bug, f) != fields[f]:
-            changes.append((f, str(getattr(bug, f) or ""), str(fields[f] or "")))
-
+    changes = _compute_tracked_changes(bug, fields)
     for key, value in fields.items():
         setattr(bug, key, value)
 
     if reporter_actually_changes:
-        old_reporter_label = bug.reporter.name if bug.reporter else "—"
-        if new_reporter_id is None:
-            bug.reporter_id = None
-            new_reporter_label = "—"
-        else:
-            new_reporter = _resolve_user(db, new_reporter_id, actor.org_id)
-            bug.reporter_id = new_reporter.id
-            new_reporter_label = new_reporter.name if new_reporter else "—"
-        if old_reporter_label != new_reporter_label:
-            changes.append(("reporter", old_reporter_label, new_reporter_label))
+        _apply_reporter_change(bug, db, actor, new_reporter_id, changes)
+    newly_assigned = _apply_assignee_diff(bug, db, actor, assignee_ids, changes)
 
-    newly_assigned: list[User] = []
-    if assignee_ids is not None:
-        new_users = _resolve_users(db, assignee_ids, actor.org_id)
-        old_ids = {a.id for a in bug.assignees}
-        new_ids = {u.id for u in new_users}
-        added_ids = new_ids - old_ids
-        removed_ids = old_ids - new_ids
-        if added_ids or removed_ids:
-            old_names = sorted(a.name for a in bug.assignees)
-            new_names = sorted(u.name for u in new_users)
-            changes.append((
-                "assignees",
-                ", ".join(old_names) or "(none)",
-                ", ".join(new_names) or "(none)",
-            ))
-            newly_assigned = [u for u in new_users if u.id in added_ids]
-            bug.assignees = new_users
-
-    if changes:
-        # v2.4 — prefix each change with the bug id+title so audit
-        # search by title catches update events too.
-        prefix = f"#{bug.id} '{bug.title}' — "
-        for field, old, new in changes:
-            _log(db, actor.org_id, bug.id, actor, f"{field}_changed",
-                 f"{prefix}{field}: '{old}' → '{new}'")
-        db.commit()
-    else:
-        db.rollback()
+    _persist_update(db, bug, actor, changes)
 
     fresh = db.scalar(_eager_bug().where(Bug.id == bug_id))
     snap = _bug_snapshot(fresh)
-
-    if changes:
-        background.add_task(
-            notify_bug_updated, snap, list(changes), actor_name, actor.id,
-        )
-        # Webhook fire — only if there were genuine changes.
-        background.add_task(
-            deliver_event, actor.org_id, "bug.updated",
-            {"bug": _bug_to_out_dict(fresh),
-             "changes": [{"field": f, "old": o, "new": n} for f, o, n in changes],
-             "actor_name": actor_name},
-        )
-    if newly_assigned:
-        background.add_task(
-            notify_assignment, snap,
-            tuple(UserSnapshot(id=u.id, name=u.name, email=u.email) for u in newly_assigned),
-            actor_name,
-        )
+    _schedule_update_notifications(background, snap, changes, newly_assigned, actor, fresh)
 
     return BugOut.model_validate(_bug_to_out_dict(
         fresh, _attachment_count(db, bug_id),
@@ -764,16 +907,9 @@ class BulkDeleteIn(_BulkModel):
     bug_ids: list[int] = _BulkField(..., min_length=1, max_length=200)
 
 
-@router.post("/bulk-update")
-def bulk_update(
-    payload: BulkUpdateIn,
-    background: BackgroundTasks,
-    actor: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> dict:
-    """Apply the supplied diff to many bugs in one shot. Skips bugs
-    the actor can't edit (silent — the response lists how many were
-    actually touched). All tenant-isolation checks still apply."""
+def _normalize_bulk_choices(payload: BulkUpdateIn) -> None:
+    """In-place: normalise the three scalar choice fields. Raises 400
+    on an invalid value via HTTPException."""
     try:
         if payload.status is not None:
             payload.status = normalize_choice(payload.status, ALLOWED_STATUSES, "status")
@@ -784,64 +920,130 @@ def bulk_update(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+
+def _bulk_can_touch(bug: Bug, actor: User, accessible: set[int], db: Session) -> bool:
+    """Tenant + accessibility + edit-permission gate for a single bug
+    in a bulk request. Mirrors the silent-skip semantics of the route."""
+    if bug.project is None or bug.project.org_id != actor.org_id:
+        return False
+    if bug.project_id not in accessible:
+        return False
+    return can_edit_bug(db, actor, bug.project)
+
+
+def _bulk_apply_scalars(bug: Bug, payload: BulkUpdateIn,
+                        local_changes: list[tuple[str, str, str]]) -> None:
+    """Apply status/priority/environment diffs to one bug and record
+    the field-level audit tuples."""
+    for field, new_val in (
+        ("status", payload.status),
+        ("priority", payload.priority),
+        ("environment", payload.environment),
+    ):
+        if new_val is None:
+            continue
+        old = getattr(bug, field)
+        if old != new_val:
+            local_changes.append((field, str(old), str(new_val)))
+            setattr(bug, field, new_val)
+
+
+def _bulk_apply_add_assignees(bug: Bug, add_users: list[User],
+                              local_changes: list[tuple[str, str, str]]) -> None:
+    """Union the supplied users into the bug's assignee set. No-op if
+    every requested user is already assigned."""
+    if not add_users:
+        return
+    current = {a.id for a in bug.assignees}
+    new_assignees = list(bug.assignees)
+    for u in add_users:
+        if u.id not in current:
+            new_assignees.append(u)
+    if len(new_assignees) == len(bug.assignees):
+        return
+    old_names = sorted(a.name for a in bug.assignees)
+    new_names = sorted(u.name for u in new_assignees)
+    local_changes.append(("assignees",
+                          ", ".join(old_names) or _NONE_DISPLAY,
+                          ", ".join(new_names) or _NONE_DISPLAY))
+    bug.assignees = new_assignees
+
+
+def _bulk_apply_remove_assignees(bug: Bug, remove_ids: set[int],
+                                 local_changes: list[tuple[str, str, str]]) -> None:
+    """Drop the supplied user ids from the bug's assignee set."""
+    if not remove_ids:
+        return
+    kept = [u for u in bug.assignees if u.id not in remove_ids]
+    if len(kept) == len(bug.assignees):
+        return
+    old_names = sorted(a.name for a in bug.assignees)
+    new_names = sorted(u.name for u in kept)
+    local_changes.append(("assignees",
+                          ", ".join(old_names) or _NONE_DISPLAY,
+                          ", ".join(new_names) or _NONE_DISPLAY))
+    bug.assignees = kept
+
+
+def _bulk_log_changes(db: Session, actor: User, bug: Bug,
+                      local_changes: list[tuple[str, str, str]]) -> None:
+    """Write one audit row per field that actually changed."""
+    for field, old, new in local_changes:
+        _log(db, actor.org_id, bug.id, actor, f"{field}_changed",
+             f"{field}: '{old}' → '{new}' (bulk)")
+
+
+def _bulk_process_one(bug: Bug, payload: BulkUpdateIn, add_users: list[User],
+                      remove_ids: set[int], actor: User, accessible: set[int],
+                      db: Session) -> Optional[bool]:
+    """Apply the bulk diff to a single bug.
+
+    Returns True if the bug was mutated + logged, False if the bug was
+    skipped by the tenant/access/edit gate, or None if it passed the
+    gate but had no diff (matches the legacy loop's tri-state counting:
+    no-op rows are NEITHER updated nor skipped)."""
+    if not _bulk_can_touch(bug, actor, accessible, db):
+        return False
+    local_changes: list[tuple[str, str, str]] = []
+    _bulk_apply_scalars(bug, payload, local_changes)
+    _bulk_apply_add_assignees(bug, add_users, local_changes)
+    _bulk_apply_remove_assignees(bug, remove_ids, local_changes)
+    if not local_changes:
+        return None
+    _bulk_log_changes(db, actor, bug, local_changes)
+    return True
+
+
+@router.post("/bulk-update")
+def bulk_update(
+    payload: BulkUpdateIn,
+    background: BackgroundTasks,
+    actor: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Apply the supplied diff to many bugs in one shot. Skips bugs
+    the actor can't edit (silent — the response lists how many were
+    actually touched). All tenant-isolation checks still apply."""
+    _normalize_bulk_choices(payload)
+
     accessible = set(accessible_project_ids(db, actor))
     bugs = list(db.scalars(_eager_bug().where(Bug.id.in_(payload.bug_ids))).all())
-    updated = 0
-    skipped = 0
-    add_users: list[User] = []
-    if payload.add_assignee_ids:
-        add_users = _resolve_users(db, payload.add_assignee_ids, actor.org_id)
+    add_users: list[User] = (
+        _resolve_users(db, payload.add_assignee_ids, actor.org_id)
+        if payload.add_assignee_ids else []
+    )
     remove_ids = set(payload.remove_assignee_ids or [])
 
+    updated = 0
+    skipped = 0
     for bug in bugs:
-        if bug.project is None or bug.project.org_id != actor.org_id:
-            skipped += 1
-            continue
-        if bug.project_id not in accessible:
-            skipped += 1
-            continue
-        if not can_edit_bug(db, actor, bug.project):
-            skipped += 1
-            continue
-        local_changes: list[tuple[str, str, str]] = []
-        for field, new_val in (
-            ("status", payload.status),
-            ("priority", payload.priority),
-            ("environment", payload.environment),
-        ):
-            if new_val is None:
-                continue
-            old = getattr(bug, field)
-            if old != new_val:
-                local_changes.append((field, str(old), str(new_val)))
-                setattr(bug, field, new_val)
-        if add_users:
-            current = {a.id for a in bug.assignees}
-            new_assignees = list(bug.assignees)
-            for u in add_users:
-                if u.id not in current:
-                    new_assignees.append(u)
-            if len(new_assignees) != len(bug.assignees):
-                old_names = sorted(a.name for a in bug.assignees)
-                new_names = sorted(u.name for u in new_assignees)
-                local_changes.append(("assignees",
-                                      ", ".join(old_names) or "(none)",
-                                      ", ".join(new_names) or "(none)"))
-                bug.assignees = new_assignees
-        if remove_ids:
-            kept = [u for u in bug.assignees if u.id not in remove_ids]
-            if len(kept) != len(bug.assignees):
-                old_names = sorted(a.name for a in bug.assignees)
-                new_names = sorted(u.name for u in kept)
-                local_changes.append(("assignees",
-                                      ", ".join(old_names) or "(none)",
-                                      ", ".join(new_names) or "(none)"))
-                bug.assignees = kept
-        if local_changes:
-            for field, old, new in local_changes:
-                _log(db, actor.org_id, bug.id, actor, f"{field}_changed",
-                     f"{field}: '{old}' → '{new}' (bulk)")
+        result = _bulk_process_one(bug, payload, add_users, remove_ids, actor, accessible, db)
+        if result is True:
             updated += 1
+        elif result is False:
+            skipped += 1
+        # result is None → passed gate but no diff: neither updated nor skipped
+
     if updated:
         db.commit()
         background.add_task(
@@ -1003,7 +1205,9 @@ async def upload_attachment(
     uploader: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    bug = _get_bug_or_404(db, bug_id, uploader)
+    # Side-effect call: validates the bug exists, belongs to the actor's
+    # org, and the actor has access. We don't need the row itself here.
+    _get_bug_or_404(db, bug_id, uploader)
     if comment_id is not None:
         c = db.get(Comment, comment_id)
         if c is None or c.bug_id != bug_id:
@@ -1019,7 +1223,7 @@ async def upload_attachment(
         uploader_user_id=uploader.id,
         uploader_name=uploader.name,
         filename=(file.filename or "unnamed")[:255],
-        content_type=(file.content_type or "application/octet-stream")[:120],
+        content_type=(file.content_type or _DEFAULT_MIME)[:120],
         size_bytes=len(data),
         data=data,
     )
@@ -1050,7 +1254,7 @@ def download_attachment(
 
     ct_lower = (a.content_type or "").lower().split(";")[0].strip()
     is_active = ct_lower in _ACTIVE_CONTENT_TYPES
-    safe_ct = "application/octet-stream" if is_active else (a.content_type or "application/octet-stream")
+    safe_ct = _DEFAULT_MIME if is_active else (a.content_type or _DEFAULT_MIME)
     disposition = "attachment" if is_active else "inline"
 
     safe_fname = _safe_filename_for_header(a.filename)

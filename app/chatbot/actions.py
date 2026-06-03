@@ -34,7 +34,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
@@ -56,9 +56,11 @@ class ActionPlan:
     on confirm. Storing IDs (not objects) means we can serialise it into
     memory.store between turns without holding ORM instances across a
     session boundary."""
-    kind: str  # "assign", "unassign", "set_status", "set_priority",
-               # "set_environment", "set_due_date", "add_comment",
-               # "create_bug", "create_project"
+    kind: Literal[
+        "assign", "unassign", "set_status", "set_priority",
+        "set_environment", "set_due_date", "add_comment",
+        "create_bug", "create_project",
+    ]
     actor_user_id: int
     bug_id: Optional[int] = None
     target_user_ids: list[int] = field(default_factory=list)
@@ -337,6 +339,39 @@ def _apply_add_comment(db: Session, plan: ActionPlan, actor: User) -> Response:
     )
 
 
+def _resolve_create_bug_project(
+    db: Session, actor: User, requested_project_id: Optional[int],
+) -> tuple[Optional[int], Optional[str]]:
+    """Resolve the target project id for a chatbot create-bug request.
+
+    Returns (project_id, error_message). Exactly one of the two will be
+    non-None. Extracted from _apply_create_bug to keep its cognitive
+    complexity under SonarQube's python:S3776 threshold. Behaviour and
+    error messages are byte-identical to the original inline block.
+    """
+    from app.auth import accessible_project_ids
+    pids = accessible_project_ids(db, actor)
+    if requested_project_id is None:
+        # No project given — pick the first project the user can access.
+        if not pids:
+            return None, (
+                "You don't have access to any projects yet. "
+                "Ask an admin to add you to one."
+            )
+        first = db.scalar(
+            select(Project).where(Project.id.in_(pids)).order_by(Project.id)
+        )
+        if first is None:
+            return None, "There are no projects yet. Create one first"
+        return first.id, None
+    proj = db.get(Project, requested_project_id)
+    if proj is None or proj.org_id != actor.org_id:
+        return None, "That project doesn't exist anymore"
+    if requested_project_id not in pids:
+        return None, "You don't have access to that project"
+    return requested_project_id, None
+
+
 def _apply_create_bug(db: Session, plan: ActionPlan, actor: User) -> Response:
     err = _check_can_create_bug(actor)
     if err:
@@ -351,28 +386,9 @@ def _apply_create_bug(db: Session, plan: ActionPlan, actor: User) -> Response:
         return _error_response("Title too long — keep it under 200 chars")
 
     # Resolve the project within the actor's org and access set.
-    from app.auth import accessible_project_ids
-    pids = accessible_project_ids(db, actor)
-    project_id = plan.new_project_id
-    if project_id is None:
-        # No project given — pick the first project the user can access.
-        if not pids:
-            return _error_response(
-                "You don't have access to any projects yet. "
-                "Ask an admin to add you to one."
-            )
-        first = db.scalar(
-            select(Project).where(Project.id.in_(pids)).order_by(Project.id)
-        )
-        if first is None:
-            return _error_response("There are no projects yet. Create one first")
-        project_id = first.id
-    else:
-        proj = db.get(Project, project_id)
-        if proj is None or proj.org_id != actor.org_id:
-            return _error_response("That project doesn't exist anymore")
-        if project_id not in pids:
-            return _error_response("You don't have access to that project")
+    project_id, proj_err = _resolve_create_bug_project(db, actor, plan.new_project_id)
+    if proj_err is not None:
+        return _error_response(proj_err)
 
     bug = Bug(
         title=title,

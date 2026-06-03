@@ -1,0 +1,23 @@
+# =============================================================================
+#  Bug Hunter — development / CI dependencies (NOT shipped in the runtime image)
+# -----------------------------------------------------------------------------
+#  Install alongside requirements.txt only when developing or running the
+#  test + SonarQube pipeline:
+#
+#      pip install -r requirements.txt -r requirements-dev.txt
+#
+#  The production Docker image (Dockerfile) installs requirements.txt only,
+#  so these tools never ship to the deployed container.
+# =============================================================================
+
+# Pin to the same versions as production for the libraries that already
+# appear there; only DEV-only tools are listed below.
+
+# --- Tests already need this (pulled by pytest) -----------------------------
+pytest>=8.0,<10
+pytest-order>=1.3
+
+# --- Coverage (consumed by SonarQube via coverage.xml) ----------------------
+# pytest-cov is the pytest plugin; coverage is its underlying engine.
+pytest-cov>=5.0
+coverage>=7.4

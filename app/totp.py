@@ -28,7 +28,7 @@ import secrets
 from typing import Optional
 
 import pyotp
-from itsdangerous import BadSignature, SignatureExpired, TimestampSigner
+from itsdangerous import BadSignature, TimestampSigner
 
 from app.auth import _signer  # reuse SESSION_SECRET base
 from app.config import get_settings
@@ -79,11 +79,15 @@ def parse_pending_token(token: str) -> Optional[int]:
         return None
     try:
         raw = _pending_signer().unsign(token, max_age=_PENDING_TTL_SECONDS)
-    except (SignatureExpired, BadSignature):
+    except BadSignature:
+        # `SignatureExpired` is a subclass of `BadSignature`, so the
+        # broader catch handles both the expired and tampered cases.
         return None
     try:
         return int(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+    except ValueError:
+        # `UnicodeDecodeError` is a subclass of `ValueError`, so it's
+        # already covered by the broader catch.
         return None
 
 

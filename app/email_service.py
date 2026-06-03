@@ -23,6 +23,15 @@ from app.config import Settings, get_settings
 
 logger = logging.getLogger("bug_hunter.email")
 
+# Repeated section label used by every email body that has a free-text
+# description block. Extracted so Sonar's S1192 duplicate-string-literal
+# rule stays quiet.
+_DESC_LABEL = "Description:"
+
+# Repeated email signature line. Em-dash is U+2014 — keep byte-identical.
+# Extracted so Sonar's S1192 duplicate-string-literal rule stays quiet.
+_SIG_BUG_HUNTER = "— Bug Hunter"
+
 
 # ---------------------------------------------------------------------------
 # Snapshot dataclasses (no SQLAlchemy objects past this point)
@@ -76,8 +85,18 @@ def _send_smtp(settings: Settings, msg: EmailMessage) -> None:
         return
 
     try:
+        # Build an SSL context with EXPLICIT hostname + cert verification
+        # and an EXPLICIT minimum TLS version. ssl.create_default_context()
+        # already sets sane defaults on Python 3.10+, but Sonar's
+        # python:S4830 + python:S4423 rules want the posture stated locally
+        # so it's auditable without consulting stdlib internals. Reused
+        # across both SMTP_SSL and STARTTLS paths.
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = True
+        ctx.verify_mode = ssl.CERT_REQUIRED
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+
         if settings.SMTP_USE_SSL:
-            ctx = ssl.create_default_context()
             with smtplib.SMTP_SSL(
                 settings.SMTP_HOST, settings.SMTP_PORT,
                 timeout=settings.SMTP_TIMEOUT, context=ctx,
@@ -92,14 +111,16 @@ def _send_smtp(settings: Settings, msg: EmailMessage) -> None:
             ) as s:
                 s.ehlo()
                 if settings.SMTP_USE_TLS:
-                    s.starttls(context=ssl.create_default_context())
+                    s.starttls(context=ctx)
                     s.ehlo()
                 if settings.SMTP_USERNAME:
                     s.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
                 s.send_message(msg)
         logger.info("SMTP email sent: subject=%r to=%s", msg["Subject"], msg["To"])
-    except Exception:
-        # Never let mailer failures break the API.
+    except (smtplib.SMTPException, OSError):
+        # Never let mailer failures break the API. We narrow to network and
+        # SMTP-protocol errors so programmer mistakes (e.g. bad header type)
+        # still surface in tests instead of getting swallowed.
         logger.exception("Failed to send email via SMTP")
 
 
@@ -199,7 +220,7 @@ def notify_bug_created(bug: BugSnapshot, actor_user_id: int | None) -> None:
     lines = [f"A new {noun} has been reported.", ""]
     lines += _bug_meta_lines(bug)
     if bug.description:
-        lines += ["", "Description:", bug.description]
+        lines += ["", _DESC_LABEL, bug.description]
     lines += ["", f"View: {_bug_link(bug.id)}"]
     deliver(subject, to, "\n".join(lines))
 
@@ -244,7 +265,7 @@ def notify_assignment(
         ]
         lines += _bug_meta_lines(bug)
         if bug.description:
-            lines += ["", "Description:", bug.description]
+            lines += ["", _DESC_LABEL, bug.description]
         lines += ["", f"View: {_bug_link(bug.id)}"]
         deliver(subject, [user.email], "\n".join(lines))
 
@@ -309,7 +330,7 @@ def notify_event_created(ev: "EventSnapshot", actor_name: str, actor_user_id: in
     lines = [f"{actor_name} created a new event.", ""]
     lines += _event_meta_lines(ev)
     if ev.description:
-        lines += ["", "Description:", ev.description]
+        lines += ["", _DESC_LABEL, ev.description]
     deliver(subject, to, "\n".join(lines))
 
 
@@ -362,7 +383,7 @@ def notify_password_reset(email: str, name: str, reset_url: str) -> None:
         "If you didn't request this, you can ignore this email — your password "
         "won't change unless someone uses the link.",
         "",
-        "— Bug Hunter",
+        _SIG_BUG_HUNTER,
     ])
     deliver(subject, [email], body)
 
@@ -394,7 +415,7 @@ def notify_invitation(
         "",
         "If you weren't expecting this email, you can safely ignore it.",
         "",
-        "— Bug Hunter",
+        _SIG_BUG_HUNTER,
     ])
     deliver(subject, [email], body)
 
@@ -420,6 +441,6 @@ def notify_email_change_code(
         "The code expires in 15 minutes. If you didn't request this, you can",
         "ignore this email — nothing will change unless the code is entered.",
         "",
-        "— Bug Hunter",
+        _SIG_BUG_HUNTER,
     ])
     deliver(subject, [new_email], body)

@@ -29,6 +29,13 @@ router = APIRouter(tags=["custom-fields"])
 
 _VALID_TYPES = {"text", "number", "date", "select"}
 
+# Repeated HTTPException detail — extracted so Sonar's duplicate-literal
+# rule stays quiet and the wording stays consistent across endpoints.
+# Note: this is intentionally the same string we 404 with for both
+# "bug missing" and "bug in another org / not accessible" so we don't
+# leak existence across tenants.
+_MSG_BUG_NOT_FOUND = "Bug not found"
+
 
 class CustomFieldOut(BaseModel):
     id: int
@@ -187,12 +194,12 @@ def list_values(
 ) -> list[CustomValueOut]:
     bug = db.get(Bug, bug_id)
     if bug is None:
-        raise HTTPException(status_code=404, detail="Bug not found")
+        raise HTTPException(status_code=404, detail=_MSG_BUG_NOT_FOUND)
     project = bug.project
     if project is None or project.org_id != user.org_id:
-        raise HTTPException(status_code=404, detail="Bug not found")
+        raise HTTPException(status_code=404, detail=_MSG_BUG_NOT_FOUND)
     if not can_access_project(db, user, project):
-        raise HTTPException(status_code=404, detail="Bug not found")
+        raise HTTPException(status_code=404, detail=_MSG_BUG_NOT_FOUND)
     rows = list(db.scalars(
         select(BugCustomValue).where(BugCustomValue.bug_id == bug_id)
     ).all())
@@ -208,12 +215,12 @@ def set_values(
 ) -> list[CustomValueOut]:
     bug = db.get(Bug, bug_id)
     if bug is None:
-        raise HTTPException(status_code=404, detail="Bug not found")
+        raise HTTPException(status_code=404, detail=_MSG_BUG_NOT_FOUND)
     project = bug.project
     if project is None or project.org_id != user.org_id:
-        raise HTTPException(status_code=404, detail="Bug not found")
+        raise HTTPException(status_code=404, detail=_MSG_BUG_NOT_FOUND)
     if not can_access_project(db, user, project):
-        raise HTTPException(status_code=404, detail="Bug not found")
+        raise HTTPException(status_code=404, detail=_MSG_BUG_NOT_FOUND)
     # Validate every field_id belongs to this bug's project
     project_field_ids = set(db.scalars(
         select(CustomField.id).where(CustomField.project_id == bug.project_id)

@@ -29,14 +29,16 @@ matching `sessions` row; just that one device is booted.
 from __future__ import annotations
 
 import hashlib
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import bcrypt
 from fastapi import Depends, HTTPException, Request, Response, status
-from itsdangerous import BadSignature, SignatureExpired, TimestampSigner
+from itsdangerous import BadSignature, TimestampSigner
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -52,6 +54,8 @@ from app.models import (
     Session as SessionRow,
     User,
 )
+
+logger = logging.getLogger("bug_hunter.auth")
 
 COOKIE_NAME = "bh_session"
 
@@ -109,7 +113,7 @@ def parse_session_token(token: str) -> Optional[tuple[int, int, Optional[str]]]:
         return None
     try:
         raw = _signer().unsign(token, max_age=get_settings().SESSION_TTL_SECONDS)
-    except (SignatureExpired, BadSignature):
+    except BadSignature:
         return None
     try:
         text = raw.decode("utf-8")
@@ -190,6 +194,55 @@ def invalidate_outstanding_reset_tokens(db: Session, user_id: int) -> int:
 _LAST_SEEN_THROTTLE_SECONDS = 60
 
 
+def _delete_expired_session(db: Session, sess: SessionRow, jti: str) -> None:
+    """Best-effort: drop an expired session row on a request-path read."""
+    try:
+        db.delete(sess)
+        db.commit()
+    except SQLAlchemyError:
+        logger.exception("Failed to delete expired session jti=%s", jti)
+        db.rollback()
+
+
+def _maybe_bump_last_seen(db: Session, sess: SessionRow, now: datetime, jti: str) -> None:
+    """Throttled write of sess.last_seen_at - skipped if recent."""
+    last_seen = sess.last_seen_at
+    if last_seen.tzinfo is None:
+        last_seen = last_seen.replace(tzinfo=timezone.utc)
+    if (now - last_seen).total_seconds() < _LAST_SEEN_THROTTLE_SECONDS:
+        return
+    try:
+        sess.last_seen_at = now
+        db.commit()
+    except SQLAlchemyError:
+        logger.exception("Failed to bump last_seen_at for session jti=%s", jti)
+        db.rollback()
+
+
+def _validate_session_row(db: Session, jti: str, user: User) -> bool:
+    """Return True iff the session row for jti is valid for this user.
+
+    Also: deletes expired rows in-line and refreshes last_seen_at when
+    enough time has passed. Returns False to signal the caller to reject
+    the request. Multi-tenant note: the session row is bound to a single
+    user via user_id, and the user object already carries org_id — so
+    cross-org session reuse is impossible as long as the user_id match
+    holds.
+    """
+    sess = db.scalar(select(SessionRow).where(SessionRow.jti == jti))
+    if sess is None or sess.user_id != user.id:
+        return False
+    now = datetime.now(timezone.utc)
+    expires = sess.expires_at
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    if expires < now:
+        _delete_expired_session(db, sess, jti)
+        return False
+    _maybe_bump_last_seen(db, sess, now, jti)
+    return True
+
+
 def _user_from_request(request: Request, db: Session) -> Optional[User]:
     token = request.cookies.get(COOKIE_NAME, "")
     parsed = parse_session_token(token)
@@ -199,33 +252,14 @@ def _user_from_request(request: Request, db: Session) -> Optional[User]:
     user = db.get(User, user_id)
     if user is None or not user.is_active:
         return None
+    # Token's session_version must match the user's current - bump on
+    # password change / reset / forced logout.
     if (user.session_version or 0) != session_version:
         return None
-
-    if jti is not None:
-        sess = db.scalar(select(SessionRow).where(SessionRow.jti == jti))
-        if sess is None or sess.user_id != user.id:
-            return None
-        now = datetime.now(timezone.utc)
-        expires = sess.expires_at
-        if expires.tzinfo is None:
-            expires = expires.replace(tzinfo=timezone.utc)
-        if expires < now:
-            try:
-                db.delete(sess)
-                db.commit()
-            except Exception:
-                db.rollback()
-            return None
-        last_seen = sess.last_seen_at
-        if last_seen.tzinfo is None:
-            last_seen = last_seen.replace(tzinfo=timezone.utc)
-        if (now - last_seen).total_seconds() >= _LAST_SEEN_THROTTLE_SECONDS:
-            try:
-                sess.last_seen_at = now
-                db.commit()
-            except Exception:
-                db.rollback()
+    # Per-session revocation: if the cookie carries a jti, look it up.
+    # Legacy tokens (no jti) pre-date the sessions table - accept them.
+    if jti is not None and not _validate_session_row(db, jti, user):
+        return None
     return user
 
 
@@ -332,10 +366,14 @@ def can_manage_project(db: Session, user: User, project: Project) -> bool:
     return pm is not None and pm.role == PROJECT_ROLE_LEAD
 
 
-def can_delete_project(db: Session, user: User, project: Project) -> bool:
+def can_delete_project(_db: Session, user: User, project: Project) -> bool:
     """Project deletion is intentionally narrower than `manage` — only
     org admins can blow a project away. Leads can manage members and
-    edit metadata but not nuke the thing."""
+    edit metadata but not nuke the thing.
+
+    The `_db` parameter is unused today but preserved so the signature
+    stays uniform with other permission helpers (caller passes a Session
+    positionally and the helper stays a stable swap-in for richer checks)."""
     return project.org_id == user.org_id and user.role == ROLE_ADMIN
 
 
@@ -392,7 +430,7 @@ def can_edit_bug(
 
 
 def can_delete_bug(
-    db: Session, user: User, project: Project, item_type: str = "Bug",
+    _db: Session, user: User, project: Project, _item_type: str = "Bug",
 ) -> bool:
     """Delete policy: admin only across every type (v2.4 tightening).
 
@@ -400,6 +438,11 @@ def can_delete_bug(
     this was simplified after the audit-history-preservation work
     (v2.4) made delete a less destructive operation but still one
     that should be admin-gated for accountability.
+
+    `_db` and `_item_type` are kept in the signature so callers can stay
+    symmetric with `can_edit_bug(db, user, project, item_type)` and so a
+    future per-type delete policy can be introduced without changing
+    every call-site.
     """
     if project.org_id != user.org_id:
         return False

@@ -1,0 +1,33 @@
+[tool.coverage.run]
+source = ["app"]
+relative_files = true
+branch = true
+omit = [
+    "tests/*",
+    "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]
+
+[tool.coverage.xml]
+output = "coverage.xml"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+# Python 3.14 + pytest-cov: gzip-buffered coverage files get finalized
+# after their underlying file is closed, raising ValueError inside
+# __del__. Pytest catches these via sys.unraisablehook and turns them
+# into PytestUnraisableExceptionWarning. They're harmless — coverage
+# data lands correctly — but they flood the output. Silence the noise.
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+    "ignore::ResourceWarning",
+    "ignore::pytest.PytestUnraisableExceptionWarning",
+]

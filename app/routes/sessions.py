@@ -32,6 +32,19 @@ def _is_current(request: Request, sess: SessionRow) -> bool:
     return jti is not None and jti == sess.jti
 
 
+def _sweep_expired_sessions(db: Session, now: datetime) -> None:
+    """Delete expired session rows so the admin panel stays tidy.
+
+    Extracted from list_sessions to keep the public handler's cognitive
+    complexity under SonarQube's threshold (S3776). No behaviour change.
+    """
+    expired = db.scalars(select(SessionRow).where(SessionRow.expires_at < now)).all()
+    if expired:
+        for s in expired:
+            db.delete(s)
+        db.commit()
+
+
 @router.get("", response_model=list[SessionOut])
 def list_sessions(
     request: Request,
@@ -41,11 +54,7 @@ def list_sessions(
     now = datetime.now(timezone.utc)
 
     # Sweep expired rows on read so the panel stays tidy.
-    expired = db.scalars(select(SessionRow).where(SessionRow.expires_at < now)).all()
-    if expired:
-        for s in expired:
-            db.delete(s)
-        db.commit()
+    _sweep_expired_sessions(db, now)
 
     # Only sessions belonging to users in the admin's org.
     org_user_ids = list(db.scalars(

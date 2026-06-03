@@ -48,6 +48,10 @@ logger = logging.getLogger("bug_hunter.auth")
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
+# S1192: extract duplicated detail string into a module constant.
+_DETAIL_INVALID_RESET_TOKEN = "Invalid or expired reset token"
+_MSG_ACCOUNT_MISCONFIGURED = "Account misconfigured"
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -349,7 +353,7 @@ def logout(request: Request, db: Session = Depends(get_db)) -> Response:
 def me(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     org = db.get(Organization, user.org_id)
     if org is None:
-        raise HTTPException(status_code=500, detail="Account misconfigured")
+        raise HTTPException(status_code=500, detail=_MSG_ACCOUNT_MISCONFIGURED)
     return _to_me(user, org)
 
 
@@ -461,17 +465,17 @@ def reset_password(payload: ResetPasswordIn, db: Session = Depends(get_db)) -> R
     h = hash_reset_token(payload.token)
     prt = db.scalar(select(PasswordResetToken).where(PasswordResetToken.token_hash == h))
     if prt is None:
-        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+        raise HTTPException(status_code=400, detail=_DETAIL_INVALID_RESET_TOKEN)
     now = datetime.now(timezone.utc)
     expires = prt.expires_at
     if expires.tzinfo is None:
         expires = expires.replace(tzinfo=timezone.utc)
     if prt.used_at is not None or expires < now:
-        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+        raise HTTPException(status_code=400, detail=_DETAIL_INVALID_RESET_TOKEN)
 
     user = db.get(User, prt.user_id)
     if user is None or not user.is_active:
-        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+        raise HTTPException(status_code=400, detail=_DETAIL_INVALID_RESET_TOKEN)
 
     user.password_hash = hash_password(payload.new_password)
     user.session_version = (user.session_version or 0) + 1
@@ -525,7 +529,7 @@ def update_profile(
     db.commit()
     org = db.get(Organization, user.org_id)
     if org is None:
-        raise HTTPException(status_code=500, detail="Account misconfigured")
+        raise HTTPException(status_code=500, detail=_MSG_ACCOUNT_MISCONFIGURED)
     return _to_me(user, org)
 
 
@@ -670,5 +674,5 @@ def confirm_email_change(
     db.refresh(user)
     org = db.get(Organization, user.org_id)
     if org is None:
-        raise HTTPException(status_code=500, detail="Account misconfigured")
+        raise HTTPException(status_code=500, detail=_MSG_ACCOUNT_MISCONFIGURED)
     return _to_me(user, org)

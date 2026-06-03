@@ -72,6 +72,57 @@ def _client_ip(request: Request) -> str:
 # ---------------------------------------------------------------------------
 # Create — admin or manager
 # ---------------------------------------------------------------------------
+def _reject_existing_email(db: Session, email: str, actor_org_id: int) -> None:
+    """Raise 409 if a User with this email already exists anywhere.
+
+    Extracted to keep create_invitation's cognitive complexity (S3776)
+    inside Sonar's threshold. No behaviour change.
+    """
+    existing = db.scalar(select(User).where(User.email == email))
+    if existing is None:
+        return
+    if existing.org_id == actor_org_id:
+        raise HTTPException(
+            status_code=409,
+            detail="That user is already a member of your organization.",
+        )
+    raise HTTPException(
+        status_code=409,
+        detail="That email is already registered with another organization.",
+    )
+
+
+def _validate_invite_projects(
+    db: Session, actor: User, raw_project_ids: list[int] | None,
+) -> list[int]:
+    """Validate each project_id the inviter wants to attach.
+
+    Managers must be a lead on every attached project; admins can attach
+    anything in the org. Returns the validated list of project ids.
+    Extracted to keep create_invitation under Sonar's complexity threshold.
+    """
+    project_ids: list[int] = []
+    for pid in raw_project_ids or []:
+        p = db.get(Project, pid)
+        if p is None or p.org_id != actor.org_id:
+            raise HTTPException(status_code=400, detail=f"Unknown project id: {pid}")
+        if actor.role != ROLE_ADMIN:
+            pm = db.scalar(
+                select(ProjectMembership).where(
+                    ProjectMembership.project_id == pid,
+                    ProjectMembership.user_id == actor.id,
+                    ProjectMembership.role == PROJECT_ROLE_LEAD,
+                )
+            )
+            if pm is None:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"You're not a lead of project #{pid}; can't attach it to an invite.",
+                )
+        project_ids.append(pid)
+    return project_ids
+
+
 @router.post("", response_model=InvitationOut, status_code=status.HTTP_201_CREATED)
 def create_invitation(
     payload: InvitationCreate,
@@ -94,40 +145,12 @@ def create_invitation(
     # Reject if email already a user *anywhere* — globally unique. We
     # reveal this for invites because the inviter clearly knows the
     # invitee's email and would just be confused by a silent failure.
-    existing = db.scalar(select(User).where(User.email == payload.email))
-    if existing is not None:
-        if existing.org_id == actor.org_id:
-            raise HTTPException(
-                status_code=409,
-                detail="That user is already a member of your organization.",
-            )
-        raise HTTPException(
-            status_code=409,
-            detail="That email is already registered with another organization.",
-        )
+    _reject_existing_email(db, payload.email, actor.org_id)
 
     # Validate every project the inviter wants to add the new user to —
     # must belong to this org. Managers can only attach projects they
     # themselves manage; admins can attach anything in the org.
-    project_ids: list[int] = []
-    for pid in payload.project_ids or []:
-        p = db.get(Project, pid)
-        if p is None or p.org_id != actor.org_id:
-            raise HTTPException(status_code=400, detail=f"Unknown project id: {pid}")
-        if actor.role != ROLE_ADMIN:
-            pm = db.scalar(
-                select(ProjectMembership).where(
-                    ProjectMembership.project_id == pid,
-                    ProjectMembership.user_id == actor.id,
-                    ProjectMembership.role == PROJECT_ROLE_LEAD,
-                )
-            )
-            if pm is None:
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"You're not a lead of project #{pid}; can't attach it to an invite.",
-                )
-        project_ids.append(pid)
+    project_ids = _validate_invite_projects(db, actor, payload.project_ids)
 
     # Revoke any outstanding (still-pending, non-expired) invite to the
     # same email + org — prevents a confusing pile of multiple links.
@@ -283,14 +306,14 @@ def preview_invitation(token: str, db: Session = Depends(get_db)) -> dict:
 # ---------------------------------------------------------------------------
 # Accept — public. Creates the User and starts a session.
 # ---------------------------------------------------------------------------
-@router.post("/accept", response_model=MeOut)
-def accept_invitation(
-    payload: InvitationAccept,
-    request: Request,
-    response: Response,
-    db: Session = Depends(get_db),
-) -> dict:
-    h = hash_token(payload.token)
+def _load_acceptable_invitation(db: Session, token: str) -> Invitation:
+    """Look up the invitation by token-hash and validate its lifecycle state.
+
+    Raises 400 on missing / used / revoked / expired. Returns the live
+    Invitation row. Extracted to keep accept_invitation's cognitive
+    complexity (S3776) inside Sonar's threshold.
+    """
+    h = hash_token(token)
     inv = db.scalar(select(Invitation).where(Invitation.token_hash == h))
     if inv is None:
         raise HTTPException(status_code=400, detail="Invalid or expired invitation")
@@ -304,6 +327,61 @@ def accept_invitation(
         raise HTTPException(status_code=400, detail="This invitation has been revoked.")
     if expires < now:
         raise HTTPException(status_code=400, detail="This invitation has expired.")
+    return inv
+
+
+def _parse_initial_project_entry(raw: str) -> tuple[int, bool] | None:
+    """Parse one entry of inv.initial_project_ids ("5" or "L:5").
+
+    Returns (project_id, as_lead) or None if the entry is empty/malformed.
+    """
+    raw = raw.strip()
+    if not raw:
+        return None
+    as_lead = False
+    if raw.startswith("L:"):
+        as_lead = True
+        raw = raw[2:]
+    try:
+        pid = int(raw)
+    except ValueError:
+        return None
+    return pid, as_lead
+
+
+def _seed_invite_project_memberships(
+    db: Session, inv: Invitation, user: User,
+) -> None:
+    """Create ProjectMembership rows from the invite's initial_project_ids.
+
+    Silently skips malformed or no-longer-existing IDs; admins can fix
+    membership manually if a project was deleted between invite and accept.
+    Extracted to keep accept_invitation under Sonar's complexity threshold.
+    """
+    for raw in (inv.initial_project_ids or "").split(","):
+        parsed = _parse_initial_project_entry(raw)
+        if parsed is None:
+            continue
+        pid, as_lead = parsed
+        p = db.get(Project, pid)
+        if p is None or p.org_id != inv.org_id:
+            continue
+        db.add(ProjectMembership(
+            project_id=p.id,
+            user_id=user.id,
+            role=PROJECT_ROLE_LEAD if as_lead else PROJECT_ROLE_MEMBER,
+        ))
+
+
+@router.post("/accept", response_model=MeOut)
+def accept_invitation(
+    payload: InvitationAccept,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+) -> dict:
+    inv = _load_acceptable_invitation(db, payload.token)
+    now = datetime.now(timezone.utc)
 
     # Email collision check: someone else may have signed up with this
     # email in another org between when the invite was sent and accepted.
@@ -327,26 +405,7 @@ def accept_invitation(
     # Parse initial_project_ids — entries look like "5" (regular member)
     # or "L:5" (lead). Silently skip malformed or no-longer-existing IDs;
     # admins can fix membership manually if a project was deleted.
-    for raw in (inv.initial_project_ids or "").split(","):
-        raw = raw.strip()
-        if not raw:
-            continue
-        as_lead = False
-        if raw.startswith("L:"):
-            as_lead = True
-            raw = raw[2:]
-        try:
-            pid = int(raw)
-        except ValueError:
-            continue
-        p = db.get(Project, pid)
-        if p is None or p.org_id != inv.org_id:
-            continue
-        db.add(ProjectMembership(
-            project_id=p.id,
-            user_id=user.id,
-            role=PROJECT_ROLE_LEAD if as_lead else PROJECT_ROLE_MEMBER,
-        ))
+    _seed_invite_project_memberships(db, inv, user)
 
     inv.accepted_at = now
 

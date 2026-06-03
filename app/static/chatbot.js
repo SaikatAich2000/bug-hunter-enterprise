@@ -27,15 +27,15 @@
 "use strict";
 
 // Don't double-mount if the script is included twice (e.g. dev hot-reload).
-if (window.__sleuthMounted) return;
-window.__sleuthMounted = true;
+if (globalThis.__sleuthMounted) return;
+globalThis.__sleuthMounted = true;
 
 // ---------------------------------------------------------------------------
 // Tiny helpers
 // ---------------------------------------------------------------------------
 const $ = (sel, root = document) => root.querySelector(sel);
 
-const escapeHtml = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({
+const escapeHtml = (s) => String(s ?? "").replaceAll(/[&<>"']/g, (c) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
 }[c]));
 
@@ -59,16 +59,62 @@ const formatBytes = (n) => {
  * Anything else is left as-is. Order matters: bold before italic so
  * "**foo**" doesn't get half-eaten.
  */
+// Linear scan that converts `[text](url)` markdown links to <a> tags,
+// only for safe URL schemes (http(s), mailto, fragment hashes). Written
+// without regex specifically because static analyzers flag any pattern
+// with two `+` quantifiers — even when they're proven independent.
+const _SAFE_URL_PREFIXES = ["http://", "https://", "mailto:", "#"];
+function _hasSafeUrlPrefix(url) {
+  for (const p of _SAFE_URL_PREFIXES) {
+    if (url.startsWith(p)) return true;
+  }
+  return false;
+}
+function _mdLiteLinks(s) {
+  let out = "";
+  let i = 0;
+  const n = s.length;
+  while (i < n) {
+    const lb = s.indexOf("[", i);
+    if (lb < 0) { out += s.slice(i); break; }
+    out += s.slice(i, lb);
+    const rb = s.indexOf("]", lb + 1);
+    if (rb < 0 || s.charAt(rb + 1) !== "(") {
+      out += s.charAt(lb);
+      i = lb + 1;
+      continue;
+    }
+    const rp = s.indexOf(")", rb + 2);
+    if (rp < 0) {
+      out += s.charAt(lb);
+      i = lb + 1;
+      continue;
+    }
+    const txt = s.slice(lb + 1, rb);
+    const url = s.slice(rb + 2, rp);
+    if (txt && url && _hasSafeUrlPrefix(url)) {
+      out += `<a href="${url}" target="_blank" rel="noopener noreferrer">${txt}</a>`;
+    } else {
+      out += s.slice(lb, rp + 1);
+    }
+    i = rp + 1;
+  }
+  return out;
+}
+
 function mdLite(escaped) {
   let s = escaped;
   // Code spans first (so we don't transform markdown inside them).
-  s = s.replace(/`([^`]+)`/g, (_m, code) => `<code>${code}</code>`);
+  s = s.replaceAll(/`([^`]+)`/g, (_m, code) => `<code>${code}</code>`);
   // Bold and italic — bold first.
-  s = s.replace(/\*\*([^*]+)\*\*/g, (_m, b) => `<strong>${b}</strong>`);
-  s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, (_m, pre, it) => `${pre}<em>${it}</em>`);
+  s = s.replaceAll(/\*\*([^*]+)\*\*/g, (_m, b) => `<strong>${b}</strong>`);
+  s = s.replaceAll(/(^|[^*])\*([^*\n]+)\*/g, (_m, pre, it) => `${pre}<em>${it}</em>`);
   // Links — only http(s)://, mailto:, or fragment hashes for safety.
-  s = s.replace(/\[([^\]]+)\]\(((?:https?:\/\/|mailto:|#)[^)]+)\)/g,
-    (_m, txt, url) => `<a href="${url}" target="_blank" rel="noopener noreferrer">${txt}</a>`);
+  // Hand-written linear scan; deliberately NOT a regex. Static analyzers
+  // flag any regex with two `+` quantifiers as a polynomial-backtracking
+  // risk regardless of whether the quantifiers are actually independent,
+  // so the regex form trips the heuristic even though the input is bounded.
+  s = _mdLiteLinks(s);
   // Bulleted lists (lines starting with "- "). Process line-by-line.
   const lines = s.split(/\n/);
   const out = [];
@@ -85,7 +131,7 @@ function mdLite(escaped) {
   }
   if (inList) out.push("</ul>");
   // Wrap consecutive plain lines into paragraphs separated by blank lines.
-  const joined = out.join("\n").replace(/\n{2,}/g, "</p><p>").replace(/\n/g, "<br>");
+  const joined = out.join("\n").replaceAll(/\n{2,}/g, "</p><p>").replaceAll("\n", "<br>");
   return `<p>${joined}</p>`;
 }
 
@@ -221,8 +267,13 @@ function renderFileBlock(block) {
   const meta = document.createElement("div");
   meta.className = "sleuth-file-meta";
   const rowCount = block.payload.row_count;
+  let rowCountText = "";
+  if (rowCount != null) {
+    const suffix = rowCount === 1 ? "" : "s";
+    rowCountText = rowCount + " row" + suffix;
+  }
   meta.textContent = [
-    rowCount != null ? (rowCount + " row" + (rowCount === 1 ? "" : "s")) : "",
+    rowCountText,
     formatBytes(block.payload.size_bytes),
   ].filter(Boolean).join(" · ");
   info.appendChild(name);
@@ -316,14 +367,14 @@ function openBugInSpa(bugId) {
     detail: { bugId },
     cancelable: true,
   });
-  const handled = !window.dispatchEvent(ev);
+  const handled = !globalThis.dispatchEvent(ev);
   if (handled || ev.defaultPrevented) return;
   // Fallback: hash-based deep link. The SPA can read this on first load.
   // If we're already on the app, we still trigger by setting hash and
   // forcing a hashchange listener (which the SPA registers below).
   if (location.pathname === "/") {
     location.hash = "bug-" + bugId;
-    window.dispatchEvent(new HashChangeEvent("hashchange"));
+    globalThis.dispatchEvent(new HashChangeEvent("hashchange"));
   } else {
     location.href = "/#bug-" + bugId;
   }
@@ -459,7 +510,7 @@ async function callAsk(message) {
     let detail = "HTTP " + res.status;
     try {
       const body = await res.json();
-      if (body && body.detail) detail = body.detail;
+      if (body?.detail) detail = body.detail;
     } catch { /* not JSON */ }
     const err = new Error(detail);
     err.status = res.status;
@@ -482,8 +533,8 @@ async function sendMessage(text) {
     appendBotBlocks(data.blocks || []);
   } catch (err) {
     hideTyping();
-    if (err && err.silent) return;          // navigation already underway
-    appendBotError(err && err.message ? err.message : "Network error.");
+    if (err?.silent) return;          // navigation already underway
+    appendBotError(err?.message ? err.message : "Network error.");
   } finally {
     state.inFlight = false;
     sendBtn.disabled = false;

@@ -6,8 +6,7 @@
 (() => {
   "use strict";
   const $ = (sel) => document.querySelector(sel);
-  document.documentElement.setAttribute("data-theme",
-    localStorage.getItem("theme") || "dark");
+  document.documentElement.dataset.theme = localStorage.getItem("theme") || "dark";
 
   const params = new URLSearchParams(location.search);
   const token = params.get("token") || "";
@@ -55,6 +54,7 @@
         showAlert(msg);
       }
     } catch (err) {
+      console.error("Reset-password network error:", err);
       showAlert("Network error. Try again.");
     } finally {
       btn.disabled = false; btn.textContent = "Set new password";

@@ -48,6 +48,9 @@ from app.schemas import EventCreate, EventDetailOut, EventOut, EventUpdate
 
 router = APIRouter(prefix="/api/events", tags=["events"])
 
+# S1192: extract duplicated detail string into a module constant.
+_DETAIL_EVENT_NOT_FOUND = "Event not found"
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -182,7 +185,7 @@ def _get_event_or_404(db: Session, event_id: int, actor: User) -> Event:
         .where(Event.id == event_id)
     )
     if ev is None or ev.org_id != actor.org_id:
-        raise HTTPException(status_code=404, detail="Event not found")
+        raise HTTPException(status_code=404, detail=_DETAIL_EVENT_NOT_FOUND)
     return ev
 
 
@@ -288,6 +291,55 @@ def create_event(
 # ---------------------------------------------------------------------------
 # Update
 # ---------------------------------------------------------------------------
+_EVENT_TRACKED_FIELDS = ["name", "description", "scheduled_for"]
+
+
+def _compute_event_changes(ev: Event, fields: dict) -> list[tuple[str, str, str]]:
+    changes: list[tuple[str, str, str]] = []
+    for f in _EVENT_TRACKED_FIELDS:
+        if f in fields and getattr(ev, f) != fields[f]:
+            changes.append((f, str(getattr(ev, f) or ""), str(fields[f] or "")))
+    return changes
+
+
+def _apply_event_manager_diff(ev: Event, db: Session, new_manager_ids: Optional[list[int]],
+                              changes: list[tuple[str, str, str]], org_id: int) -> None:
+    """Set-compare ignores order so re-sending the same list isn't a change.
+
+    Enterprise: `_resolve_managers` is org-scoped, so the diff must pass
+    the actor's org_id through to keep cross-tenant assignment blocked.
+    """
+    if new_manager_ids is None:
+        return
+    old_ids = sorted({m.id for m in (ev.managers or [])})
+    new_ids = sorted(set(new_manager_ids))
+    if old_ids == new_ids:
+        return
+    new_managers = _resolve_managers(db, new_manager_ids, org_id)
+    old_names = sorted(m.name for m in (ev.managers or []))
+    new_names = sorted(m.name for m in new_managers)
+    changes.append((
+        "managers",
+        ", ".join(old_names) or "(none)",
+        ", ".join(new_names) or "(none)",
+    ))
+    ev.managers = new_managers
+
+
+def _persist_event_update(db: Session, ev: Event, actor: User,
+                          changes: list[tuple[str, str, str]]) -> None:
+    if not changes:
+        db.rollback()
+        return
+    prefix = f"#{ev.id} '{ev.name}' — "
+    for field, old, new in changes:
+        _log(
+            db, actor.org_id, ev.id, actor, f"event_{field}_changed",
+            f"{prefix}{field}: '{old}' → '{new}'",
+        )
+    db.commit()
+
+
 @router.put("/{event_id}", response_model=EventOut)
 def update_event(
     event_id: int,
@@ -300,38 +352,13 @@ def update_event(
     ev = _get_event_or_404(db, event_id, actor)
 
     fields = payload.model_dump(exclude_unset=True)
-    tracked = ["name", "description", "scheduled_for"]
-    changes: list[tuple[str, str, str]] = []
-    for f in tracked:
-        if f in fields and getattr(ev, f) != fields[f]:
-            changes.append((f, str(getattr(ev, f) or ""), str(fields[f] or "")))
+    changes = _compute_event_changes(ev, fields)
     new_manager_ids = fields.pop("manager_ids", None)
     for k, v in fields.items():
         setattr(ev, k, v)
-    # Manager diff. Set-equality so re-sending the same list isn't a change.
-    if new_manager_ids is not None:
-        old_ids = sorted({m.id for m in (ev.managers or [])})
-        new_ids = sorted(set(new_manager_ids))
-        if old_ids != new_ids:
-            new_managers = _resolve_managers(db, new_manager_ids, actor.org_id)
-            old_names = sorted(m.name for m in (ev.managers or []))
-            new_names = sorted(m.name for m in new_managers)
-            changes.append((
-                "managers",
-                ", ".join(old_names) or "(none)",
-                ", ".join(new_names) or "(none)",
-            ))
-            ev.managers = new_managers
-    if changes:
-        prefix = f"#{ev.id} '{ev.name}' — "
-        for field, old, new in changes:
-            _log(
-                db, actor.org_id, ev.id, actor, f"event_{field}_changed",
-                f"{prefix}{field}: '{old}' → '{new}'",
-            )
-        db.commit()
-    else:
-        db.rollback()
+    _apply_event_manager_diff(ev, db, new_manager_ids, changes, actor.org_id)
+    _persist_event_update(db, ev, actor, changes)
+
     ev = db.scalar(
         select(Event).options(selectinload(Event.managers))
         .where(Event.id == event_id)

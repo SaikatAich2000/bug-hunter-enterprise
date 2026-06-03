@@ -50,6 +50,21 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(microsecond=0)
 
 
+# FK target strings — extracted to module-level constants so Sonar's S1192
+# duplicate-string-literal rule stops flagging each ForeignKey() call.
+_FK_BUGS_ID = "bugs.id"
+_FK_USERS_ID = "users.id"
+_FK_PROJECTS_ID = "projects.id"
+_FK_COMMENTS_ID = "comments.id"
+_FK_EVENTS_ID = "events.id"
+_FK_ORGS_ID = "organizations.id"
+_FK_CUSTOM_FIELDS_ID = "custom_fields.id"
+
+# SQLAlchemy relationship cascade and ondelete keywords — same reason.
+_CASCADE_ALL_DELETE_ORPHAN = "all, delete-orphan"
+_ONDELETE_SET_NULL = "SET NULL"
+
+
 # ---------------------------------------------------------------------------
 # Roles
 #
@@ -85,8 +100,8 @@ VALID_PROJECT_ROLES = (PROJECT_ROLE_LEAD, PROJECT_ROLE_MEMBER)
 bug_assignees = Table(
     "bug_assignees",
     Base.metadata,
-    Column("bug_id", Integer, ForeignKey("bugs.id", ondelete="CASCADE"), primary_key=True),
-    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
+    Column("bug_id", Integer, ForeignKey(_FK_BUGS_ID, ondelete="CASCADE"), primary_key=True),
+    Column("user_id", Integer, ForeignKey(_FK_USERS_ID, ondelete="CASCADE"), primary_key=True),
 )
 
 # v2.4: events are containers for groups of work items (a standup, a
@@ -99,8 +114,8 @@ bug_assignees = Table(
 event_managers = Table(
     "event_managers",
     Base.metadata,
-    Column("event_id", Integer, ForeignKey("events.id", ondelete="CASCADE"), primary_key=True),
-    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
+    Column("event_id", Integer, ForeignKey(_FK_EVENTS_ID, ondelete="CASCADE"), primary_key=True),
+    Column("user_id", Integer, ForeignKey(_FK_USERS_ID, ondelete="CASCADE"), primary_key=True),
 )
 
 
@@ -147,8 +162,8 @@ class Organization(Base):
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
     )
 
-    users: Mapped[list["User"]] = relationship("User", back_populates="organization", cascade="all, delete-orphan")
-    projects: Mapped[list["Project"]] = relationship("Project", back_populates="organization", cascade="all, delete-orphan")
+    users: Mapped[list["User"]] = relationship("User", back_populates="organization", cascade=_CASCADE_ALL_DELETE_ORPHAN)
+    projects: Mapped[list["Project"]] = relationship("Project", back_populates="organization", cascade=_CASCADE_ALL_DELETE_ORPHAN)
 
     __table_args__ = (
         Index("idx_orgs_slug", "slug"),
@@ -168,7 +183,7 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     org_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+        Integer, ForeignKey(_FK_ORGS_ID, ondelete="CASCADE"), nullable=False
     )
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     email: Mapped[str] = mapped_column(String(254), nullable=False, unique=True)
@@ -217,7 +232,7 @@ class PasswordResetToken(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+        Integer, ForeignKey(_FK_USERS_ID, ondelete="CASCADE"), nullable=False
     )
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -241,7 +256,7 @@ class EmailChangeRequest(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+        Integer, ForeignKey(_FK_USERS_ID, ondelete="CASCADE"), nullable=False
     )
     new_email: Mapped[str] = mapped_column(String(254), nullable=False)
     # Same sha256-hashed-token pattern as elsewhere. The plaintext 6-digit
@@ -270,7 +285,7 @@ class Invitation(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     org_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+        Integer, ForeignKey(_FK_ORGS_ID, ondelete="CASCADE"), nullable=False
     )
     email: Mapped[str] = mapped_column(String(254), nullable=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False, default=ROLE_MEMBER)
@@ -280,7 +295,7 @@ class Invitation(Base):
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
 
     invited_by_user_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+        Integer, ForeignKey(_FK_USERS_ID, ondelete=_ONDELETE_SET_NULL), nullable=True
     )
     invited_by_name: Mapped[str] = mapped_column(String(120), nullable=False, default="")
 
@@ -310,7 +325,7 @@ class Project(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     org_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+        Integer, ForeignKey(_FK_ORGS_ID, ondelete="CASCADE"), nullable=False
     )
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     # Jira-style short identifier (e.g. "WEB", "API"). Auto-derived from
@@ -325,10 +340,10 @@ class Project(Base):
 
     organization: Mapped[Organization] = relationship("Organization", back_populates="projects")
     bugs: Mapped[list["Bug"]] = relationship(
-        "Bug", back_populates="project", cascade="all, delete-orphan"
+        "Bug", back_populates="project", cascade=_CASCADE_ALL_DELETE_ORPHAN
     )
     memberships: Mapped[list["ProjectMembership"]] = relationship(
-        "ProjectMembership", back_populates="project", cascade="all, delete-orphan"
+        "ProjectMembership", back_populates="project", cascade=_CASCADE_ALL_DELETE_ORPHAN
     )
 
     __table_args__ = (
@@ -353,10 +368,10 @@ class ProjectMembership(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     project_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+        Integer, ForeignKey(_FK_PROJECTS_ID, ondelete="CASCADE"), nullable=False
     )
     user_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+        Integer, ForeignKey(_FK_USERS_ID, ondelete="CASCADE"), nullable=False
     )
     role: Mapped[str] = mapped_column(String(20), nullable=False, default=PROJECT_ROLE_MEMBER)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
@@ -390,14 +405,14 @@ class Event(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     org_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+        Integer, ForeignKey(_FK_ORGS_ID, ondelete="CASCADE"), nullable=False
     )
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
     # ISO date string (YYYY-MM-DD) — same shape as bugs.due_date. Optional.
     scheduled_for: Mapped[str | None] = mapped_column(String(10), nullable=True)
     created_by_user_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+        Integer, ForeignKey(_FK_USERS_ID, ondelete=_ONDELETE_SET_NULL), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
@@ -428,10 +443,10 @@ class Bug(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     project_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+        Integer, ForeignKey(_FK_PROJECTS_ID, ondelete="CASCADE"), nullable=False
     )
     reporter_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+        Integer, ForeignKey(_FK_USERS_ID, ondelete=_ONDELETE_SET_NULL), nullable=True
     )
     # v2.4: the three flavours of work item share one numbering sequence
     # and one table. Bug is the default so existing rows in production
@@ -447,7 +462,7 @@ class Bug(Base):
     # outside an event. ON DELETE SET NULL preserves items when an
     # event is removed.
     event_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("events.id", ondelete="SET NULL"), nullable=True
+        Integer, ForeignKey(_FK_EVENTS_ID, ondelete=_ONDELETE_SET_NULL), nullable=True
     )
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
@@ -469,7 +484,7 @@ class Bug(Base):
         "User", secondary=bug_assignees, lazy="selectin"
     )
     comments: Mapped[list["Comment"]] = relationship(
-        "Comment", back_populates="bug", cascade="all, delete-orphan",
+        "Comment", back_populates="bug", cascade=_CASCADE_ALL_DELETE_ORPHAN,
         order_by="Comment.created_at",
     )
     activities: Mapped[list["Activity"]] = relationship(
@@ -477,7 +492,7 @@ class Bug(Base):
         order_by="(Activity.created_at.desc(), Activity.id.desc())",
     )
     attachments: Mapped[list["Attachment"]] = relationship(
-        "Attachment", back_populates="bug", cascade="all, delete-orphan",
+        "Attachment", back_populates="bug", cascade=_CASCADE_ALL_DELETE_ORPHAN,
         order_by="Attachment.created_at.desc()",
         primaryjoin="Bug.id == Attachment.bug_id",
     )
@@ -504,9 +519,9 @@ class Comment(Base):
     __tablename__ = "comments"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    bug_id: Mapped[int] = mapped_column(Integer, ForeignKey("bugs.id", ondelete="CASCADE"), nullable=False)
+    bug_id: Mapped[int] = mapped_column(Integer, ForeignKey(_FK_BUGS_ID, ondelete="CASCADE"), nullable=False)
     author_user_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+        Integer, ForeignKey(_FK_USERS_ID, ondelete=_ONDELETE_SET_NULL), nullable=True
     )
     author_name: Mapped[str] = mapped_column(String(120), nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
@@ -529,13 +544,13 @@ class Attachment(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     bug_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("bugs.id", ondelete="CASCADE"), nullable=False
+        Integer, ForeignKey(_FK_BUGS_ID, ondelete="CASCADE"), nullable=False
     )
     comment_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("comments.id", ondelete="CASCADE"), nullable=True
+        Integer, ForeignKey(_FK_COMMENTS_ID, ondelete="CASCADE"), nullable=True
     )
     uploader_user_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+        Integer, ForeignKey(_FK_USERS_ID, ondelete=_ONDELETE_SET_NULL), nullable=True
     )
     uploader_name: Mapped[str] = mapped_column(String(120), nullable=False, default="anonymous")
     filename: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -565,7 +580,7 @@ class Activity(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     org_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+        Integer, ForeignKey(_FK_ORGS_ID, ondelete="CASCADE"), nullable=False
     )
     # bug_id uses ON DELETE SET NULL on fresh installs (v2.4) so audit
     # history outlives the bug it describes. Existing prod DBs still
@@ -575,12 +590,12 @@ class Activity(Base):
     # both schemas without a DDL change. The entity_id stays set so
     # searching for the original bug number still works.
     bug_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("bugs.id", ondelete="SET NULL"), nullable=True
+        Integer, ForeignKey(_FK_BUGS_ID, ondelete=_ONDELETE_SET_NULL), nullable=True
     )
     entity_type: Mapped[str] = mapped_column(String(40), nullable=False, default="bug")
     entity_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     actor_user_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+        Integer, ForeignKey(_FK_USERS_ID, ondelete=_ONDELETE_SET_NULL), nullable=True
     )
     actor_name: Mapped[str] = mapped_column(String(120), nullable=False, default="system")
     action: Mapped[str] = mapped_column(String(60), nullable=False)
@@ -613,7 +628,7 @@ class Session(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+        Integer, ForeignKey(_FK_USERS_ID, ondelete="CASCADE"), nullable=False
     )
     jti: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     user_agent: Mapped[str] = mapped_column(String(400), nullable=False, default="")
@@ -645,7 +660,7 @@ class TotpRecoveryCode(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+        Integer, ForeignKey(_FK_USERS_ID, ondelete="CASCADE"), nullable=False
     )
     code_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -675,10 +690,10 @@ class SavedView(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     org_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+        Integer, ForeignKey(_FK_ORGS_ID, ondelete="CASCADE"), nullable=False
     )
     owner_user_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+        Integer, ForeignKey(_FK_USERS_ID, ondelete="CASCADE"), nullable=False
     )
     name: Mapped[str] = mapped_column(String(80), nullable=False)
     filters_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
@@ -712,7 +727,7 @@ class Webhook(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     org_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+        Integer, ForeignKey(_FK_ORGS_ID, ondelete="CASCADE"), nullable=False
     )
     name: Mapped[str] = mapped_column(String(80), nullable=False)
     url: Mapped[str] = mapped_column(String(500), nullable=False)
@@ -726,7 +741,7 @@ class Webhook(Base):
     last_status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_by_user_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+        Integer, ForeignKey(_FK_USERS_ID, ondelete=_ONDELETE_SET_NULL), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
@@ -754,7 +769,7 @@ class CustomField(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     project_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+        Integer, ForeignKey(_FK_PROJECTS_ID, ondelete="CASCADE"), nullable=False
     )
     name: Mapped[str] = mapped_column(String(80), nullable=False)
     # "text" | "number" | "date" | "select"
@@ -776,10 +791,10 @@ class BugCustomValue(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     bug_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("bugs.id", ondelete="CASCADE"), nullable=False
+        Integer, ForeignKey(_FK_BUGS_ID, ondelete="CASCADE"), nullable=False
     )
     field_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("custom_fields.id", ondelete="CASCADE"), nullable=False
+        Integer, ForeignKey(_FK_CUSTOM_FIELDS_ID, ondelete="CASCADE"), nullable=False
     )
     value: Mapped[str] = mapped_column(Text, nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)

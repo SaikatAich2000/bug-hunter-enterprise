@@ -32,6 +32,9 @@ from app.schemas import (
 
 router = APIRouter(prefix="/api/projects", tags=["memberships"])
 
+# S1192: extract duplicated detail string into a module constant.
+_MSG_MEMBERSHIP_NOT_FOUND = "Membership not found"
+
 
 def _audit(
     db: Session, org_id: int, actor: User, action: str, detail: str,
@@ -166,11 +169,11 @@ def update_member(
         )
     )
     if pm is None:
-        raise HTTPException(status_code=404, detail="Membership not found")
+        raise HTTPException(status_code=404, detail=_MSG_MEMBERSHIP_NOT_FOUND)
 
     user = db.get(User, user_id)
     if user is None or user.org_id != actor.org_id:
-        raise HTTPException(status_code=404, detail="Membership not found")
+        raise HTTPException(status_code=404, detail=_MSG_MEMBERSHIP_NOT_FOUND)
 
     # If demoting the last lead, block it — the project would become
     # unmanageable for non-admin users.
@@ -222,7 +225,7 @@ def remove_member(
         )
     )
     if pm is None:
-        raise HTTPException(status_code=404, detail="Membership not found")
+        raise HTTPException(status_code=404, detail=_MSG_MEMBERSHIP_NOT_FOUND)
 
     # Block removing the last lead.
     if pm.role == PROJECT_ROLE_LEAD:
