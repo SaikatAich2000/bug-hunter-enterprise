@@ -41,6 +41,7 @@ from app.email_service import (
     BugSnapshot, UserSnapshot,
     notify_assignment, notify_bug_created, notify_bug_updated, notify_comment_added,
 )
+from app.image_strip import strip_image_metadata
 from app.models import (
     ROLE_ADMIN, ROLE_MANAGER,
     Activity, Attachment, Bug, Comment, Project, User,
@@ -68,6 +69,23 @@ _NONE_DISPLAY = "(none)"
 
 MAX_FILE_BYTES = 50 * 1024 * 1024
 _UPLOAD_CHUNK = 1024 * 1024
+
+# G2 (v2.8): characters that Excel/Numbers/LibreOffice interpret as a
+# formula when they appear at the start of a CSV cell. A bug title like
+# `=cmd|'/c calc.exe'!A1` would execute the formula when the exported
+# CSV is opened. We neutralise by prefixing such cells with a single
+# quote — the de-facto OWASP-recommended approach. The leading quote
+# isn't displayed by the spreadsheet, only the text after it.
+_CSV_FORMULA_TRIGGERS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_safe(value) -> str:
+    """Defang CSV injection. Always returns a string; non-strings are
+    coerced via ``str()`` first."""
+    s = "" if value is None else str(value)
+    if s and s[0] in _CSV_FORMULA_TRIGGERS:
+        return "'" + s
+    return s
 
 _ACTIVE_CONTENT_TYPES = {
     "text/html", "application/xhtml+xml", "application/xml", "text/xml",
@@ -242,18 +260,24 @@ def export_bugs_csv(
         "created_at", "updated_at", "description",
     ])
     for b in rows:
+        # G2 (v2.8): every cell goes through _csv_safe so a bug title
+        # that starts with `=` / `+` / `-` / `@` can't execute as a
+        # formula when the export is opened in Excel.
         writer.writerow([
-            b.id,
-            b.project.name if b.project else "",
-            b.project.key if b.project else "",
-            b.title, b.status, b.priority, b.environment,
-            b.reporter.name if b.reporter else "",
-            b.reporter.email if b.reporter else "",
-            "; ".join(f"{a.name} <{a.email}>" for a in b.assignees),
-            b.due_date or "",
-            b.created_at.isoformat(),
-            b.updated_at.isoformat(),
-            b.description.replace("\n", " ").replace("\r", " "),
+            _csv_safe(b.id),
+            _csv_safe(b.project.name if b.project else ""),
+            _csv_safe(b.project.key if b.project else ""),
+            _csv_safe(b.title),
+            _csv_safe(b.status),
+            _csv_safe(b.priority),
+            _csv_safe(b.environment),
+            _csv_safe(b.reporter.name if b.reporter else ""),
+            _csv_safe(b.reporter.email if b.reporter else ""),
+            _csv_safe("; ".join(f"{a.name} <{a.email}>" for a in b.assignees)),
+            _csv_safe(b.due_date or ""),
+            _csv_safe(b.created_at.isoformat()),
+            _csv_safe(b.updated_at.isoformat()),
+            _csv_safe(b.description.replace("\n", " ").replace("\r", " ")),
         ])
     return Response(
         content=buf.getvalue(),
@@ -1244,6 +1268,11 @@ async def upload_attachment(
     data = await _read_upload_with_limit(file, MAX_FILE_BYTES)
     if not data:
         raise HTTPException(status_code=400, detail="Empty file")
+
+    # T6 (v2.8): strip EXIF / GPS / camera-serial / XMP / ICC from raster
+    # image uploads. No-op for non-images and fail-open on errors so an
+    # exotic image format never blocks the upload.
+    data = strip_image_metadata(data, file.content_type)
 
     att = Attachment(
         bug_id=bug_id,

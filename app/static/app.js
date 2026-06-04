@@ -2385,6 +2385,16 @@ function _seedBugFormCreateMode(form) {
       toast(`Staged: ${f.name || "pasted file"}`, "info");
     };
   }
+  // Default Due Date to TODAY on create. form.reset() above blanked the
+  // native input, but the v2.6 custom-calendar button label doesn't
+  // refresh on reset() (reset doesn't dispatch change; the MutationObserver
+  // only watches setAttribute). Dispatching change after setting value
+  // makes the widget redraw "Select date" → today's date.
+  const dueEl = form?.elements?.due_date;
+  if (dueEl) {
+    dueEl.value = _isoDate(new Date());
+    dueEl.dispatchEvent(new Event("change", { bubbles: true }));
+  }
 }
 
 function openBugForm(bug = null) {

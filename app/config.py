@@ -31,8 +31,17 @@ class Settings:
     ]
 
     APP_NAME: str = os.getenv("APP_NAME", "Bug Hunter")
-    APP_VERSION: str = os.getenv("APP_VERSION", "2.7")
+    APP_VERSION: str = os.getenv("APP_VERSION", "2.8")
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+
+    # G3: hard ceiling on request body size, in bytes. The 50 MB attachment
+    # cap + multipart overhead + headers fit comfortably under 60 MB; raise
+    # via env if you need bigger file uploads. Requests that exceed this are
+    # rejected with 413 before any body is read into memory, so a hostile
+    # client can't exhaust RAM by claiming a huge Content-Length.
+    MAX_REQUEST_BODY_BYTES: int = _env_int(
+        "MAX_REQUEST_BODY_BYTES", 60 * 1024 * 1024
+    )
 
     APP_BASE_URL: str = os.getenv("APP_BASE_URL", "http://localhost:8000")
 

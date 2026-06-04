@@ -1168,8 +1168,13 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
 /* Confirm dialog stacks above the other modals — it's frequently
    invoked FROM inside another modal (e.g. removing a project member
    from the Members modal) and was otherwise rendered underneath and
-   unclickable. */
-#modalConfirm { z-index: 200; }
+   unclickable.
+
+   v2.8 fix: previously z-index:200 actually rendered confirm BELOW
+   the base modal layer (1000) and even below the Sleuth FAB (900),
+   so the logout dialog was occluded by the FAB on the main app. The
+   value should be ABOVE 1000 to genuinely stack above sibling modals. */
+#modalConfirm { z-index: 1100; }
 @keyframes modal-fade { from { opacity: 0; } to { opacity: 1; } }
 .modal[hidden] { display: none; }
 .modal-card {
@@ -1862,9 +1867,33 @@ fieldset.field > legend {
     max-width: none;
     margin-left: 0;
   }
-  .modal { padding: 0; }
-  .modal-card { max-height: 100vh; height: 100vh; border-radius: 0; max-width: 100%; }
+  /* v2.8: keep a hair of padding for the safe-area top inset so the
+     modal-head's close-button isn't tucked under iOS / Android status
+     bars. dvh (dynamic viewport height) handles browser-chrome
+     auto-hide without clipping the modal's top edge — pure 100vh
+     ignored the visible viewport on mobile Safari + Chrome. */
+  .modal { padding: env(safe-area-inset-top, 0) 0 env(safe-area-inset-bottom, 0); }
+  .modal-card {
+    max-height: 100dvh;
+    height: 100dvh;
+    border-radius: 0;
+    max-width: 100%;
+  }
   .modal-card.xxl { width: 100%; }
+
+  /* v2.8: the confirm dialog is a 2-button question — don't blow it
+     up to full-screen on mobile. Keep it card-sized with a sensible
+     margin so the backdrop is visible and the dialog feels like a
+     dialog, not a route change. */
+  #modalConfirm .modal-card,
+  #modalConfirm .confirm-card {
+    width: calc(100% - 32px);
+    max-width: 380px;
+    height: auto;
+    max-height: 80dvh;
+    border-radius: 14px;
+    margin: auto;
+  }
   .attachment-grid { grid-template-columns: 1fr 1fr; }
   .detail-head-actions .btn,
   .bug-modal-head-actions .btn { padding: 6px 10px; font-size: 12px; }
@@ -1976,6 +2005,14 @@ fieldset.field > legend {
      this without forcing align-items:center on the parent (which broke
      scrolling for tall forms). */
   margin: auto 0;
+}
+/* v2.8 — Allow the signup / accept-invite (wide) cards to actually be
+   wider. Without this, .auth-card-wide's max-width: 460px is capped by
+   the 420px shell above, so the "Create organization" form rendered
+   the same size as login. :has() is supported in every evergreen
+   browser since mid-2023. */
+.auth-shell:has(.auth-card-wide) {
+  max-width: 480px;
 }
 .auth-card {
   width: 100%;
@@ -2768,7 +2805,13 @@ body.sidebar-collapsed .org-banner { display: none; }
     border: none;
   }
   .auth-shell { padding: 0; margin: 0; }
-  .auth-body { padding: 0; align-items: stretch; }
+  /* v2.8: pad the auth body for the device's safe-area insets so the
+     logo + heading aren't tucked behind the notch / status bar on
+     iOS, and the submit button isn't tucked under the home indicator. */
+  .auth-body {
+    padding: env(safe-area-inset-top, 0) 0 env(safe-area-inset-bottom, 0);
+    align-items: stretch;
+  }
   .invite-projects { max-height: 160px; }
 }
 

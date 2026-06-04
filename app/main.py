@@ -311,6 +311,48 @@ app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 
 
 # ---------------------------------------------------------------------------
+# G3 (v2.8) — Request body size limit
+#
+# Pydantic caps individual string fields (description = 1 MB, comment body
+# = 200 KB) and the attachment endpoint streams + aborts at 50 MB. But a
+# request that arrives with a 5 GB Content-Length and no body fields the
+# schema cares about — or a multipart upload to an unexpected endpoint —
+# would still buffer body bytes into RAM before validation fails.
+#
+# This middleware rejects with 413 (Payload Too Large) BEFORE the body is
+# read whenever Content-Length exceeds MAX_REQUEST_BODY_BYTES. It's a
+# coarse second-line defense; the per-endpoint limits remain.
+#
+# Requests without a Content-Length (chunked transfer) are allowed
+# through — the per-endpoint streamed reads still bound them.
+# ---------------------------------------------------------------------------
+class BodySizeLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        cl_header = request.headers.get("content-length")
+        if cl_header:
+            try:
+                length = int(cl_header)
+            except ValueError:
+                return JSONResponse(
+                    status_code=400,
+                    content={"detail": "Invalid Content-Length header."},
+                )
+            if length > settings.MAX_REQUEST_BODY_BYTES:
+                logger.warning(
+                    "Body too large: %d bytes claimed (limit %d) on %s",
+                    length, settings.MAX_REQUEST_BODY_BYTES, request.url.path,
+                )
+                return JSONResponse(
+                    status_code=413,
+                    content={"detail": "Request body too large."},
+                )
+        return await call_next(request)
+
+
+app.add_middleware(BodySizeLimitMiddleware)
+
+
+# ---------------------------------------------------------------------------
 # Cache-Control + security headers middleware
 # ---------------------------------------------------------------------------
 class CacheControlMiddleware(BaseHTTPMiddleware):

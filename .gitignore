@@ -81,3 +81,16 @@ sonar-hotspots.csv
 playwright-report/
 test-results/
 *.har
+
+# --- Generated API artifacts ---
+# Produced by scripts/gen-api-docs.py from the live FastAPI app. The
+# canonical source of truth is the app itself — browse GET /openapi.json
+# or Swagger UI at /docs on a running instance. Regenerate locally with:
+#     python scripts/gen-api-docs.py
+docs/api/openapi.json
+docs/api/openapi.yaml
+docs/api/Bug-Hunter-Enterprise.postman_collection.json
+docs/api/curl.md
+
+# --- UI test scratchpad ---
+uitest.db

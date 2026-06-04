@@ -568,6 +568,9 @@ class TestTotpBranches:
         monkeypatch.setenv("ALLOW_PUBLIC_SIGNUP", "true")
         monkeypatch.setenv("CSRF_PROTECTION", "false")
         monkeypatch.setenv("TOTP_ENABLED", "false")
+        # v2.8: skip the real HIBP call — signup is gated by the breach
+        # check, but this test isn't about that.
+        monkeypatch.setenv("PASSWORD_BREACH_CHECK_ENABLED", "false")
         for mod in list(sys.modules):
             if mod == "app" or mod.startswith("app."):
                 del sys.modules[mod]

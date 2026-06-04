@@ -5,11 +5,27 @@ PostgreSQL + a zero-framework JavaScript SPA. One Docker command to
 run, no external auth, no external file storage — attachments live
 in the database.
 
-**Current version: v2.7** — built on top of v2.6 (rich-text + custom
-calendar / select), v2.5 (admin-curated content + global loader +
-per-type status sets), and v2.4 (multi-tenant + tasks / requirements /
-events). **Zero schema changes from v2.4 onward**; production databases
-are byte-for-byte untouched on every upgrade. See *[Live-data safety](#live-data-safety)*.
+**Current version: v2.8** — security hardening release. OWASP audit
+remediation + UI fixes; eight additive items, no DB schema change.
+See [CHANGELOG.md](CHANGELOG.md) for the full v2.8 entry. **Zero
+schema changes from v2.4 onward** — production databases are
+byte-for-byte untouched on every upgrade. See
+*[Live-data safety](#live-data-safety)*.
+
+---
+
+## What's new in v2.8
+
+Security hardening after an OWASP-style audit. **All additive**, no DB
+schema change, no API surface change. Highlights — login timing
+equalised (no enumeration), per-account lockout, HaveIBeenPwned breach
+check on every password set, EXIF strip on image uploads, CSV formula
+injection guard, request body-size middleware, X-Forwarded-For trust
+gate, masked emails in INFO logs, unified 401 for inactive accounts.
+UI: `.auth-card-wide` actually renders wider on signup, logout dialog
+z-index now stacks above modals + Sleuth FAB, mobile modals use
+`100dvh`, auth pages get safe-area-inset padding. +62 security tests
+(**752 total, all green**). Full details in [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
@@ -590,10 +606,12 @@ docker-compose.yml · Dockerfile · requirements.txt · .env.example
 
 ---
 
-## Contributing
+## Contributing & security
 
-Issues and pull requests welcome. Please run the tests before
-submitting.
+- Bug reports / feature ideas — GitHub Issues.
+- Code contributions — see [CONTRIBUTING.md](CONTRIBUTING.md).
+- Vulnerabilities — **don't open a public issue**; see
+  [SECURITY.md](SECURITY.md) for the private disclosure path.
 
 ## License
 

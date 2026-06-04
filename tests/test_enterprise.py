@@ -35,6 +35,10 @@ class TestCSRF:
         monkeypatch.setenv("BCRYPT_ROUNDS", "4")
         monkeypatch.setenv("ALLOW_PUBLIC_SIGNUP", "true")
         monkeypatch.setenv("CSRF_PROTECTION", "true")
+        # v2.8: don't hit the real HIBP API in tests that re-bootstrap
+        # the app — the conftest's disable doesn't carry through this
+        # custom env chain.
+        monkeypatch.setenv("PASSWORD_BREACH_CHECK_ENABLED", "false")
         for mod in list(sys.modules):
             if mod == "app" or mod.startswith("app."):
                 del sys.modules[mod]
@@ -239,6 +243,9 @@ class TestAccountEnumeration:
         monkeypatch.setenv("ALLOW_PUBLIC_SIGNUP", "true")
         monkeypatch.setenv("CSRF_PROTECTION", "false")
         monkeypatch.setenv("ALLOW_ACCOUNT_ENUMERATION", "true")
+        # v2.8: skip the real HIBP call so signup doesn't depend on
+        # whether the chosen password is in the breach corpus.
+        monkeypatch.setenv("PASSWORD_BREACH_CHECK_ENABLED", "false")
         for mod in list(sys.modules):
             if mod == "app" or mod.startswith("app."):
                 del sys.modules[mod]

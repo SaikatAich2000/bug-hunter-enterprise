@@ -40,6 +40,11 @@ def app_env(db_path, monkeypatch):
     # the test suite — the CSRF logic itself is covered by dedicated
     # tests that flip this back on explicitly.
     monkeypatch.setenv("CSRF_PROTECTION", "false")
+    # T4 (v2.8): disable the HaveIBeenPwned API call in tests by default
+    # so the suite stays hermetic. The test_security.py cases that
+    # exercise the breach path monkeypatch app.password_breach directly
+    # instead of relying on real network calls.
+    monkeypatch.setenv("PASSWORD_BREACH_CHECK_ENABLED", "false")
     # Wipe module cache so the engine picks up the new env vars.
     for mod in list(sys.modules):
         if mod == "app" or mod.startswith("app."):
