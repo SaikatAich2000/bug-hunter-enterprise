@@ -14,6 +14,18 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 </head>
 <body>
+  <!-- Global blocking loader (v2.5).
+       Shown whenever an action is in flight (form submit, delete,
+       upload, etc.) via showLoader()/hideLoader() in app.js. While
+       visible it covers the entire viewport with pointer-events:all
+       so accidental double-clicks or background interactions can't
+       fire — the user is held until the action completes or errors. -->
+  <div id="globalLoader" class="global-loader" hidden aria-hidden="true" role="alert">
+    <div class="global-loader-card">
+      <div class="global-loader-spinner" aria-hidden="true"></div>
+      <div class="global-loader-text" id="globalLoaderText">Working…</div>
+    </div>
+  </div>
   <div id="sidebarBackdrop" class="sidebar-backdrop" hidden></div>
 
   <div class="app">
@@ -235,6 +247,14 @@
             <button class="btn ghost" id="eventsRefreshBtn">Refresh</button>
             <span class="events-summary" id="eventsSummary"></span>
           </div>
+          <!-- v2.5: search + filter bar for the events list. Filters apply
+               client-side over STATE.events; the search matches event name
+               and description; the date filter matches scheduled_for. -->
+          <div class="events-filter-bar" id="eventsFilterBar">
+            <input type="search" id="eventsSearch" placeholder="Search events by name or description…" autocomplete="off" />
+            <input type="date" id="eventsDateFilter" aria-label="Filter by scheduled date" />
+            <button class="btn ghost" id="eventsClearFiltersBtn">Clear</button>
+          </div>
           <div class="events-grid" id="eventsGrid"></div>
           <div class="events-empty" id="eventsEmpty" hidden>
             <p>No events yet. Click <strong>+ New Event</strong> to create one — a standup, a sprint meeting, whatever you want to track</p>
@@ -252,6 +272,32 @@
           <div class="events-detail-meta" id="eventDetailMeta"></div>
           <div class="events-detail-controls">
             <button class="btn primary" id="addItemToEventBtn" data-needs-role="manager">+ Add Task</button>
+          </div>
+          <!-- v2.5: search + multi-filter bar for the tasks inside an
+               event. Filters apply client-side over the items returned
+               by /api/events/{id}. Matches the look + behaviour of the
+               main work-items filter bar so the UI is consistent. -->
+          <div class="events-detail-filter-bar" id="eventDetailFilterBar">
+            <input type="search" id="eventDetailSearch" placeholder="Search tasks (title or #id)…" autocomplete="off" />
+            <div class="ms-wrap" data-event-filter="status">
+              <button type="button" class="ms-btn" data-ms-toggle aria-haspopup="menu" aria-expanded="false">
+                <span class="ms-btn-label">All Statuses</span><span class="ms-caret">▾</span>
+              </button>
+              <div class="ms-panel" hidden role="menu"></div>
+            </div>
+            <div class="ms-wrap" data-event-filter="priority">
+              <button type="button" class="ms-btn" data-ms-toggle aria-haspopup="menu" aria-expanded="false">
+                <span class="ms-btn-label">All Priorities</span><span class="ms-caret">▾</span>
+              </button>
+              <div class="ms-panel" hidden role="menu"></div>
+            </div>
+            <div class="ms-wrap" data-event-filter="assignee_id">
+              <button type="button" class="ms-btn" data-ms-toggle aria-haspopup="menu" aria-expanded="false">
+                <span class="ms-btn-label">All Assignees</span><span class="ms-caret">▾</span>
+              </button>
+              <div class="ms-panel" hidden role="menu"></div>
+            </div>
+            <button class="btn ghost" id="eventDetailClearFiltersBtn">Clear</button>
           </div>
           <div class="events-detail-items" id="eventDetailItems"></div>
         </div>
@@ -406,7 +452,7 @@
           <div class="bug-modal-main">
             <label class="field">
               <span>Description</span>
-              <textarea name="description" rows="6" maxlength="10000"
+              <textarea name="description" rows="6" data-bh-rt
                 placeholder="What's happening, expected vs actual, repro steps…"></textarea>
             </label>
 
@@ -426,9 +472,38 @@
                   <div class="attach-staged-list" id="createFilePreview"></div>
                 </div>
                 <p class="muted small create-attach-hint">
-                  Hover an attachment to remove it (✕) or click to preview before saving
+                  Files attach to the item itself. Add more later via the Add-attachment button or via comments
                 </p>
               </div>
+            </section>
+
+            <!-- Bug-level attachments — files attached to the bug itself
+                 (uploaded during bug creation, or uploaded via the
+                 post-creation uploader below, or via the comment composer
+                 without any text). Sits ABOVE the comments so the bug's
+                 own files are visually grouped with the bug metadata
+                 rather than buried in the discussion thread.
+
+                 v2.5: shown for ALL items (not just legacy rows) so users
+                 can see existing files even when none are present —
+                 plus the post-creation uploader is rendered inside the
+                 same section. -->
+            <section class="bug-section" id="bugAttachmentsSection" hidden>
+              <div class="bug-section-head">
+                <h3>Attachments <span class="muted small" id="attachmentsCount"></span></h3>
+                <!-- Post-creation attachment uploader. Anyone with edit
+                     permission on the bug can add files; only admins
+                     can delete them (renderAttachmentCard checks role).
+                     Hidden in create mode (a separate uploader handles
+                     attaching files at creation time). -->
+                <label class="comment-attach-btn bug-attach-add-btn" id="bugAttachAddLabel" for="bugAttachAddInput" title="Add an attachment to this item" hidden>
+                  📎 <span id="bugAttachAddText">Add attachment</span>
+                </label>
+                <input type="file" id="bugAttachAddInput" multiple hidden aria-label="Add an attachment to this item" />
+              </div>
+              <div id="bugAttachAddPreview" class="attach-staged-list"></div>
+              <div class="attachment-grid" id="bugAttachmentsGrid"></div>
+              <div id="bugAttachEmpty" class="bug-attach-empty muted small" hidden>No attachments yet…</div>
             </section>
 
             <!-- Comments + attachments + activity only render when editing
@@ -446,7 +521,7 @@
               <h3>Comments <span class="muted small" id="commentsCount"></span></h3>
               <div id="bugCommentsList" class="bug-comments-list"></div>
               <div class="comment-form" id="commentForm">
-                <textarea id="commentBody" placeholder="Add a comment… (Ctrl/Cmd+Enter to post)"></textarea>
+                <textarea id="commentBody" data-bh-rt placeholder="Add a comment… (Ctrl/Cmd+Enter to post)"></textarea>
                 <div class="comment-form-row">
                   <label class="comment-attach-btn" title="Attach files">
                     📎 <span id="fileLabel">Attach files</span>
@@ -456,15 +531,6 @@
                   <button type="button" class="btn primary" id="commentPostBtn" style="margin-left:auto">Post comment</button>
                 </div>
               </div>
-            </section>
-
-            <!-- Bug-level attachments section. Only renders when LEGACY
-                 bug-level attachments exist (uploaded before the v3.2 UI
-                 simplification, when there was a separate dropzone here).
-                 New attachments go through the comment composer. -->
-            <section class="bug-section" id="bugAttachmentsSection" hidden>
-              <h3>Attachments <span class="muted small" id="attachmentsCount"></span></h3>
-              <div class="attachment-grid" id="bugAttachmentsGrid"></div>
             </section>
 
             <section class="bug-section bug-activity-section" id="bugActivitySection" hidden>
@@ -479,23 +545,23 @@
           <aside class="bug-modal-side" aria-label="Work item metadata">
             <label class="field">
               <span>Type <em>*</em></span>
-              <select name="item_type" required></select>
+              <select name="item_type" data-bh-select required></select>
             </label>
             <label class="field">
               <span>Project <em>*</em></span>
-              <select name="project_id" required></select>
+              <select name="project_id" data-bh-select required></select>
             </label>
             <label class="field">
               <span>Status</span>
-              <select name="status"></select>
+              <select name="status" data-bh-select></select>
             </label>
             <label class="field">
               <span>Priority</span>
-              <select name="priority"></select>
+              <select name="priority" data-bh-select></select>
             </label>
             <label class="field">
               <span>Environment</span>
-              <select name="environment">
+              <select name="environment" data-bh-select>
                 <option value="DEV">DEV</option>
                 <option value="UAT">UAT</option>
                 <option value="PROD">PROD</option>
@@ -507,7 +573,7 @@
                    the <select> so the user can't pick anyone else; the
                    submit handler reads the value from STATE.currentUser.id
                    so the disabled state doesn't affect the request. -->
-              <select name="reporter_id" disabled class="reporter-select"></select>
+              <select name="reporter_id" data-bh-select disabled class="reporter-select"></select>
             </label>
             <fieldset class="field">
               <legend>Assignees</legend>
@@ -515,7 +581,7 @@
             </fieldset>
             <label class="field">
               <span>Event</span>
-              <select name="event_id">
+              <select name="event_id" data-bh-select>
                 <option value="">— No event —</option>
               </select>
             </label>

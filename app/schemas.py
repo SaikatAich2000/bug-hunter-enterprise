@@ -3,19 +3,199 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
+from html.parser import HTMLParser
 from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+# ---------------------------------------------------------------------------
+# v2.6 — HTML sanitizer for rich-text fields (description, comment body)
+#
+# The v2.6 frontend swapped plain textareas for a contenteditable
+# rich-text editor that emits HTML (bold/italic/underline/lists/quotes
+# /code/images). Storing the HTML lets us preserve the formatting on
+# read, but a naïve `innerHTML = body` would be a stored-XSS bug — a
+# user could paste `<script>` or an `onerror` attribute and trigger
+# arbitrary JS for every viewer.
+#
+# We sanitize on the server before storing so the database holds clean
+# HTML. The allowlist is tight: only the formatting tags the editor
+# actually produces, plus inline `<img>` so pasted screenshots survive
+# the round-trip (the editor base64-encodes pastes; that's a `data:`
+# URL on src, which we whitelist).
+#
+# Why an in-house sanitizer rather than `bleach`? Bleach pulls in
+# `html5lib` and adds 200 KB of dependency surface. For the
+# constrained tag set we ship from the editor, a 60-line allowlist
+# parser is plenty. If the formatting grows past this, swap in bleach
+# behind the same `sanitize_html()` interface.
+# ---------------------------------------------------------------------------
+_ALLOWED_TAGS = {
+    "p", "br", "div", "span",
+    "b", "strong", "i", "em", "u", "s", "strike", "del", "ins",
+    "ul", "ol", "li",
+    "blockquote", "pre", "code",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+    "a", "img",
+}
+_ALLOWED_ATTRS = {
+    # Per-tag attr allowlist. Anything missing here is stripped, even
+    # for whitelisted tags — that's how we avoid `<img onerror=...>` and
+    # the like.
+    "a":   {"href", "title", "rel"},
+    "img": {"src", "alt", "title", "width", "height"},
+    "code": {"class"},   # editor sometimes emits `<code class="language-X">`
+    "pre":  {"class"},
+}
+# Schemes allowed on `href` / `src`. `data:` is allowed only for image
+# pastes; we check the URL scheme + MIME prefix together below.
+_ALLOWED_URL_SCHEMES = ("http:", "https:", "mailto:", "/", "#")
+
+
+class _HTMLAllowlistSanitizer(HTMLParser):
+    """Drops every tag/attr that isn't on the allowlist. Output is the
+    surviving HTML — text content always survives even when the parent
+    tag is stripped."""
+    # convert_charrefs=False so we re-emit `&amp;` / `&lt;` faithfully
+    # rather than collapsing them into raw characters that the next
+    # serialiser would have to re-escape.
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.out: list[str] = []
+
+    def _safe_url(self, raw: str) -> Optional[str]:
+        if not raw:
+            return None
+        s = raw.strip()
+        low = s.lower()
+        # Explicit data:image/* (pasted screenshot) — capped here at
+        # ~10 MB after base64 to avoid runaway storage. Real upload-
+        # based attachments don't go through this path; this is for
+        # inline pastes only.
+        if low.startswith("data:image/"):
+            if len(s) > 14 * 1024 * 1024:
+                return None
+            return s
+        for scheme in _ALLOWED_URL_SCHEMES:
+            if low.startswith(scheme):
+                return s
+        return None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
+        t = tag.lower()
+        if t not in _ALLOWED_TAGS:
+            return
+        kept = []
+        allowed_attrs = _ALLOWED_ATTRS.get(t, set())
+        for k, v in attrs:
+            k = k.lower()
+            if k not in allowed_attrs:
+                continue
+            if v is None:
+                continue
+            if k in ("href", "src"):
+                clean = self._safe_url(v)
+                if not clean:
+                    continue
+                v = clean
+            # Escape attribute value for HTML embedding. We never let
+            # the value contain quotes / angles.
+            v_safe = (v.replace("&", "&amp;").replace("<", "&lt;")
+                       .replace(">", "&gt;").replace('"', "&quot;"))
+            kept.append(f'{k}="{v_safe}"')
+        # `a` tags get a forced rel for any external link.
+        if t == "a":
+            has_rel = any(p.startswith("rel=") for p in kept)
+            if not has_rel:
+                kept.append('rel="noopener nofollow"')
+        attr_str = (" " + " ".join(kept)) if kept else ""
+        self.out.append(f"<{t}{attr_str}>")
+
+    def handle_endtag(self, tag: str) -> None:
+        t = tag.lower()
+        if t not in _ALLOWED_TAGS:
+            return
+        # Void elements don't take a closing tag.
+        if t in ("br", "img"):
+            return
+        self.out.append(f"</{t}>")
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
+        # `<br/>` / `<img .../>` — re-emit as start-tag only.
+        self.handle_starttag(tag, attrs)
+
+    def handle_data(self, data: str) -> None:
+        self.out.append(
+            data.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        )
+
+    def handle_entityref(self, name: str) -> None:
+        self.out.append(f"&{name};")
+
+    def handle_charref(self, name: str) -> None:
+        self.out.append(f"&#{name};")
+
+
+def sanitize_html(value: Optional[str]) -> str:
+    """Return a safe-for-display HTML string. Empty input → empty
+    string. Removes every tag/attr outside the allowlist; text content
+    survives. Idempotent: sanitize(sanitize(x)) == sanitize(x)."""
+    if value is None:
+        return ""
+    s = str(value)
+    p = _HTMLAllowlistSanitizer()
+    p.feed(s)
+    p.close()
+    return "".join(p.out)
 
 
 # ---------------------------------------------------------------------------
 # Allowed values
 # ---------------------------------------------------------------------------
-ALLOWED_STATUSES = [
-    "New", "In Progress", "Resolved", "Closed", "Reopened",
-    "Not a Bug", "Resolve Later",
-]
+# Statuses — v2.5 makes the status set PER-ITEM-TYPE so a workflow term
+# only applies to the work flavor where it makes sense ("Not a Bug" is a
+# Bug-only verdict; "Blocked" / "Done" are Task-only; "Approved" /
+# "Implemented" are Requirement-only). The single shared status — present
+# in every list — is "New", so any pre-v2.5 row in the database (which
+# defaults to "New" on create) stays valid for its item_type without any
+# data fix-up. Existing rows holding a status that's no longer valid for
+# their current item_type aren't rejected on read; they're displayed as-is
+# and can be UPDATED to a valid value — but updates that try to MOVE to an
+# invalid value are rejected by the route layer.
+#
+# ALLOWED_STATUSES is the UNION (kept for backwards compatibility with the
+# filter endpoints and any external client that still POSTs a status
+# without an item_type). The per-type sets below are the source of truth
+# for create/update validation.
+STATUSES_BY_TYPE = {
+    "Bug": [
+        "New", "In Progress", "Resolved", "Closed", "Reopened",
+        "Not a Bug", "Resolve Later",
+    ],
+    "Requirement": [
+        "New", "In Review", "Approved", "Implemented", "Rejected", "Deferred",
+    ],
+    "Task": [
+        "New", "In Progress", "Done", "Blocked", "Cancelled",
+    ],
+}
+# Union of every status anywhere in the system. Used by the list filter
+# endpoint (?status=…) which is type-agnostic, and by the legacy single
+# global status dropdown some external clients still rely on.
+ALLOWED_STATUSES = list(
+    dict.fromkeys(s for sts in STATUSES_BY_TYPE.values() for s in sts)
+)
 EXCLUDED_FROM_TOTAL_STATUSES = ["Not a Bug"]
+
+
+def statuses_for_type(item_type: str) -> list[str]:
+    """Return the valid status list for a given item_type, falling back to
+    the Bug list if the type is unknown (preserves legacy behaviour for
+    rows from before this column existed)."""
+    return STATUSES_BY_TYPE.get(item_type or "Bug", STATUSES_BY_TYPE["Bug"])
+
+
 ALLOWED_PRIORITIES = ["Low", "Medium", "High", "Critical"]
 ALLOWED_ENVIRONMENTS = ["DEV", "UAT", "PROD"]
 # v2.4: three work-item flavours sharing one numbering sequence.
@@ -534,7 +714,9 @@ class ProjectMembershipOut(BaseModel):
 class BugCreate(BaseModel):
     project_id: int
     title: str = Field(max_length=200)
-    description: str = Field(default="", max_length=10000)
+    # v2.6: description is rich HTML; up to 1 MB so multiple inline
+    # pasted screenshots (base64 data URLs) fit. Sanitized below.
+    description: str = Field(default="", max_length=1_000_000)
     reporter_id: Optional[int] = None
     assignee_ids: list[int] = Field(default_factory=list)
     status: str = Field(default="New")
@@ -553,7 +735,13 @@ class BugCreate(BaseModel):
     @field_validator("description")
     @classmethod
     def _desc(cls, v: str) -> str:
-        return v.strip() if isinstance(v, str) else v
+        # v2.6: description is now rich HTML emitted by the SPA editor.
+        # Sanitize against the allowlist before storage; strip surrounding
+        # whitespace so an "empty" HTML body (e.g. "<p><br></p>") still
+        # round-trips as effectively-empty for length checks downstream.
+        if not isinstance(v, str):
+            return v
+        return sanitize_html(v.strip())
 
     @field_validator("item_type")
     @classmethod
@@ -563,6 +751,9 @@ class BugCreate(BaseModel):
     @field_validator("status")
     @classmethod
     def _status(cls, v: str) -> str:
+        # Type-aware status validation happens in model_validator below
+        # (this field-level check just confirms the value is at least in
+        # the global union).
         return _normalize_choice(v, ALLOWED_STATUSES, "status")
 
     @field_validator("priority")
@@ -595,11 +786,26 @@ class BugCreate(BaseModel):
                 seen.append(x)
         return seen
 
+    @model_validator(mode="after")
+    def _check_status_for_type(self) -> "BugCreate":
+        # The status must belong to the chosen item_type's set. "New" is in
+        # every set so the default value always passes regardless of type.
+        # BugUpdate does NOT get this validator — the route layer enforces
+        # it there, because item_type may itself be changing on the same
+        # request and the validator can't see the pre-existing row.
+        allowed = statuses_for_type(self.item_type)
+        if self.status not in allowed:
+            raise ValueError(
+                f"Status '{self.status}' is not valid for {self.item_type}. "
+                f"Allowed: {', '.join(allowed)}"
+            )
+        return self
+
 
 class BugUpdate(BaseModel):
     project_id: Optional[int] = None
     title: Optional[str] = Field(default=None, max_length=200)
-    description: Optional[str] = Field(default=None, max_length=10000)
+    description: Optional[str] = Field(default=None, max_length=1_000_000)
     reporter_id: Optional[int] = None
     assignee_ids: Optional[list[int]] = None
     status: Optional[str] = None
@@ -626,7 +832,12 @@ class BugUpdate(BaseModel):
     @field_validator("description")
     @classmethod
     def _desc(cls, v: Optional[str]) -> Optional[str]:
-        return v.strip() if isinstance(v, str) else v
+        # See BugCreate.description — same sanitization on update.
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            return v
+        return sanitize_html(v.strip())
 
     @field_validator("status")
     @classmethod
@@ -811,12 +1022,27 @@ class EventDetailOut(EventOut):
 
 
 class CommentIn(BaseModel):
-    body: str = Field(min_length=1, max_length=10000)
+    # v2.6: allow up to 200 KB so a pasted screenshot (base64 data URL)
+    # fits. The HTML is sanitized below, so dangerous payloads are
+    # stripped even if a client tries to abuse the larger ceiling.
+    body: str = Field(min_length=1, max_length=200_000)
 
     @field_validator("body")
     @classmethod
     def _body(cls, v: str) -> str:
-        return _strip_and_check_min_length(v, 1, "Comment body")
+        # v2.6: comments are now rich HTML. We sanitize on the server
+        # to block stored-XSS regardless of the SPA editor's behaviour,
+        # then verify the visible-text length is at least 1 char so a
+        # whitespace-only post still gets rejected. An image-only
+        # comment (e.g. a pasted screenshot with no caption) is allowed
+        # — the presence of an <img> tag counts as non-empty.
+        if not isinstance(v, str):
+            raise ValueError("Comment body must be a string")
+        cleaned = sanitize_html(v.strip())
+        text_only = re.sub(r"<[^>]+>", "", cleaned).strip()
+        if not text_only and "<img" not in cleaned.lower():
+            raise ValueError("Comment body cannot be empty")
+        return cleaned
 
 
 class CommentOut(BaseModel):

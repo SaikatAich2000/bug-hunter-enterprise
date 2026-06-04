@@ -89,7 +89,15 @@ def list_audit(
     entity_type: Optional[str] = None,
     actor_user_id: Optional[int] = None,
     q: Optional[str] = None,
-    limit: int = Query(default=200, le=1000),
+    # v2.6: raise the cap so operators reviewing very old activity can
+    # actually see it. 1000 was too aggressive on long-running deploys.
+    # Ceiling bumped to 10 000 (still a firm cap to keep response size
+    # sane); the SPA now asks for 5000 by default and offers a "Load
+    # more" affordance via the offset param for the rare case the
+    # user needs to dig further. Pagination stays within the actor's
+    # org — _build_audit_query already filters by Activity.org_id.
+    limit: int = Query(default=5000, le=10000),
+    offset: int = Query(default=0, ge=0),
     actor: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[Activity]:
@@ -103,7 +111,11 @@ def list_audit(
     data never leaks."""
     if not can_view_audit(actor):
         raise HTTPException(status_code=403, detail="Forbidden")
-    stmt = _build_audit_query(actor, entity_type, actor_user_id, q).limit(limit)
+    stmt = (
+        _build_audit_query(actor, entity_type, actor_user_id, q)
+        .offset(offset)
+        .limit(limit)
+    )
     return list(db.scalars(stmt).all())
 
 

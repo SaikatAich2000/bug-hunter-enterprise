@@ -16,6 +16,7 @@ from __future__ import annotations
 import csv
 import io
 import re
+from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import quote
 
@@ -49,6 +50,7 @@ from app.schemas import (
     ALLOWED_ENVIRONMENTS, ALLOWED_ITEM_TYPES, ALLOWED_PRIORITIES, ALLOWED_STATUSES,
     ActivityOut, AttachmentBrief, BugCreate, BugDetail, BugListResponse,
     BugOut, BugUpdate, CommentIn, CommentOut, normalize_choice,
+    statuses_for_type,
 )
 
 router = APIRouter(prefix="/api/bugs", tags=["bugs"])
@@ -57,6 +59,7 @@ router = APIRouter(prefix="/api/bugs", tags=["bugs"])
 # duplicate-string-literal rule stays quiet and so the wording stays
 # consistent across endpoints.
 _DETAIL_BUG_NOT_FOUND = "Bug not found"
+_DETAIL_COMMENT_NOT_FOUND = "Comment not found"
 _DEFAULT_MIME = "application/octet-stream"
 # Display label for an empty assignee list in change-tracking diffs.
 # Extracted to a constant so Sonar's S1192 duplicate-literal rule stays
@@ -463,9 +466,11 @@ def get_bug(
     if not can_access_project(db, user, bug.project):
         raise HTTPException(status_code=404, detail=_DETAIL_BUG_NOT_FOUND)
 
+    # v2.6 — newest evidence first so the most recent attachment is at the
+    # top of each bucket on the modal.
     all_atts = list(db.scalars(
         select(Attachment).where(Attachment.bug_id == bug_id)
-        .order_by(Attachment.created_at.asc())
+        .order_by(Attachment.created_at.desc(), Attachment.id.desc())
     ).all())
     by_comment: dict[int, list[Attachment]] = {}
     bug_level: list[Attachment] = []
@@ -475,13 +480,21 @@ def get_bug(
         else:
             by_comment.setdefault(a.comment_id, []).append(a)
 
+    # v2.6 — newest comments first. The relationship defaults to ascending
+    # order; sort here so the inline detail view matches list_comments.
+    ordered_comments = sorted(
+        bug.comments,
+        key=lambda x: (x.created_at, x.id),
+        reverse=True,
+    )
+
     payload = _bug_to_out_dict(
         bug, len(all_atts),
         can_edit_bug(db, user, bug.project, getattr(bug, "item_type", None) or "Bug"),
     )
     payload["attachments"] = [_attachment_brief(a) for a in bug_level]
     payload["comments"] = []
-    for c in bug.comments:
+    for c in ordered_comments:
         payload["comments"].append({
             "id": c.id, "bug_id": c.bug_id,
             "author_user_id": c.author_user_id, "author_name": c.author_name,
@@ -666,14 +679,28 @@ def _validate_update_project(fields: dict, actor: User, db: Session) -> None:
             raise HTTPException(status_code=403, detail="You don't have access to that project")
 
 
-def _validate_update_status(_fields: dict, _bug: Bug) -> None:
-    """Placeholder for per-type status validation. The enterprise schema
-    currently does not enforce per-type status sets at this layer — the
-    Pydantic union check is sufficient — but the helper is kept here so a
-    future tightening of the matrix has an obvious home.
-
-    Params are prefixed with `_` to satisfy the unused-arg linter while
-    keeping the call-site signature stable for the future tightening."""
+def _validate_update_status(fields: dict, bug: Bug) -> None:
+    """v2.5 — per-type status validation. Pydantic only checks the union
+    of all statuses; here we enforce that the status being SET belongs to
+    the effective item_type. Tolerates rows whose stored status is already
+    out-of-set (legacy data): only blocks CHANGING the status to an
+    invalid value."""
+    if "status" not in fields or fields["status"] is None:
+        return
+    effective_type = (
+        fields.get("item_type") or (getattr(bug, "item_type", None) or "Bug")
+    )
+    allowed_for_type = statuses_for_type(effective_type)
+    new_status = fields["status"]
+    if new_status in allowed_for_type or new_status == bug.status:
+        return
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"Status '{new_status}' is not valid for {effective_type}. "
+            f"Allowed: {sorted(allowed_for_type)}"
+        ),
+    )
 
 
 def _validate_update_payload(fields: dict, bug: Bug, db: Session, actor: User) -> None:
@@ -1119,9 +1146,10 @@ def list_comments(
     db: Session = Depends(get_db),
 ) -> list[dict]:
     _get_bug_or_404(db, bug_id, user)
+    # v2.6 — newest comments first (matches the inline detail view).
     comments = list(db.scalars(
         select(Comment).where(Comment.bug_id == bug_id)
-        .order_by(Comment.created_at.asc(), Comment.id.asc())
+        .order_by(Comment.created_at.desc(), Comment.id.desc())
     ).all())
     atts = list(db.scalars(
         select(Attachment).where(Attachment.bug_id == bug_id, Attachment.comment_id.isnot(None))
@@ -1283,18 +1311,22 @@ def delete_attachment(
     actor: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    bug = _get_bug_or_404(db, bug_id, actor)
+    # _get_bug_or_404 still performs the tenant + access gate so cross-org
+    # / cross-project lookups 404 before we leak existence.
+    _get_bug_or_404(db, bug_id, actor)
     a = db.get(Attachment, att_id)
     if a is None or a.bug_id != bug_id:
         raise HTTPException(status_code=404, detail="Attachment not found")
 
-    can_delete = (
-        actor.role == ROLE_ADMIN
-        or a.uploader_user_id == actor.id
-        or can_manage_project(db, actor, bug.project)
-    )
-    if not can_delete:
-        raise HTTPException(status_code=403, detail="You can't delete this attachment")
+    # v2.5 — attachment deletion is admin-only across the board (both
+    # bug-level and comment-level). Members and managers can no longer
+    # remove evidence — admins curate it. Project leads, uploaders, and
+    # the legacy "manager" pathway are all denied here.
+    if actor.role != ROLE_ADMIN:
+        raise HTTPException(
+            status_code=403,
+            detail="Only admins can delete attachments.",
+        )
     fname = a.filename
     db.delete(a)
     _log(
@@ -1304,6 +1336,118 @@ def delete_attachment(
     )
     db.commit()
     return {"message": "Attachment deleted"}
+
+
+# ---------------------------------------------------------------------------
+# Comment edit / delete — admin only (v2.5)
+#
+# Per the v2.5 spec: "Comments and Attachments must not be editable or
+# deletable by anyone except the admin." Authors, project leads, and
+# managers all lose the rewrite/destroy buttons; admins curate the
+# record. Cross-org and cross-project access is still blocked by
+# `_get_bug_or_404` before we ever consult `actor.role`.
+# ---------------------------------------------------------------------------
+def _require_admin(actor: User, action_label: str) -> None:
+    """Raise 403 unless the caller is an org admin. Centralises the
+    permission gate for the comment edit/delete endpoints so the role
+    check + status code stay consistent (and so members + managers stay
+    out)."""
+    if actor.role != ROLE_ADMIN:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Only admins can {action_label} comments.",
+        )
+
+
+def _get_comment_for_bug_or_404(db: Session, bug_id: int, comment_id: int) -> Comment:
+    """Fetch a comment by id, 404 if it doesn't exist or belongs to a
+    different bug. Caller has already verified the bug itself is
+    accessible via `_get_bug_or_404`, so this is just a parent/child
+    integrity check."""
+    c = db.get(Comment, comment_id)
+    if c is None or c.bug_id != bug_id:
+        raise HTTPException(status_code=404, detail=_DETAIL_COMMENT_NOT_FOUND)
+    return c
+
+
+def _comment_attachments(db: Session, comment_id: int) -> list[Attachment]:
+    """Return every attachment hung off this comment so the edited
+    CommentOut response carries the same shape as the listing route."""
+    return list(db.scalars(
+        select(Attachment).where(Attachment.comment_id == comment_id)
+    ).all())
+
+
+def _comment_to_out_dict(c: Comment, atts: list[Attachment]) -> dict:
+    return {
+        "id": c.id, "bug_id": c.bug_id,
+        "author_user_id": c.author_user_id, "author_name": c.author_name,
+        "body": c.body, "created_at": c.created_at,
+        "attachments": [_attachment_brief(a) for a in atts],
+    }
+
+
+@router.put("/{bug_id}/comments/{comment_id}", response_model=CommentOut)
+def update_comment(
+    bug_id: int, comment_id: int,
+    payload: CommentIn,
+    actor: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Admin-only comment edit. Audit row captures old + new previews so
+    a moderator can review what changed even after the original body is
+    overwritten."""
+    bug = _get_bug_or_404(db, bug_id, actor)
+    _require_admin(actor, "edit")
+    c = _get_comment_for_bug_or_404(db, bug_id, comment_id)
+
+    old_preview = (c.body or "")[:200]
+    new_preview = (payload.body or "")[:200]
+    c.body = payload.body
+    # Defensive: the enterprise Comment model currently has no
+    # `updated_at` column, so setattr would create a transient Python
+    # attribute that never reaches the DB. Guard with hasattr so we
+    # only touch real mapped columns — keeps the DB-safety contract
+    # (zero schema changes) while staying ready for a future column.
+    if hasattr(c, "updated_at"):
+        c.updated_at = datetime.now(timezone.utc)
+    db.flush()
+    _log(
+        db, actor.org_id, bug_id, actor, "comment_edited",
+        f"Comment #{c.id} on #{bug.id} '{bug.title}' edited by {actor.name}: "
+        f"'{old_preview}' → '{new_preview}'",
+        entity_type="comment", entity_id=c.id,
+    )
+    db.commit()
+    db.refresh(c)
+    return _comment_to_out_dict(c, _comment_attachments(db, c.id))
+
+
+@router.delete("/{bug_id}/comments/{comment_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_comment(
+    bug_id: int, comment_id: int,
+    actor: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Response:
+    """Admin-only comment delete. Attachments hung off the comment ride
+    the FK cascade (Attachment.comment_id ondelete=CASCADE) so no manual
+    sweep is needed. The audit row keeps the first 200 chars of the body
+    for context."""
+    bug = _get_bug_or_404(db, bug_id, actor)
+    _require_admin(actor, "delete")
+    c = _get_comment_for_bug_or_404(db, bug_id, comment_id)
+
+    preview = (c.body or "")[:200]
+    author_name = c.author_name
+    db.delete(c)
+    _log(
+        db, actor.org_id, bug_id, actor, "comment_deleted",
+        f"Comment #{comment_id} by {author_name} on #{bug.id} "
+        f"'{bug.title}' deleted: {preview}",
+        entity_type="comment", entity_id=comment_id,
+    )
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 # ---------------------------------------------------------------------------

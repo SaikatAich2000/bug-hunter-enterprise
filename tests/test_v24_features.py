@@ -165,7 +165,9 @@ def test_manager_can_edit_task_and_requirement(client, make_invite):
                           project_ids=[p["id"]])
     r = mc.put(f"/api/bugs/{task['id']}", json={"status": "In Progress"})
     assert r.status_code == 200, r.text
-    r = mc.put(f"/api/bugs/{req['id']}", json={"status": "Resolved"})
+    # v2.5: Requirements no longer share Bug-only statuses. "Resolved" is
+    # Bug-only — use "Approved" which is the Requirement-flavor equivalent.
+    r = mc.put(f"/api/bugs/{req['id']}", json={"status": "Approved"})
     assert r.status_code == 200, r.text
 
 

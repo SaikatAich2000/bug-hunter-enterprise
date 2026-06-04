@@ -485,7 +485,7 @@ class Bug(Base):
     )
     comments: Mapped[list["Comment"]] = relationship(
         "Comment", back_populates="bug", cascade=_CASCADE_ALL_DELETE_ORPHAN,
-        order_by="Comment.created_at",
+        order_by="(Comment.created_at.desc(), Comment.id.desc())",
     )
     activities: Mapped[list["Activity"]] = relationship(
         "Activity", back_populates="bug",

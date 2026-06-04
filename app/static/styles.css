@@ -356,12 +356,24 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
   border-radius: 50%;
   flex-shrink: 0;
   box-shadow: 0 0 0 2px var(--bg-elev);
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
 }
+.side-item .swatch:hover { transform: scale(1.25); box-shadow: 0 0 0 3px var(--accent-soft); }
 .side-item .label-text {
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: pointer;
+  padding: 2px 4px;
+  margin: -2px -4px;
+  border-radius: 4px;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.side-item .label-text:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 .side-item .row-actions { display: none; gap: 2px; }
 .side-item:hover .row-actions { display: flex; }
@@ -722,22 +734,58 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
 }
 .bug-table {
   width: 100%;
+  min-width: 720px;
   border-collapse: collapse;
   font-size: 13px;
-  min-width: 820px;
-  table-layout: fixed;
+  /* table-layout: auto is the key here. With "fixed" + a mix of pixel
+     and percentage column widths, the browser scales the columns
+     proportionally when they sum past 100 % and the min-width hints
+     I'd set on individual <td>s were ignored. That's what made the
+     # column truncate to "#1..." and the Tasks title shrink while
+     other columns had visible slack. With "auto", the browser sizes
+     small cols to their content (helped by white-space:nowrap) and
+     the title col with width:100% greedily fills whatever's left. */
+  table-layout: auto;
 }
 .bug-table th, .bug-table td {
   padding: 12px 14px;
   text-align: left;
   border-bottom: 1px solid var(--border);
   vertical-align: middle;
-  overflow: hidden;
-  text-overflow: ellipsis;
+}
+/* Small fixed-width columns: shrink to content, never wrap or
+   ellipsize. The width:1% is the classic table trick to tell the
+   browser "I don't want any of the leftover space — give it all to
+   whichever column asked for width:100%." */
+.bug-table th.col-id,        .bug-table td.col-id,
+.bug-table th.col-status,    .bug-table td.col-status,
+.bug-table th.col-priority,  .bug-table td.col-priority,
+.bug-table th.col-env,       .bug-table td.col-env,
+.bug-table th.col-due,       .bug-table td.col-due,
+.bug-table th.col-att,       .bug-table td.col-att,
+.bug-table th.col-actions,   .bug-table td.col-actions {
+  width: 1%;
   white-space: nowrap;
 }
-.bug-table td.col-title,
-.bug-table td.col-assignees { white-space: normal; }
+/* Project / event / assignees can have long values — let them keep a
+   sensible cap so a 50-char project name doesn't push the title
+   column down to nothing. Within the cap, content wraps. */
+.bug-table th.col-project,   .bug-table td.col-project,
+.bug-table th.col-event,     .bug-table td.col-event,
+.bug-table th.col-assignees, .bug-table td.col-assignees {
+  width: 1%;
+  white-space: nowrap;
+}
+.bug-table td.col-project   { max-width: 200px; white-space: normal; word-break: break-word; }
+.bug-table td.col-event     { max-width: 220px; white-space: normal; }
+.bug-table td.col-assignees { max-width: 280px; white-space: normal; }
+/* Title is the greedy column — it expands to fill leftover space. The
+   inner .title-text wraps and is line-clamped to 2 lines (see below). */
+.bug-table th.col-title, .bug-table td.col-title {
+  width: 100%;
+  white-space: normal;
+  min-width: 200px;
+}
 .bug-table th {
   background: var(--bg-elev-2);
   color: var(--text-muted);
@@ -756,15 +804,9 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
 .bug-table tbody tr:hover { background: var(--bg-elev-2); }
 .bug-table tbody tr:last-child td { border-bottom: none; }
 
-.col-id        { width: 72px; color: var(--text-muted); font-weight: 600; }
-.col-title     { width: auto; }
-.col-project   { width: 130px; }
-.col-status    { width: 120px; }
-.col-priority  { width: 93px; }
-.col-env       { width: 71px; }
-.col-assignees { width: 200px; }
-.col-att       { width: 70px; text-align: center; }
-.col-actions   { width: 96px; text-align: right; }
+.col-id        { color: var(--text-muted); font-weight: 600; text-align: left; }
+.col-att       { text-align: center; }
+.col-actions   { text-align: right; }
 
 .title-cell {
   display: flex;
@@ -881,9 +923,23 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
   padding: 2px 8px 2px 4px;
   border-radius: 999px;
   font-size: 11px;
+  /* Each chip stays on a single line — the cap is enforced by max-width
+     + ellipsis on the inner .assignee-chip-name span (the avatar circle
+     keeps its fixed size). Without nowrap + ellipsis-on-name-span, a
+     long name like "Chinmaya Venkataraman" used to wrap
+     character-by-character because word-break:break-all forced mid-word
+     breaks at the chip boundary, producing "Ka mal" / "Shu bha m S ing h". */
   max-width: 100%;
+  white-space: nowrap;
   overflow: hidden;
-  word-break: break-all;
+}
+.assignee-chip > .avatar { flex-shrink: 0; }
+.assignee-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  max-width: 160px;
 }
 .avatar {
   width: 22px;
@@ -986,10 +1042,16 @@ body.sidebar-collapsed .side-footer .link-btn svg { margin-right: 0; }
 .audit-controls {
   display: flex;
   gap: 8px;
-  margin-bottom: 12px;
   flex-wrap: wrap;
   align-items: center;
-  padding: 18px 24px 12px;
+  /* Boxed look — card-style chrome consistent with .events-controls and
+     .sessions-controls so the page chrome reads as one family. */
+  padding: 14px 16px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-sm);
+  margin: 14px 24px 18px;
 }
 .audit-controls select, .audit-controls input {
   background: var(--bg-elev);
@@ -1753,18 +1815,11 @@ fieldset.field > legend {
     border: 1px dashed var(--border);
   }
 
-  /* Without the sidebar the bug-list container is ~768px wide and the
-     fixed-width columns (id+project+status+priority+env+assignees+att
-     +actions) sum to ~838px, squeezing the auto-width title to zero.
-     Trim a few non-essential columns so the Title stays readable. */
+  /* Hide low-value columns at tablet sizes so the auto-layout title
+     column keeps a usable width. (Widths are otherwise controlled by
+     the .bug-table td.col-* rules — the auto-layout approach handles
+     shrinking on its own.) */
   .col-actions   { display: none; }
-  .col-id        { width: 68px; }
-  .col-att       { width: 50px; }
-  .col-project   { width: 110px; }
-  .col-status    { width: 100px; }
-  .col-priority  { width: 86px; }
-  .col-env       { width: 62px; }
-  .col-assignees { width: 160px; }
 }
 
 @media (max-width: 700px) {
@@ -1776,15 +1831,17 @@ fieldset.field > legend {
   .modal-card { max-height: 95vh; }
   .modal-card.xxl { width: 100%; max-width: 100%; }
   .charts-grid { grid-template-columns: 1fr; }
-  .audit-controls { padding: 14px 12px 12px; }
+  .audit-controls { padding: 14px 12px 12px; margin: 14px 12px 14px; }
   .audit-list { padding: 0 12px 24px; }
-  .sessions-controls { padding: 14px 12px 12px; flex-direction: column; align-items: stretch; }
+  .sessions-controls { padding: 14px 12px 12px; margin: 14px 12px 14px; flex-direction: column; align-items: stretch; }
+  .sessions-list { padding: 0 12px 24px; }
   .page-intro { padding: 16px 12px 14px; gap: 12px; }
   .page-intro-icon { width: 40px; height: 40px; font-size: 18px; }
   .page-intro-text h2 { font-size: 15px; }
   .page-intro-text p { font-size: 12px; }
-  .col-project { width: 110px; }
-  .col-env, .col-att { display: none; }
+  .bug-table td.col-project   { max-width: 130px; }
+  .bug-table td.col-event     { max-width: 140px; }
+  .bug-table td.col-assignees { max-width: 180px; }
 
   .session-row { grid-template-columns: 1fr; }
   .session-actions { justify-self: stretch; }
@@ -1811,8 +1868,9 @@ fieldset.field > legend {
   .attachment-grid { grid-template-columns: 1fr 1fr; }
   .detail-head-actions .btn,
   .bug-modal-head-actions .btn { padding: 6px 10px; font-size: 12px; }
-  .col-assignees, .col-priority { display: none; }
-  .bug-table { min-width: 480px; }
+  .bug-table th.col-assignees, .bug-table td.col-assignees,
+  .bug-table th.col-priority,  .bug-table td.col-priority { display: none; }
+  .bug-table { min-width: 420px; }
 
   .bug-modal-body .bug-title-field { margin: 14px 14px 0; }
   .bug-modal-grid { padding: 14px; }
@@ -2128,8 +2186,14 @@ fieldset.field > legend {
   display: flex;
   gap: 12px;
   align-items: center;
-  margin-bottom: 14px;
   flex-wrap: wrap;
+  /* Boxed look — matches .audit-controls / .events-controls. */
+  padding: 14px 16px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-sm);
+  margin: 14px 24px 18px;
 }
 .sessions-help {
   flex: 1;
@@ -2143,6 +2207,7 @@ fieldset.field > legend {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  padding: 0 24px 24px;
 }
 .session-row {
   display: grid;
@@ -2819,9 +2884,9 @@ body.sidebar-collapsed .org-banner { display: none; }
 }
 .new-item-menu button:hover { background: var(--bg-elev-2); }
 
-/* Per-tab specialty columns */
-.col-due { width: 110px; white-space: nowrap; }
-.col-event { width: 180px; white-space: nowrap; }
+/* Per-tab specialty columns — actual sizing is handled in the main
+   .bug-table block (auto layout + width:1% / 100% trick). The rules
+   here are removed in favor of the canonical per-column rules above. */
 .event-pill {
   display: inline-block;
   padding: 2px 10px;
@@ -2929,15 +2994,27 @@ body.sidebar-collapsed .org-banner { display: none; }
   border-color: #b91c1c;
 }
 .create-attach-hint { margin: 6px 0 0; font-size: 11.5px; }
+/* The "Upload N file(s)" CTA appended after staged thumbs. */
+.attach-staged-upload {
+  margin-left: 6px;
+  padding: 8px 14px;
+  font-size: 12px;
+}
 
 /* Events view */
 .events-intro h2 { margin: 0 0 4px; }
 .events-controls {
   display: flex;
-  gap: 10px;
   align-items: center;
-  padding: 0 24px 14px;
   flex-wrap: wrap;
+  gap: 14px;
+  /* Boxed look — card-style chrome consistent with audit/sessions. */
+  margin: 18px 24px 20px;
+  padding: 12px 16px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-sm);
 }
 .events-summary { color: var(--text-muted); font-size: 13px; margin-left: auto; }
 .events-grid {
@@ -3042,8 +3119,14 @@ body.sidebar-collapsed .org-banner { display: none; }
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 0 24px 12px;
   flex-wrap: wrap;
+  /* Boxed look — matches .events-controls / audit / sessions. */
+  margin: 0 24px 14px;
+  padding: 12px 14px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-sm);
 }
 .events-detail-head h2 {
   margin: 0;
@@ -3088,3 +3171,710 @@ body.sidebar-collapsed .org-banner { display: none; }
   padding: 0 24px 12px;
 }
 .events-detail-items { padding: 0 24px 24px; }
+
+/* ============================================================
+ * v2.5 — Events list + Event detail search/filter bars
+ *
+ * Visual match for the main work-items filter bar so the UI feels
+ * consistent across views. Both bars use the same card-style chrome
+ * as .events-controls / .audit-controls / .sessions-controls.
+ * ============================================================ */
+.events-filter-bar,
+.events-detail-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-sm);
+  margin: 0 0 16px;
+}
+.events-filter-bar input[type="search"],
+.events-detail-filter-bar input[type="search"] {
+  flex: 1 1 220px;
+  min-width: 200px;
+  padding: 9px 12px;
+  border-radius: 9px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elev-2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+.events-filter-bar input[type="search"]:hover,
+.events-detail-filter-bar input[type="search"]:hover {
+  border-color: var(--accent);
+  background: var(--bg-elev-3);
+}
+.events-filter-bar input[type="search"]:focus,
+.events-detail-filter-bar input[type="search"]:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--bg-elev-3);
+  box-shadow: var(--shadow-focus);
+}
+.events-filter-bar input[type="date"] {
+  padding: 9px 12px;
+  border-radius: 9px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elev-2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  flex: 0 0 auto;
+}
+.events-filter-bar input[type="date"]:hover,
+.events-filter-bar input[type="date"]:focus {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
+
+@media (max-width: 600px) {
+  .events-filter-bar,
+  .events-detail-filter-bar {
+    padding: 12px;
+    gap: 8px;
+  }
+  .events-filter-bar input[type="search"],
+  .events-detail-filter-bar input[type="search"] {
+    flex: 1 1 100%;
+  }
+  .events-filter-bar input[type="date"] {
+    flex: 1 1 100%;
+  }
+}
+
+/* ============================================================
+ * v2.6 — Custom date picker
+ *
+ * The native <input type="date"> is hidden via .bh-date-native and
+ * replaced by a button + popover that match the screenshot. The native
+ * input stays in the DOM so form submission picks up its value.
+ * ============================================================ */
+.bh-date-wrap {
+  position: relative;
+  display: inline-block;
+  width: 100%;
+}
+.bh-date-native {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  border: 0;
+}
+.bh-date-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elev);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02),
+              0 1px 2px rgba(0, 0, 0, 0.18);
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+  position: relative;
+}
+.bh-date-btn:hover { border-color: var(--accent); background: var(--bg-elev-3); }
+.bh-date-btn:focus-visible { outline: none; box-shadow: var(--shadow-focus); border-color: var(--accent); }
+.bh-date-btn[aria-expanded="true"] { border-color: var(--accent); box-shadow: var(--shadow-focus); }
+.bh-date-icon { font-size: 14px; flex: 0 0 auto; }
+.bh-date-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bh-date-placeholder { color: var(--text-faint); }
+.bh-date-clear {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: var(--text-muted);
+  background: var(--bg-elev-3);
+  border: 1px solid transparent;
+}
+.bh-date-clear:hover { color: var(--danger, #ef4444); background: rgba(239, 68, 68, 0.15); }
+
+.bh-date-pop {
+  /* JS sets position:fixed + top/left at open time so the popover
+     escapes any overflow:hidden / transformed ancestor (modal-card,
+     backdrop-filter wrapper, etc.). z-index sits above everything
+     including the bug modal (z 1000-ish) and the global loader
+     overlay base. */
+  position: fixed;
+  z-index: 100000;
+  width: 320px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  box-shadow: var(--shadow-lg);
+  padding: 14px;
+  animation: bh-date-pop-in 0.14s ease;
+  user-select: none;
+}
+@keyframes bh-date-pop-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.bh-date-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.bh-date-title {
+  font-weight: 700;
+  font-size: 15px;
+  color: var(--accent);
+  letter-spacing: -0.01em;
+}
+.bh-date-nav {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 18px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.bh-date-nav:hover { background: var(--bg-elev-2); color: var(--text); border-color: var(--border); }
+.bh-date-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 2px;
+}
+.bh-date-dow {
+  text-align: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  letter-spacing: 0.04em;
+  padding: 6px 0;
+}
+.bh-date-cell {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 0;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  text-align: center;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.bh-date-cell.muted { color: var(--text-faint); }
+.bh-date-cell:hover { background: var(--bg-elev-2); border-color: var(--border); }
+.bh-date-cell.is-today {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 700;
+}
+.bh-date-cell.is-selected {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+  font-weight: 700;
+}
+.bh-date-cell.is-selected:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.bh-date-foot {
+  margin-top: 10px;
+  display: flex;
+  justify-content: flex-end;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+.bh-date-today {
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+.bh-date-today:hover { background: var(--accent-soft); }
+
+@media (max-width: 380px) {
+  .bh-date-pop { width: calc(100vw - 24px); }
+}
+
+/* ============================================================
+ * v2.6 — Rich-text editor
+ *
+ * Wraps a hidden textarea (kept for form submission) with a toolbar
+ * and a contenteditable surface. The toolbar groups B / I / U / S,
+ * lists, quote / code, image / clear-formatting.
+ * ============================================================ */
+.bh-rt-wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--bg-elev);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  overflow: hidden;
+}
+.bh-rt-wrap:focus-within {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-focus);
+}
+.bh-rt-native {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  border: 0;
+}
+.bh-rt-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev-2);
+}
+.bh-rt-toolbar button {
+  width: 30px;
+  height: 28px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.bh-rt-toolbar button:hover {
+  background: var(--bg-elev-3);
+  border-color: var(--border);
+}
+.bh-rt-toolbar button:active {
+  background: var(--accent-soft);
+}
+.bh-rt-toolbar button.is-active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.bh-rt-divider {
+  width: 1px;
+  background: var(--border);
+  margin: 2px 4px;
+  align-self: stretch;
+}
+.bh-rt-editor {
+  min-height: 110px;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 10px 12px;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.5;
+  outline: none;
+}
+.bh-rt-wrap.compact .bh-rt-editor {
+  min-height: 64px;
+}
+.bh-rt-editor:empty::before {
+  content: attr(data-placeholder);
+  color: var(--text-faint);
+  pointer-events: none;
+}
+.bh-rt-editor p { margin: 0 0 8px; }
+.bh-rt-editor p:last-child { margin-bottom: 0; }
+.bh-rt-editor blockquote {
+  border-left: 3px solid var(--accent);
+  padding: 4px 12px;
+  margin: 6px 0;
+  color: var(--text-muted);
+  background: var(--bg-elev-2);
+  border-radius: 0 6px 6px 0;
+}
+.bh-rt-editor pre {
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  overflow-x: auto;
+}
+.bh-rt-editor code {
+  background: var(--bg-elev-2);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.92em;
+}
+.bh-rt-editor ul, .bh-rt-editor ol { margin: 4px 0 8px 22px; padding: 0; }
+.bh-rt-editor li { margin-bottom: 2px; }
+.bh-rt-editor img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+  display: block;
+  margin: 8px 0;
+  border: 1px solid var(--border);
+}
+
+/* Read-only rich content (rendered HTML in the comments list, etc.) */
+.bh-rich-content p:last-child { margin-bottom: 0; }
+.bh-rich-content blockquote {
+  border-left: 3px solid var(--accent);
+  padding: 4px 12px;
+  margin: 6px 0;
+  color: var(--text-muted);
+  background: var(--bg-elev-2);
+  border-radius: 0 6px 6px 0;
+}
+.bh-rich-content pre {
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  overflow-x: auto;
+}
+.bh-rich-content code {
+  background: var(--bg-elev-2);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.92em;
+}
+.bh-rich-content img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+  display: block;
+  margin: 6px 0;
+  border: 1px solid var(--border);
+}
+
+/* ============================================================
+ * v2.6 — Custom single-select dropdown
+ *
+ * The native <select> is hidden via .bh-sel-native; the button + popover
+ * give a consistent cross-browser look that matches the calendar.
+ * ============================================================ */
+.bh-sel-wrap {
+  position: relative;
+  display: inline-block;
+  width: 100%;
+}
+.bh-sel-native {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  border: 0;
+}
+.bh-sel-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elev);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02),
+              0 1px 2px rgba(0, 0, 0, 0.18);
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+.bh-sel-btn:hover:not(.is-disabled) { border-color: var(--accent); background: var(--bg-elev-3); }
+.bh-sel-btn:focus-visible { outline: none; box-shadow: var(--shadow-focus); border-color: var(--accent); }
+.bh-sel-btn[aria-expanded="true"] { border-color: var(--accent); box-shadow: var(--shadow-focus); }
+.bh-sel-btn.is-disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  border-style: dashed;
+}
+.bh-sel-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bh-sel-placeholder { color: var(--text-faint); }
+.bh-sel-caret {
+  flex: 0 0 auto;
+  font-size: 10px;
+  opacity: 0.65;
+  transition: transform 0.15s ease;
+}
+.bh-sel-btn[aria-expanded="true"] .bh-sel-caret { transform: rotate(180deg); }
+
+.bh-sel-pop {
+  /* See .bh-date-pop — placed via JS as position:fixed so the panel
+     doesn't get clipped by the modal-foot or any other scroll/clip
+     ancestor. min-width matches the trigger button (set by JS). */
+  position: fixed;
+  z-index: 100000;
+  min-width: 180px;
+  max-height: 320px;
+  overflow-y: auto;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  box-shadow: var(--shadow-lg);
+  padding: 6px;
+  animation: bh-date-pop-in 0.14s ease;
+}
+.bh-sel-row {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.bh-sel-row:hover { background: var(--bg-elev-2); }
+.bh-sel-row.is-selected { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+
+/* Audit "Load more" footer */
+.audit-load-more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 14px;
+  text-align: center;
+}
+
+@media (max-width: 500px) {
+  .bh-rt-toolbar button { width: 28px; height: 26px; font-size: 12px; }
+  .bh-rt-editor { min-height: 90px; padding: 8px 10px; }
+}
+
+/* ============================================================
+ * v2.5 — Global blocking loader
+ *
+ * Full-viewport overlay shown while an action is in flight. The
+ * pointer-events:all on the overlay catches every click so the
+ * user can't double-submit or click somewhere else mid-request.
+ * The spinner is a pure-CSS ring (no asset dep) so it works even
+ * before web fonts / images load.
+ * ============================================================ */
+.global-loader {
+  position: fixed;
+  inset: 0;
+  z-index: 99999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(8, 12, 22, 0.42);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  animation: bh-loader-fade 0.18s ease;
+}
+.global-loader-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 22px 30px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  box-shadow: var(--shadow-lg);
+  min-width: 180px;
+}
+.global-loader-spinner {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  border: 4px solid rgba(255, 255, 255, 0.10);
+  border-top-color: var(--accent);
+  animation: bh-loader-spin 0.9s linear infinite;
+}
+.global-loader-text {
+  font-size: 13px;
+  color: var(--text);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+@keyframes bh-loader-spin { to { transform: rotate(360deg); } }
+@keyframes bh-loader-fade { from { opacity: 0; } to { opacity: 1; } }
+
+/* When the loader is up, dim background interactions visually too. */
+body.is-loading { cursor: progress; }
+body.is-loading .topbar,
+body.is-loading .filter-bar,
+body.is-loading .kpi-strip,
+body.is-loading .bug-table,
+body.is-loading .modal-card,
+body.is-loading .events-grid,
+body.is-loading .events-detail-mode {
+  /* The overlay already blocks clicks; this just makes it visually
+     obvious that the page is busy. */
+  filter: saturate(0.85);
+}
+
+@media (max-width: 500px) {
+  .global-loader-card { min-width: 140px; padding: 18px 24px; }
+  .global-loader-spinner { width: 36px; height: 36px; }
+}
+
+/* ============================================================
+ * v2.5 — Comment admin actions (edit / delete)
+ * ============================================================ */
+.comment-head-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.comment-admin-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.comment-admin-actions .icon-btn {
+  padding: 4px 6px;
+  font-size: 13px;
+  opacity: 0.65;
+  transition: opacity 0.12s ease, background 0.12s ease;
+}
+.comment-admin-actions .icon-btn:hover { opacity: 1; background: var(--bg-elev-2); }
+
+.comment-edit-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 4px 0 2px;
+}
+.comment-edit-input {
+  width: 100%;
+  font-family: inherit;
+  font-size: 13px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elev);
+  color: var(--text);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+  resize: vertical;
+  min-height: 60px;
+}
+.comment-edit-input:focus { outline: none; border-color: var(--accent); box-shadow: var(--shadow-focus); }
+.comment-edit-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.comment-edit-actions .btn { padding: 6px 14px; font-size: 12px; }
+
+/* ============================================================
+ * v2.5 — Bug-level "Add attachment" uploader inside detail modal
+ * ============================================================ */
+.bug-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.bug-section-head h3 {
+  margin: 0;
+}
+.bug-attach-add-btn {
+  /* Same look as the comment composer's attach button — keep the UI
+     consistent so users don't have to learn a new control. */
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 9px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elev);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.bug-attach-add-btn:hover { border-color: var(--accent); background: var(--bg-elev-3); }
+.bug-attach-add-btn input[type="file"] { display: none; }
+.bug-attach-empty {
+  padding: 14px;
+  text-align: center;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  margin-bottom: 8px;
+}
+
+/* ============================================================
+ * v3.3 — Bug table responsive trim (additive to existing breakpoints)
+ *
+ * The auto-layout bug table (greedy title column) needs help on
+ * narrower viewports: hide low-value columns rather than letting
+ * the title shrink to nothing.
+ * ============================================================ */
+@media (max-width: 900px) {
+  .bug-table th.col-env, .bug-table td.col-env,
+  .bug-table th.col-att, .bug-table td.col-att,
+  .bug-table th.col-assignees, .bug-table td.col-assignees,
+  .bug-table th.col-priority, .bug-table td.col-priority { display: none; }
+  .bug-table td.col-project   { max-width: 130px; }
+  .bug-table td.col-event     { max-width: 140px; }
+}
+@media (max-width: 640px) {
+  .bug-table td.col-project   { max-width: 110px; }
+  .bug-table td.col-event     { max-width: 120px; }
+}

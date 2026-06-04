@@ -57,6 +57,23 @@ def client(app_env):
         yield c
 
 
+@pytest.fixture()
+def admin_client(client):
+    """A TestClient already signed up + logged in as the admin of a fresh
+    org. Tests using this fixture get a client whose session belongs to
+    the admin of "Acme Co" (org slug "acme-co"). The signup response is
+    attached to the client as `client.admin_me` so tests can pluck
+    `org_id`, `user_id`, `email` etc. without re-querying.
+    """
+    r = client.post("/api/auth/signup", json={
+        "organization_name": "Acme Co", "name": "Admin",
+        "email": "admin@acme.test", "password": "TestPass1!",
+    })
+    assert r.status_code == 201, r.text
+    client.admin_me = r.json()  # type: ignore[attr-defined]
+    return client
+
+
 def _signup(client, org, name, email, password="TestPass1!"):
     r = client.post("/api/auth/signup", json={
         "organization_name": org, "name": name,

@@ -44,6 +44,7 @@ from app.schemas import (
     ALLOWED_ENVIRONMENTS,
     ALLOWED_PRIORITIES,
     ALLOWED_STATUSES,
+    STATUSES_BY_TYPE,
 )
 
 # Configure logging EARLY so subsequent imports use the right format.
@@ -542,6 +543,7 @@ def health() -> dict[str, str]:
 def meta() -> dict[str, object]:
     return {
         "statuses": ALLOWED_STATUSES,
+        "statuses_by_type": STATUSES_BY_TYPE,
         "priorities": ALLOWED_PRIORITIES,
         "environments": ALLOWED_ENVIRONMENTS,
         "allow_public_signup": settings.ALLOW_PUBLIC_SIGNUP,

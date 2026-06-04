@@ -228,7 +228,7 @@ def get_event(
             selectinload(Bug.assignees),
         )
         .where(Bug.event_id == event_id)
-        .order_by(Bug.id.asc())
+        .order_by(Bug.updated_at.desc(), Bug.id.desc())
     )
     items = list(db.scalars(items_stmt).all())
     # One aggregate query for attachment counts — no N+1.

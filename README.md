@@ -5,9 +5,11 @@ PostgreSQL + a zero-framework JavaScript SPA. One Docker command to
 run, no external auth, no external file storage — attachments live
 in the database.
 
-**Current version: v2.7** — a quality, security, and stability release.
-**Zero schema changes** in v2.7; production databases are byte-for-byte
-untouched on every upgrade. See *[Live-data safety](#live-data-safety)*.
+**Current version: v2.7** — built on top of v2.6 (rich-text + custom
+calendar / select), v2.5 (admin-curated content + global loader +
+per-type status sets), and v2.4 (multi-tenant + tasks / requirements /
+events). **Zero schema changes from v2.4 onward**; production databases
+are byte-for-byte untouched on every upgrade. See *[Live-data safety](#live-data-safety)*.
 
 ---
 
@@ -57,8 +59,10 @@ byte-for-byte intact.
   `role="menu"`/`menuitemcheckbox`, `.invite-status-*` chips
   switched to solid backgrounds for WCAG-AA contrast, form labels
   associated to controls, autocomplete attributes added.
-- **Test suite expanded from 178 → 660 tests** (+482 new unit and
-  integration tests). Coverage on previously under-tested modules:
+- **Test suite expanded from 178 → 690 tests** (+512 new unit and
+  integration tests, including the v2.5 status-validation /
+  admin-curation suite and the v2.6 rich-text sanitiser + pagination
+  suite). Coverage on previously under-tested modules:
   classifier 0%→99%, memory 0%→97%, actions 15%→88%, llm 23%→71%,
   excel 27%→95%, nlu 30%→94%, executor 34%→84%, webhooks_delivery
   29%→93%, email_service 61%→98%, routes/sessions 21%→94%,
@@ -80,6 +84,129 @@ application-layer:
 
 **Upgrade procedure:** `git pull && docker compose up -d --build app`.
 Postgres is not restarted; the data volume is not touched.
+
+---
+
+## What's new in v2.6
+
+A **rich-text + UX consistency** release. **Zero schema changes** — every
+new control lands in the SPA, every new server check lands in
+`app/schemas.py` and `app/routes/bugs.py`. Existing production databases
+stay byte-for-byte intact.
+
+- **Rich-text editor for descriptions and comments.** Contenteditable
+  surface replaces plain textareas, with a toolbar (bold, italic,
+  underline, strikethrough, bullet / numbered lists, blockquote, code
+  block, image insert, clear-formatting). `Ctrl+B / Ctrl+I / Ctrl+U`
+  shortcuts. Backend allowlist sanitiser (`sanitize_html()` in
+  `app/schemas.py`) strips `<script>`, `<iframe>`, `javascript:` URLs,
+  on-event attributes — everything not in `_ALLOWED_TAGS` /
+  `_ALLOWED_ATTRS` — before persistence.
+- **Paste images directly into descriptions and comments.** `Ctrl+V`
+  (or `Cmd+V`) of a screenshot in the editor inlines it as a base64
+  `data:image/*` URL (cap ~14 MB). Toolbar 🖼 button opens a file
+  picker. Inline images survive the sanitiser; everything else gets
+  scrubbed.
+- **Custom calendar / date picker.** In-house popover (month nav,
+  Today shortcut, today / selected highlights) replaces native
+  `<input type="date">` everywhere, so the look is consistent across
+  Chrome, Firefox, Safari, Edge. Auto-flips above when the modal
+  doesn't leave room below.
+- **Custom styled dropdowns.** Every `<select>` in the bug modal
+  becomes a styled button + popover listbox matching the calendar
+  and multi-select filter dropdowns. Hover / focus / disabled states
+  unified. `MutationObserver` keeps the visible label in sync when
+  options change programmatically.
+- **Sidebar names are clickable to edit.** Click the colored swatch /
+  avatar to toggle the filter; click the name to open the project /
+  user edit modal (when permitted). The ✎ icon still works.
+- **Audit log loads more by default.** Default page raised from 300 →
+  **5 000 rows**, with a *Load older entries* button (server cap:
+  **10 000 per request**). New `offset` query param on `GET /api/audit`
+  pages the long tail.
+- **Newest-first ordering** for bug attachments, bug comments, and
+  event-detail item lists. (`Bug.comments.order_by` flipped to `desc`;
+  GET endpoints sort by `created_at.desc(), id.desc()`.)
+- **Per-item-type status validation finalised.** `PUT /api/bugs/{id}`
+  rejects any status change to a value not allowed for the effective
+  item type (e.g. `Task → "Not a Bug"`) with `400` and a clear
+  `Allowed: [...]` list. Existing rows with legacy statuses still
+  read; only setting an invalid status is blocked.
+- **Description / comment limits raised** to 1 MB / 200 KB to make
+  room for rich HTML + pasted screenshots, all behind the allowlist
+  sanitiser.
+- **Fully responsive.** Calendar popover, rich-editor toolbar, custom
+  dropdown panel, sidebar name pills all collapse to mobile-portrait
+  widths.
+
+### Database safety (v2.6)
+
+**No new columns, no schema migrations.** The only `models.py` edit is
+an ORM `order_by` flip on `Bug.comments`. `app/schemas.py` raises
+varchar-less Pydantic limits (the SQL columns are already `TEXT`).
+`app/main.py` exposes one new key (`statuses_by_type`) in `/api/meta`.
+The `bugtracker_pgdata` volume is never referenced by any v2.6 code
+change.
+
+---
+
+## What's new in v2.5
+
+A **content-curation + UX-consistency** release. **Zero schema
+changes**; existing databases byte-for-byte intact.
+
+- **Per-item-type status sets.** *"Not a Bug"*, *"Resolved"* and
+  *"Resolve Later"* only apply to Bugs; *"Approved"*, *"In Review"*,
+  *"Implemented"*, *"Rejected"*, *"Deferred"* only to Requirements;
+  *"Done"*, *"Blocked"*, *"Cancelled"* only to Tasks. *"New"* is the
+  one status shared by all three. Pre-v2.5 rows with now-invalid
+  statuses still render; only *moving to* an invalid status is
+  blocked (`400 Bad Request` with the allowed list).
+- **Comments and attachments are admin-curated.** Editing or
+  deleting any comment, and deleting any attachment (bug-level or
+  comment-scoped), is **admin-only**. The SPA hides ✎ / 🗑 for
+  non-admins; the API enforces `403` server-side. Creating comments
+  and uploading attachments stays open to anyone with edit
+  permission. Two new endpoints back the SPA affordances:
+  - `PUT /api/bugs/{bug_id}/comments/{comment_id}` — admin-only
+    edit; emits a `comment_edited` audit row.
+  - `DELETE /api/bugs/{bug_id}/comments/{comment_id}` — admin-only
+    delete; cascades attachments via the comment FK; emits a
+    `comment_deleted` audit row.
+- **Post-creation attachment uploader.** New 📎 *Add attachment*
+  button on the bug / requirement / task detail modal, next to the
+  Attachments heading. Stage multiple files, see thumbnail previews,
+  remove with ✕, click *Upload N file(s)*.
+- **Global blocking loader.** Full-page loader overlay on every
+  server action (create, update, delete, upload, password change,
+  session revoke, invitation flows, etc.) — blocks all input until
+  the request finishes, so double-submit is impossible and progress
+  is visible.
+- **Layout polish.** Events / Sessions / Audit / Invitations views
+  get a card-style controls bar (boxed bg-elev + border + radius +
+  shadow); bug table switches to percentage-based column widths
+  with min-widths so wide tables don't squish columns past
+  readability.
+- **Events list + event-detail filters.** Search box + date filter
+  + Clear button above the events grid (`#eventsFilterBar`); inside
+  the event detail, a search box + multi-select Status / Priority /
+  Assignee filter bar (`#eventDetailFilterBar`).
+- **Assignee chip name wrapping fix.** Long names like
+  *"Chinmaya Venkataraman"* truncate cleanly via
+  `.assignee-chip-name` instead of mid-word-breaking.
+- **Fully responsive.** Loader, comment admin actions, attach
+  uploader, events filters all collapse cleanly to mobile-portrait
+  sizes.
+
+### Database safety (v2.5)
+
+**Schema-clean.** Every change is application-layer:
+- Two new comment routes; permission tightening on attachment
+  delete; no column additions, no migrations.
+- Loader / attachment uploader / filter bars are SPA-only.
+- Status validation is Pydantic + route logic — purely runtime.
+- `deploy.sh` / `down.sh` / the `bugtracker_pgdata` volume —
+  unchanged.
 
 ---
 
