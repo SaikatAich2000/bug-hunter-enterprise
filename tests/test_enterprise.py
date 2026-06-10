@@ -624,6 +624,62 @@ class TestMetrics:
 
 
 # ---------------------------------------------------------------------------
+# Play Store compliance pages
+# ---------------------------------------------------------------------------
+class TestComplianceStaticPages:
+    """Google Play Console requires a publicly-hosted privacy policy URL
+    and a web-based account deletion path that works without the app.
+    These two routes satisfy both requirements; if either 404s, the next
+    Play Store submission gets rejected."""
+
+    @pytest.fixture()
+    def http(self, db_path, monkeypatch):
+        # Self-contained TestClient — these pages must work in any
+        # backend configuration, so we run them against a minimal env.
+        monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+        monkeypatch.setenv("EMAIL_BACKEND", "disabled")
+        monkeypatch.setenv("SESSION_SECRET", "test_secret_for_tests_only")
+        for mod in list(sys.modules):
+            if mod == "app" or mod.startswith("app."):
+                del sys.modules[mod]
+        from app.config import get_settings
+        get_settings.cache_clear()
+        from fastapi.testclient import TestClient
+        from app.main import app
+        with TestClient(app) as c:
+            yield c
+
+    def test_privacy_page_is_publicly_accessible(self, http):
+        r = http.get("/privacy")
+        assert r.status_code == 200
+        body = r.text
+        # Defensive: confirm we served the privacy page, not a redirect to
+        # the SPA or an empty file.
+        assert "Privacy Policy" in body
+        assert "delete-account" in body  # links to the deletion page
+
+    def test_privacy_page_html_alias_also_works(self, http):
+        # Play Console doesn't strip extensions when validating URLs.
+        r = http.get("/privacy.html")
+        assert r.status_code == 200
+
+    def test_delete_account_page_is_publicly_accessible(self, http):
+        r = http.get("/delete-account")
+        assert r.status_code == 200
+        body = r.text
+        assert "Delete your account" in body
+        # The page must show the actual deletion form, not just a "go to
+        # the app" instruction — Google's reviewers verify the form is
+        # functional.
+        assert 'name="email"' in body
+        assert 'name="password"' in body
+
+    def test_delete_account_html_alias_also_works(self, http):
+        r = http.get("/delete-account.html")
+        assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
 # Column-migration helper (ensures init_db is idempotent)
 # ---------------------------------------------------------------------------
 class TestColumnMigration:

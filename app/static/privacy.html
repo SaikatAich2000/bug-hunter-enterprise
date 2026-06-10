@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bug Hunter — Privacy Policy</title>
+  <link rel="icon" type="image/png" href="/static/favicon.png?v=__ASSET_VERSION__" />
+  <link rel="stylesheet" href="/static/styles.css?v=__ASSET_VERSION__" />
+  <style>
+    .policy-shell {
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 48px 24px 96px;
+      color: var(--text);
+    }
+    .policy-shell h1 { margin-bottom: 8px; }
+    .policy-shell .meta { color: var(--text-muted); margin-bottom: 32px; font-size: 0.9rem; }
+    .policy-shell h2 { margin-top: 32px; margin-bottom: 8px; }
+    .policy-shell p, .policy-shell li { line-height: 1.6; }
+    .policy-shell a { color: var(--accent); }
+    .policy-shell ul { padding-left: 22px; }
+    .back-link { display: inline-block; margin-top: 32px; }
+  </style>
+</head>
+<body>
+  <main class="policy-shell">
+    <h1>Privacy Policy</h1>
+    <p class="meta">Last updated: 10 June 2026 &middot; Bug Hunter v__APP_VERSION__</p>
+
+    <p>
+      Bug Hunter is a project &amp; bug-tracking app. This policy explains what
+      data we collect, why we collect it, who can see it, and how you can have it
+      deleted. We try to keep this short and plain-language.
+    </p>
+
+    <h2>1. What we collect</h2>
+    <ul>
+      <li><strong>Account info</strong> — your name, email address, and a one-way
+        hash of your password. You provide these when you sign up.</li>
+      <li><strong>Content you create</strong> — projects, bugs, comments, file
+        attachments, custom field values, and saved views.</li>
+      <li><strong>Session info</strong> — IP address and User-Agent at the time
+        of sign-in, used to power the &quot;My sessions&quot; screen so you can
+        revoke devices you don't recognise.</li>
+      <li><strong>Audit log</strong> — what you did (created a bug, assigned a
+        member, etc.) so administrators in your organisation can review activity.</li>
+      <li><strong>Push notification token</strong> — if you install the Android
+        app and grant notification permission, we store a Firebase Cloud
+        Messaging device token so we can notify you about assignments and
+        @mentions. Removed when you sign out.</li>
+    </ul>
+
+    <h2>2. Why we collect it</h2>
+    <ul>
+      <li>To run the app and let you do what you came here to do.</li>
+      <li>To send notifications you've explicitly opted in to receive.</li>
+      <li>To enforce security (rate-limiting, session integrity, audit trails).</li>
+    </ul>
+    <p>We do not sell your data. We do not show ads. We do not use your data to
+      train any machine-learning model.</p>
+
+    <h2>3. Who we share it with</h2>
+    <p>
+      Your data is shared only with the other members of <em>your</em>
+      organisation in Bug Hunter, according to the role permissions set by your
+      admin. Outside of that:
+    </p>
+    <ul>
+      <li><strong>Firebase Cloud Messaging</strong> (Google) — receives the
+        notification payload and device token so the OS can show the notification
+        on your phone. No other personal data is sent.</li>
+      <li><strong>Our hosting providers</strong> (Render for the app server, Neon
+        for the database) — host the data on our behalf. Both are US-based and
+        encrypt data in transit and at rest.</li>
+    </ul>
+    <p>We do not sell or share data with advertisers, data brokers, or analytics
+      vendors.</p>
+
+    <h2>4. How long we keep it</h2>
+    <p>
+      We keep your content as long as your account exists. Audit log rows are
+      retained for one year then automatically purged. When you delete your
+      account (see below), everything is removed within 30 days.
+    </p>
+
+    <h2>5. Deleting your account</h2>
+    <p>You can delete your account at any time:</p>
+    <ul>
+      <li><strong>In the app</strong>: Settings &rarr; Delete account.</li>
+      <li><strong>On the web</strong>:
+        <a href="/delete-account">https://www.bughunter.co.in/delete-account</a></li>
+    </ul>
+    <p>
+      Deletion is permanent and cannot be undone. Bugs you reported keep their
+      content (so the rest of your team isn't disrupted) but your name on them is
+      anonymised. If you are the sole admin of an organisation, you'll need to
+      promote another member to admin before you can delete yourself.
+    </p>
+
+    <h2>6. Your other rights</h2>
+    <p>You can download a JSON copy of everything we have associated with your
+      account at any time: Settings &rarr; Account &rarr; Export my data. The
+      download is a single JSON file containing your profile, bugs, comments,
+      attachments metadata, sessions, and audit entries.</p>
+
+    <h2>7. Security</h2>
+    <p>
+      All connections use HTTPS. Passwords are hashed with bcrypt. Sessions use
+      signed cookies with the <code>Secure</code> and <code>SameSite=Lax</code>
+      flags. Mutating requests require a CSRF double-submit token.
+    </p>
+
+    <h2>8. Children</h2>
+    <p>Bug Hunter is intended for use by adults in professional contexts. We do
+      not knowingly collect data from anyone under 18.</p>
+
+    <h2>9. Contact</h2>
+    <p>
+      For any privacy question, contact:
+      <a href="mailto:privacy@bughunter.co.in">privacy@bughunter.co.in</a>.
+    </p>
+
+    <p class="back-link"><a href="/">&larr; Back to Bug Hunter</a></p>
+  </main>
+</body>
+</html>

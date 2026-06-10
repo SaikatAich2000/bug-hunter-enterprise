@@ -555,6 +555,22 @@ def reset_page() -> HTMLResponse:
     return _serve_html("reset.html")
 
 
+# Privacy policy and web-based account deletion are required by the
+# Google Play Console for any app that has user accounts: deletion must
+# be doable WITHOUT installing the app, and a publicly-hosted privacy
+# policy URL must be provided in the store listing.
+@app.get("/privacy.html", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/privacy", response_class=HTMLResponse, include_in_schema=False)
+def privacy_page() -> HTMLResponse:
+    return _serve_html("privacy.html")
+
+
+@app.get("/delete-account.html", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/delete-account", response_class=HTMLResponse, include_in_schema=False)
+def delete_account_page() -> HTMLResponse:
+    return _serve_html("delete-account.html")
+
+
 # Serve the PWA service worker from the root path so its scope can
 # cover the entire origin. (Service workers are restricted to the
 # scope at-or-below the URL they're served from; /static/sw.js would

@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bug Hunter — Delete account</title>
+  <link rel="icon" type="image/png" href="/static/favicon.png?v=__ASSET_VERSION__" />
+  <link rel="stylesheet" href="/static/styles.css?v=__ASSET_VERSION__" />
+</head>
+<body class="auth-body">
+  <main class="auth-shell">
+    <div class="auth-card">
+      <div class="auth-brand">
+        <h1>Delete your account</h1>
+        <p class="auth-tagline">This is permanent. There is no undo.</p>
+      </div>
+
+      <form id="deleteForm" class="auth-form" novalidate>
+        <div id="deleteAlert" class="auth-alert" hidden></div>
+        <p style="margin: 4px 0 12px; color: var(--text-muted); font-size: 0.95rem; line-height: 1.5;">
+          We'll sign you in, confirm your password, and delete your account
+          immediately. Bugs you reported will stay so your team isn't disrupted,
+          but your name on them will be anonymised.
+        </p>
+        <label class="field">
+          <span>Email <em>*</em></span>
+          <input name="email" type="email" required maxlength="200" autocomplete="email" autofocus />
+        </label>
+        <label class="field">
+          <span>Password <em>*</em></span>
+          <input name="password" type="password" required minlength="1" maxlength="200" autocomplete="current-password" />
+        </label>
+        <button type="submit" class="btn danger auth-submit" id="deleteSubmit">
+          Permanently delete my account
+        </button>
+        <div class="auth-links">
+          <a href="/">Cancel and go back</a>
+        </div>
+      </form>
+    </div>
+  </main>
+
+  <script>
+    // Self-contained: no external JS file because this page is only ever
+    // reached by users who want to delete their account from a browser
+    // (Google Play policy requires a web-accessible deletion path).
+    (function () {
+      var form = document.getElementById('deleteForm');
+      var alertBox = document.getElementById('deleteAlert');
+      var submit = document.getElementById('deleteSubmit');
+
+      function showAlert(message, isSuccess) {
+        alertBox.textContent = message;
+        alertBox.classList.toggle('success', !!isSuccess);
+        alertBox.classList.toggle('error', !isSuccess);
+        alertBox.hidden = false;
+      }
+
+      function readCookie(name) {
+        var prefix = name + '=';
+        var parts = document.cookie.split(';');
+        for (var i = 0; i < parts.length; i++) {
+          var c = parts[i].trim();
+          if (c.indexOf(prefix) === 0) return decodeURIComponent(c.substring(prefix.length));
+        }
+        return '';
+      }
+
+      // Seed the CSRF cookie up front. /api/health is one of the routes
+      // the CSRFMiddleware issues bh_csrf on; without this the DELETE
+      // call below would 403.
+      fetch('/api/health', { credentials: 'same-origin' }).catch(function () { /* non-fatal */ });
+
+      form.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        alertBox.hidden = true;
+        submit.disabled = true;
+        submit.textContent = 'Deleting...';
+
+        var data = new FormData(form);
+        var email = (data.get('email') || '').toString().trim();
+        var password = (data.get('password') || '').toString();
+
+        if (!email || !password) {
+          showAlert('Email and password are both required.', false);
+          submit.disabled = false;
+          submit.textContent = 'Permanently delete my account';
+          return;
+        }
+
+        // Step 1: log in. Login is CSRF-exempt so we don't need a header.
+        fetch('/api/auth/login', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify({ email: email, password: password }),
+        })
+          .then(function (res) {
+            return res.json().then(function (body) { return { status: res.status, body: body }; });
+          })
+          .then(function (loginRes) {
+            if (loginRes.status !== 200) {
+              throw new Error(
+                (loginRes.body && loginRes.body.detail) || 'Sign-in failed. Check your email and password.'
+              );
+            }
+            if (loginRes.body && loginRes.body.pending_token) {
+              // 2FA enabled — we don't support 2FA delete from the web in v2.9.
+              // Direct the user to the app, which can complete TOTP.
+              throw new Error(
+                'Your account has two-factor authentication enabled. Please delete it from the Android app: Settings → Delete account.'
+              );
+            }
+
+            // Step 2: send the DELETE with the CSRF header.
+            var csrf = readCookie('bh_csrf');
+            return fetch('/api/auth/account', {
+              method: 'DELETE',
+              credentials: 'same-origin',
+              headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'X-CSRF-Token': csrf,
+              },
+              body: JSON.stringify({ password: password }),
+            });
+          })
+          .then(function (res) {
+            if (res.status === 204) {
+              showAlert(
+                'Your account has been deleted. Your data will be fully removed within 30 days. Thanks for using Bug Hunter.',
+                true
+              );
+              form.querySelectorAll('input, button').forEach(function (el) { el.disabled = true; });
+              return;
+            }
+            return res.json().then(function (body) {
+              throw new Error((body && body.detail) || ('Delete failed (HTTP ' + res.status + ').'));
+            });
+          })
+          .catch(function (err) {
+            showAlert(err && err.message ? err.message : 'Something went wrong.', false);
+            submit.disabled = false;
+            submit.textContent = 'Permanently delete my account';
+          });
+      });
+    })();
+  </script>
+</body>
+</html>
