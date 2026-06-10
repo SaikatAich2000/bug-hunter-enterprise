@@ -32,7 +32,7 @@ from app.observability import (
 from app.chatbot.router import router as chatbot_router
 from app.routes import (
     audit, auth, bugs, events, invitations, memberships, organizations,
-    projects, sessions, stats, users,
+    projects, reports, sessions, stats, users,
     webhooks as webhooks_route,
     saved_views as saved_views_route,
     branding as branding_route,
@@ -59,6 +59,7 @@ logger = logging.getLogger("bug_hunter")
 # Asset version — recomputed on every server start.
 # ---------------------------------------------------------------------------
 ASSET_VERSION_PLACEHOLDER = "__ASSET_VERSION__"
+APP_VERSION_PLACEHOLDER = "__APP_VERSION__"
 
 
 def _compute_asset_version(static_dir: Path) -> str:
@@ -486,6 +487,7 @@ app.mount("/static", StaticFiles(directory=settings.STATIC_DIR), name="static")
 def _serve_html(filename: str) -> HTMLResponse:
     body = (settings.STATIC_DIR / filename).read_text(encoding="utf-8")
     body = body.replace(ASSET_VERSION_PLACEHOLDER, app.state.asset_version)
+    body = body.replace(APP_VERSION_PLACEHOLDER, settings.APP_VERSION)
     return HTMLResponse(body)
 
 
@@ -605,6 +607,7 @@ app.include_router(memberships.router)
 app.include_router(bugs.router)
 app.include_router(events.router)
 app.include_router(stats.router)
+app.include_router(reports.router)
 app.include_router(audit.router)
 app.include_router(sessions.router)
 app.include_router(webhooks_route.router)

@@ -1013,6 +1013,49 @@ _STATS_RE = re.compile(
     r"\b(stat|stats|statistics|summary|overview|dashboard|kpi|metrics|analytics)\b",
     re.IGNORECASE,
 )
+# Reports intent — explicit "report" / "throughput" / "pending" / Jira-style
+# wording. Stronger signal than the existing stats intent so it wins
+# precedence in the classifier.
+_REPORT_RE = re.compile(
+    r"\b(report|reporting|throughput|pending\s+(?:items|bugs|snapshot)|"
+    r"aging\s+report|breakdown\s+(?:by|of)|time\s+to\s+resolution|"
+    r"who\s+(?:resolved|closed|fixed|solved)|who\s+resolved\s+how\s+many|"
+    r"distribution\s+(?:by|of))\b",
+    re.IGNORECASE,
+)
+_REPORT_KEY_KEYWORDS: list[tuple[str, str]] = [
+    ("throughput",            r"\bthroughput\b"),
+    ("throughput",            r"\bwho\s+(?:resolved|closed|fixed|solved)\b"),
+    ("throughput",            r"\bresolved\s+(?:by|how\s+many)\b"),
+    ("throughput",            r"\bsolved\s+(?:how\s+many|last\s+week)\b"),
+    ("pending_snapshot",      r"\bpending\b"),
+    ("pending_snapshot",      r"\bstill\s+open\b"),
+    ("pending_snapshot",      r"\bnot\s+(?:yet\s+)?(?:resolved|closed|fixed|done)\b"),
+    ("aging",                 r"\baging\b"),
+    ("aging",                 r"\boldest\s+(?:bug|item|tickets|open)\b"),
+    ("aging",                 r"\blongest\s+(?:open|running)\b"),
+    ("time_to_resolution",    r"\btime\s+to\s+resolution\b"),
+    ("time_to_resolution",    r"\bhow\s+long\s+(?:do|did)\s+(?:bugs?|issues?|items?)\s+take\b"),
+    ("status_distribution",   r"\bdistribution\s+(?:by\s+)?status\b"),
+    ("status_distribution",   r"\bby\s+status\b"),
+    ("priority_distribution", r"\bdistribution\s+(?:by\s+)?priority\b"),
+    ("priority_distribution", r"\bby\s+priority\b"),
+    ("project_breakdown",     r"\b(?:breakdown\s+(?:by\s+)?project|by\s+project)\b"),
+    ("timeline",              r"\b(?:created\s+vs\s+resolved|timeline|trend(?:line)?)\b"),
+]
+
+
+def pick_report_key(message: str) -> Optional[str]:
+    """Return the report key the user wants, or None to fall back to the
+    universal item_detail export."""
+    if not message:
+        return None
+    for key, pat in _REPORT_KEY_KEYWORDS:
+        if re.search(pat, message, re.IGNORECASE):
+            return key
+    return None
+
+
 _RECENT_RE = re.compile(
     r"\brecent(\s+activity)?|audit\s+(?:log|trail)|what\s+happened|history\b",
     re.IGNORECASE,
@@ -1223,6 +1266,10 @@ def _classify_final_intent(msg: str, pq: ParsedQuery, ctx: Context) -> str:
         return "list_users"
     if _is_list_projects(msg_lower, pq):
         return "list_projects"
+    # Reports beat stats / list_bugs — they're a stronger, more specific
+    # signal ("report" / "throughput" / "pending snapshot" etc.).
+    if _REPORT_RE.search(msg):
+        return "report"
     if _STATS_RE.search(msg):
         return "stats"
     if _RECENT_RE.search(msg):
@@ -1257,6 +1304,14 @@ def parse(message: str, ctx: Context, now: Optional[datetime] = None) -> ParsedQ
     _populate_projects(msg, pq, ctx)
     _populate_role_filter(msg, pq)
     _populate_output_prefs(msg, pq)
+
+    # Reports short-circuit — has to run BEFORE _detect_action because a
+    # "report of who resolved how many bugs last week" otherwise gets
+    # eaten by the status-change action detector (verb "resolved") and
+    # turned into an action_set_status without a bug id.
+    if _REPORT_RE.search(msg):
+        pq.intent = "report"
+        return pq
 
     # Write-intent detection — verbs + populated entity fields.
     action_kind = _detect_action(msg, pq)
@@ -1313,6 +1368,7 @@ __all__ = [
     "TimeWindow",
     "parse",
     "describe_filters",
+    "pick_report_key",
     "STATUSES_CANONICAL",
     "PRIORITIES_CANONICAL",
     "ENVIRONMENTS_CANONICAL",

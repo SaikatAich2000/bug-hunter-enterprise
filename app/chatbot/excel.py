@@ -153,6 +153,16 @@ def stage_workbook(rows: list[dict[str, Any]], filename: str,
     Returns (token, size_bytes). Raises ExcelGenerationError on failure.
     """
     payload = _build_workbook(rows, description)
+    return stage_bytes(payload, filename)
+
+
+def stage_bytes(payload: bytes, filename: str) -> tuple[str, int]:
+    """Stash already-built xlsx bytes under a fresh download token.
+
+    Lets callers that built the workbook elsewhere (e.g. the reports
+    engine in app/reports/xlsx.py) reuse the chat router's download
+    infrastructure without rebuilding the cache themselves.
+    """
     token = secrets.token_urlsafe(20)
     expires = time.time() + _TTL_SECONDS
     with _cache_lock:
@@ -193,6 +203,7 @@ def clear_all_for_test() -> None:
 __all__ = [
     "ExcelGenerationError",
     "stage_workbook",
+    "stage_bytes",
     "fetch_staged",
     "OPENPYXL_AVAILABLE",
 ]

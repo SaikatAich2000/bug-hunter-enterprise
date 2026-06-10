@@ -239,54 +239,6 @@ def _get_bug_or_404(db: Session, bug_id: int, user: User) -> Bug:
 
 
 # ---------------------------------------------------------------------------
-# CSV export
-# ---------------------------------------------------------------------------
-@router.get("/export.csv")
-def export_bugs_csv(
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> Response:
-    pids = accessible_project_ids(db, user)
-    rows = []
-    if pids:
-        rows = list(db.scalars(
-            _eager_bug().where(Bug.project_id.in_(pids)).order_by(Bug.id.asc())
-        ).all())
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerow([
-        "id", "project", "project_key", "title", "status", "priority", "environment",
-        "reporter_name", "reporter_email", "assignees", "due_date",
-        "created_at", "updated_at", "description",
-    ])
-    for b in rows:
-        # G2 (v2.8): every cell goes through _csv_safe so a bug title
-        # that starts with `=` / `+` / `-` / `@` can't execute as a
-        # formula when the export is opened in Excel.
-        writer.writerow([
-            _csv_safe(b.id),
-            _csv_safe(b.project.name if b.project else ""),
-            _csv_safe(b.project.key if b.project else ""),
-            _csv_safe(b.title),
-            _csv_safe(b.status),
-            _csv_safe(b.priority),
-            _csv_safe(b.environment),
-            _csv_safe(b.reporter.name if b.reporter else ""),
-            _csv_safe(b.reporter.email if b.reporter else ""),
-            _csv_safe("; ".join(f"{a.name} <{a.email}>" for a in b.assignees)),
-            _csv_safe(b.due_date or ""),
-            _csv_safe(b.created_at.isoformat()),
-            _csv_safe(b.updated_at.isoformat()),
-            _csv_safe(b.description.replace("\n", " ").replace("\r", " ")),
-        ])
-    return Response(
-        content=buf.getvalue(),
-        media_type="text/csv",
-        headers={"Content-Disposition": 'attachment; filename="bugs.csv"'},
-    )
-
-
-# ---------------------------------------------------------------------------
 # List
 # ---------------------------------------------------------------------------
 def _normalize_choice_list(values: Optional[list[str]], allowed: list[str], label: str) -> list[str]:

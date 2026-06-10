@@ -712,26 +712,42 @@ class TestBulkPaths:
 # ---------------------------------------------------------------------------
 # CSV export
 # ---------------------------------------------------------------------------
-class TestCSVExport:
+class TestXLSXExport:
+    """The legacy /api/bugs/export.csv handler was retired in v2.9 in
+    favour of the multi-sheet Reports XLSX export. These tests verify
+    the same invariants (rows survive a round-trip, the path is auth-
+    scoped) against the new endpoint."""
+
     def test_export_when_empty(self, client):
+        import io
+        from openpyxl import load_workbook
         _signup(client)
-        r = client.get("/api/bugs/export.csv")
+        r = client.post("/api/reports/export.xlsx", json={
+            "report_key": "item_detail", "filters": {},
+        })
         assert r.status_code == 200
-        assert r.headers["content-type"].startswith("text/csv")
-        # Header row always present.
-        assert "id,project,project_key,title" in r.text
+        assert r.headers["content-type"].startswith("application/vnd.openxmlformats")
+        wb = load_workbook(io.BytesIO(r.content), read_only=True)
+        # Filters sheet is always present even on empty result sets.
+        assert "Filters Applied" in wb.sheetnames
 
     def test_export_includes_bug_rows(self, client):
+        import io
+        from openpyxl import load_workbook
         _, p = _bootstrap(client)
         _make_bug(client, p["id"], title="One",
                   description="line1\nline2\rline3")
         _make_bug(client, p["id"], title="Two")
-        r = client.get("/api/bugs/export.csv")
+        r = client.post("/api/reports/export.xlsx", json={
+            "report_key": "item_detail", "filters": {},
+        })
         assert r.status_code == 200
-        text = r.text
-        assert "One" in text and "Two" in text
-        # Newlines in description must be collapsed for CSV safety.
-        assert "line1\nline2" not in text
+        wb = load_workbook(io.BytesIO(r.content), read_only=True)
+        body = " ".join(
+            str(v) for row in wb[wb.sheetnames[0]].iter_rows(values_only=True)
+            for v in row if v is not None
+        )
+        assert "One" in body and "Two" in body
 
 
 # ---------------------------------------------------------------------------

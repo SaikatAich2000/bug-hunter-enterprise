@@ -43,6 +43,7 @@ from .nlu import (
     OPEN_STATUSES,
     describe_filters,
     parse,
+    pick_report_key,
 )
 
 
@@ -897,6 +898,210 @@ def _build_export_response(rows: list[Bug], pq: ParsedQuery, total: int, cap: in
 
 
 # ---------------------------------------------------------------------------
+# Reports — delegates to app.reports.engine, scoped to the actor's org.
+# Same engine the REST /api/reports/* endpoints drive.
+# ---------------------------------------------------------------------------
+_REPORTS_ROLE_ALLOWED = frozenset({"admin", "manager"})
+
+
+def _filters_from_parsed(pq: ParsedQuery) -> Any:
+    """Translate a Sleuth ParsedQuery into a reports-engine Filters."""
+    from app.reports import Filters
+    date_from = None
+    date_to = None
+    if pq.time_window:
+        if pq.time_window.start:
+            date_from = pq.time_window.start.date()
+        if pq.time_window.end:
+            date_to = pq.time_window.end.date()
+    item_types: list[str] = []
+    msg_l = (pq.raw_message or "").lower()
+    type_keywords = (
+        ("Bug",         ("bug", "defect")),
+        ("Requirement", ("requirement",)),
+        ("Task",        ("task",)),
+    )
+    for canonical, needles in type_keywords:
+        if any(n in msg_l for n in needles):
+            item_types.append(canonical)
+    return Filters(
+        date_from=date_from,
+        date_to=date_to,
+        item_types=item_types,
+        statuses=list(pq.statuses),
+        priorities=list(pq.priorities),
+        environments=list(pq.environments),
+        project_ids=list(pq.project_ids),
+        assignee_ids=list(pq.assignee_ids),
+        reporter_ids=list(pq.reporter_ids),
+        text_search=pq.text_search,
+        label=f"Sleuth: {pq.raw_message[:80]}" if pq.raw_message else "",
+    )
+
+
+def _report_row_to_table_row(row: dict, columns) -> list[str]:
+    out: list[str] = []
+    for col in columns:
+        v = row.get(col.key, "")
+        if v is None:
+            out.append("")
+        elif isinstance(v, (int, float)):
+            out.append(str(v))
+        else:
+            s = str(v)
+            out.append(s if len(s) <= 80 else s[:77] + "…")
+    return out
+
+
+def _stage_report_xlsx(result, report_key: str) -> tuple[str, int, str]:
+    from app.chatbot import excel as _excel
+    from app.reports import build_workbook_bytes
+    from app.reports.xlsx import XlsxBuildError
+    try:
+        payload = build_workbook_bytes(result)
+    except XlsxBuildError as exc:
+        raise _excel.ExcelGenerationError(str(exc)) from exc
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    filename = f"report-{report_key}-{stamp}.xlsx"
+    token, size = _excel.stage_bytes(payload, filename)
+    return token, size, filename
+
+
+def _report_forbidden_response() -> Response:
+    return Response(
+        blocks=[Block("text", {"text":
+            "Reports are limited to managers and admins. Ask one of "
+            "them to run this for you, or use **list bugs** / "
+            "**show stats** for the lighter views available to you"})],
+        summary="Reports forbidden",
+        intent="report_forbidden",
+    )
+
+
+def _report_empty_response(result) -> Response:
+    return Response(
+        blocks=[Block("text", {"text":
+            f"**{result.report_label}** — no rows matched your "
+            f"filters. Try widening the date range or removing a "
+            f"filter and ask again"})],
+        summary=f"0 rows · {result.report_label}",
+        intent="report",
+    )
+
+
+def _format_summary_extras(s: dict) -> str:
+    if not s:
+        return ""
+    parts: list[str] = []
+    if "total_resolved" in s:
+        parts.append(
+            f"**Total resolved**: {s['total_resolved']} "
+            f"across {s.get('user_count', 0)} user(s)"
+        )
+    if "total_items" in s:
+        parts.append(f"**Total items**: {s['total_items']}")
+    if "total_created" in s and "total_resolved" in s and "user_count" not in s:
+        parts.append(
+            f"**Created**: {s['total_created']} · "
+            f"**Resolved**: {s['total_resolved']} · "
+            f"**Net**: {s.get('net', 0)}"
+        )
+    if "average_hours" in s:
+        parts.append(
+            f"**Average**: {s['average_hours']}h · "
+            f"**Median**: {s.get('median_hours', 0)}h · "
+            f"**P95**: {s.get('p95_hours', 0)}h"
+        )
+    return "\n\n".join(parts)
+
+
+def _build_report_preview_text(result, filters, preview_rows_count: int) -> str:
+    text = (
+        f"**{result.report_label}** — {result.total} row"
+        f"{'' if result.total == 1 else 's'}"
+    )
+    if filters.date_from or filters.date_to:
+        text += (
+            f" · {filters.date_from or 'earliest'} → "
+            f"{filters.date_to or 'now'}"
+        )
+    extras = _format_summary_extras(result.summary)
+    if extras:
+        text += "\n\n" + extras
+    if result.total > preview_rows_count:
+        text += (
+            f"\n\nPreview shows the first {preview_rows_count} row"
+            f"{'' if preview_rows_count == 1 else 's'} — "
+            f"download the spreadsheet for the full set"
+        )
+    return text
+
+
+def _try_stage_file_block(result, report_key: str) -> Optional[Block]:
+    try:
+        token, size, filename = _stage_report_xlsx(result, report_key)
+    except Exception as exc:   # noqa: BLE001 — chat must never crash on a file build
+        import logging
+        logging.getLogger("bug_hunter.sleuth").exception(
+            "Sleuth report XLSX build failed: %s", exc,
+        )
+        return None
+    return Block("file", {
+        "filename": filename,
+        "size_bytes": size,
+        "download_token": token,
+        "row_count": result.total,
+    })
+
+
+def _handle_report(db: Session, pq: ParsedQuery, actor: User) -> Response:
+    """Run a report engine query, scoped to the actor's org, and reply
+    with a summary table + downloadable XLSX block."""
+    if actor.role not in _REPORTS_ROLE_ALLOWED:
+        return _report_forbidden_response()
+
+    report_key = pick_report_key(pq.raw_message or "") or "item_detail"
+    from app.reports import REPORT_CATALOG, run_report
+    meta = REPORT_CATALOG.get(report_key, {})
+    filters = _filters_from_parsed(pq)
+    try:
+        # Enterprise: scope to actor.org_id — engine refuses cross-org rows.
+        result = run_report(report_key, filters, db, org_id=actor.org_id)
+    except (ValueError, KeyError) as exc:
+        return Response(
+            blocks=[Block("text", {"text": f"I couldn't run that report: {exc}"})],
+            summary="Report error",
+            intent="report_error",
+        )
+
+    if result.total == 0:
+        return _report_empty_response(result)
+
+    preview_rows = result.rows[:15]
+    blocks: list[Block] = [
+        Block("text", {"text": _build_report_preview_text(result, filters, len(preview_rows))}),
+        Block("table", {
+            "headers": [c.label for c in result.columns],
+            "rows": [_report_row_to_table_row(r, result.columns) for r in preview_rows],
+        }),
+    ]
+    file_block = _try_stage_file_block(result, report_key)
+    if file_block is not None:
+        blocks.append(file_block)
+    else:
+        blocks.append(Block("text", {"text":
+            "(Couldn't build the spreadsheet right now — use the "
+            "**Reports** sidebar to download it manually)"}))
+
+    label = meta.get("label", result.report_label)
+    return Response(
+        blocks=blocks,
+        summary=f"Report: {label} ({result.total})",
+        intent="report",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Public entry
 # ---------------------------------------------------------------------------
 
@@ -1136,6 +1341,8 @@ def _dispatch_read_intent(intent: str, db: Session, pq, actor: User, ctx) -> Opt
         return _handle_recent_activity(db, pq, actor)
     if intent == "list_bugs":
         return _handle_list_bugs(db, pq, actor, ctx)
+    if intent == "report":
+        return _handle_report(db, pq, actor)
     return None
 
 

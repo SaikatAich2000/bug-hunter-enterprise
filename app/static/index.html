@@ -53,6 +53,7 @@
         <button class="nav-btn active" data-view="list"><span class="nav-icon">📋</span><span>Work Items</span></button>
         <button class="nav-btn" data-view="events"><span class="nav-icon">📅</span><span>Events</span></button>
         <button class="nav-btn" data-view="analytics"><span class="nav-icon">📊</span><span>Analytics</span></button>
+        <button class="nav-btn" data-view="reports" data-needs-role="manager"><span class="nav-icon">📈</span><span>Reports</span></button>
         <button class="nav-btn" data-view="invitations" data-needs-role="manager"><span class="nav-icon">📨</span><span>Invitations</span></button>
         <button class="nav-btn" data-view="audit" data-needs-role="manager"><span class="nav-icon">🛡</span><span>Audit Trail</span></button>
         <button class="nav-btn" data-view="sessions" data-needs-role="admin"><span class="nav-icon">🔐</span><span>Sessions</span></button>
@@ -91,7 +92,6 @@
       </section>
 
       <div class="side-footer">
-        <button class="link-btn" id="exportCsvBtn">⬇ Export CSV</button>
         <button class="link-btn" id="themeBtn"><svg class="theme-icon" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M 8 2 A 6 6 0 0 0 8 14 Z" fill="#0b1020"/><path d="M 8 2 A 6 6 0 0 1 8 14 Z" fill="#ffffff"/><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1" stroke-opacity="0.55"/><line x1="8" y1="2" x2="8" y2="14" stroke="currentColor" stroke-width="0.6" stroke-opacity="0.4"/></svg> Theme</button>
       </div>
     </aside>
@@ -365,6 +365,91 @@
           <button class="btn ghost" id="auditRefreshBtn">Refresh</button>
         </div>
         <div class="audit-list" id="auditList"></div>
+      </section>
+
+      <!-- VIEW: Reports (manager/admin only)
+           Jira-style reporting workbench. Pick a type, set filters,
+           Run, then Download XLSX. Same engine as Sleuth's "report"
+           intent so numbers match. -->
+      <section class="view" id="viewReports" hidden>
+        <div class="page-intro reports-intro">
+          <div class="page-intro-icon" aria-hidden="true">📈</div>
+          <div class="page-intro-text">
+            <h2>Reports</h2>
+            <p>Build a report from any combination of filters, view it inline, and download the full data as Excel — including every column, like running a SQL query against the system</p>
+          </div>
+        </div>
+        <div class="reports-shell">
+          <aside class="reports-side" aria-label="Report configuration">
+            <div class="reports-side-scroll">
+              <div class="reports-side-section">
+                <label class="field">
+                  <span>Report type</span>
+                  <select id="reportTypeSelect" data-bh-select aria-label="Report type"></select>
+                </label>
+                <p class="reports-help" id="reportTypeHelp"></p>
+              </div>
+              <div class="reports-side-section">
+                <h3>Filters</h3>
+                <div class="reports-side-row">
+                  <label class="field">
+                    <span>Date from</span>
+                    <input id="reportDateFrom" type="date" />
+                  </label>
+                  <label class="field">
+                    <span>Date to</span>
+                    <input id="reportDateTo" type="date" />
+                  </label>
+                </div>
+                <div class="reports-side-row reports-side-row-presets">
+                  <button class="btn ghost btn-sm" id="reportPresetThisWeekBtn" type="button">Last 7 days</button>
+                  <button class="btn ghost btn-sm" id="reportPresetThisMonthBtn" type="button">Last 30 days</button>
+                </div>
+                <fieldset class="field"><legend>Item types</legend><div class="reports-chips" id="reportItemTypes"></div></fieldset>
+                <fieldset class="field"><legend>Statuses</legend><div class="reports-chips" id="reportStatuses"></div></fieldset>
+                <fieldset class="field"><legend>Priorities</legend><div class="reports-chips" id="reportPriorities"></div></fieldset>
+                <fieldset class="field"><legend>Environments</legend><div class="reports-chips" id="reportEnvironments"></div></fieldset>
+                <fieldset class="field"><legend>Projects</legend><div class="reports-chips reports-chips-scroll" id="reportProjects"></div></fieldset>
+                <fieldset class="field"><legend>Assignees</legend><div class="reports-chips reports-chips-scroll" id="reportAssignees"></div></fieldset>
+                <fieldset class="field"><legend>Reporters</legend><div class="reports-chips reports-chips-scroll" id="reportReporters"></div></fieldset>
+                <label class="field">
+                  <span>Title / description contains</span>
+                  <input id="reportTextSearch" type="search" maxlength="400" placeholder="Free-text match…" autocomplete="off" />
+                </label>
+                <label class="field check-row">
+                  <input type="checkbox" id="reportIncludeNotABug" />
+                  <span>Include “Not a Bug” items</span>
+                </label>
+                <label class="field">
+                  <span>Run label (optional)</span>
+                  <input id="reportRunLabel" type="text" maxlength="120" placeholder="e.g. Q2 review pull" autocomplete="off" />
+                </label>
+              </div>
+            </div>
+            <div class="reports-side-actions">
+              <button class="btn primary" id="reportRunBtn" type="button">▶ Run report</button>
+              <button class="btn ghost" id="reportClearBtn" type="button">Reset filters</button>
+            </div>
+          </aside>
+          <section class="reports-main" aria-label="Report results">
+            <div class="reports-result-head">
+              <div>
+                <h3 id="reportResultTitle">Choose a report to begin</h3>
+                <p class="muted small" id="reportResultMeta"></p>
+              </div>
+              <button class="btn primary" id="reportDownloadBtn" type="button" disabled>📥 Download XLSX</button>
+            </div>
+            <div class="reports-summary" id="reportSummary" hidden></div>
+            <div class="reports-table-scroll">
+              <table class="bug-table reports-table" id="reportTable" aria-label="Report results">
+                <thead id="reportTableHead"><tr><th scope="col">Run a report to populate this table</th></tr></thead>
+                <tbody id="reportTableBody"></tbody>
+              </table>
+            </div>
+            <div class="reports-empty" id="reportEmpty" hidden><p>No rows match your filters. Try widening the date range or removing a filter</p></div>
+            <div class="reports-truncated" id="reportTruncated" hidden><p>Showing the first <span id="reportTruncatedCount">1000</span> rows. Download the XLSX for the full set</p></div>
+          </section>
+        </div>
       </section>
 
       <!-- VIEW: Sessions (admin-only) -->
