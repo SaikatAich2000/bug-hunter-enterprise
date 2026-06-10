@@ -807,3 +807,80 @@ class BugCustomValue(Base):
         Index("idx_bcv_bug", "bug_id"),
         Index("idx_bcv_field", "field_id"),
     )
+
+
+# ---------------------------------------------------------------------------
+# DeviceToken (v2.10) — FCM push registration
+#
+# One row per (user, FCM registration token). A user may have multiple
+# tokens (phone + tablet + reinstalled-and-not-yet-cleaned-up tokens),
+# and a single physical device may rotate tokens (Firebase forces this
+# on data clear / app reinstall / Play Services GCM purge).
+#
+# Org scoping: the org_id is derived through user_id → User.org_id, not
+# stored here. A device belongs to whoever owns the user row; if the
+# user moves orgs (currently impossible in the codebase, but defending
+# in depth) the tokens follow.
+#
+# Stale-token cleanup: the FCM HTTP v1 API returns UNREGISTERED /
+# INVALID_ARGUMENT errors for retired tokens. The push_service deletes
+# the row on those responses so the table doesn't grow unbounded.
+# ---------------------------------------------------------------------------
+class DeviceToken(Base):
+    __tablename__ = "device_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey(_FK_USERS_ID, ondelete="CASCADE"), nullable=False
+    )
+    # FCM registration tokens are long opaque strings — up to ~200 chars
+    # in practice. We allocate 512 to leave room for any future scheme
+    # change. Token is globally unique: Firebase guarantees it's
+    # device-and-app-install specific, so the same token can't represent
+    # two different users.
+    token: Mapped[str] = mapped_column(String(512), nullable=False, unique=True)
+    # 'android' for now; future-proofed for 'ios' / 'web' if we ever
+    # ship a non-Android client.
+    platform: Mapped[str] = mapped_column(String(16), nullable=False, default="android")
+    # Updated on every successful re-register so an idle-cleanup pass
+    # can spot devices that haven't checked in for N days. We don't run
+    # such a pass yet — stale-on-send (via FCM error response) is
+    # sufficient for v2.10. Kept nullable so init_db's column-
+    # reconciliation pass can add it to a pre-existing prod DB without
+    # backfilling.
+    last_seen_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        Index("idx_device_tokens_user", "user_id"),
+        Index("idx_device_tokens_token", "token"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# NotificationPreference (v2.10) — per-user push opt-out per channel
+#
+# Missing row = all channels enabled (opt-out, not opt-in). That keeps
+# the upgrade story simple: existing users get pushes the moment the
+# feature ships, without us backfilling rows for every account.
+#
+# The fact that we use this row to skip a push means it must be cheap
+# to fetch — indexed by user_id, single row per user.
+# ---------------------------------------------------------------------------
+class NotificationPreference(Base):
+    __tablename__ = "notification_preferences"
+
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey(_FK_USERS_ID, ondelete="CASCADE"),
+        primary_key=True,
+    )
+    mentions: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    assignments: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    activity: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )

@@ -28,6 +28,12 @@ qrcode==7.4.2
 # metadata on the image.
 Pillow==12.2.0
 
+# v2.10: Firebase Cloud Messaging HTTP v1 sender. We avoid the heavyweight
+# Firebase Admin SDK (pulls in gRPC + protobuf, ~25 MB) and instead use
+# google-auth directly to mint OAuth2 access tokens, then POST to FCM
+# with the existing httpx dependency. Pure-Python, ~1 MB.
+google-auth==2.35.0
+
 # --- Sleuth: optional local LLM layer ---
 # Uncomment to enable Layer 3 (local llama.cpp inference). Requires a
 # GGUF model file at models/sleuth.gguf. See models/README.md for

@@ -41,6 +41,9 @@ from app.email_service import (
     BugSnapshot, UserSnapshot,
     notify_assignment, notify_bug_created, notify_bug_updated, notify_comment_added,
 )
+from app.push_notify import (
+    push_assignment, push_bug_created, push_bug_updated, push_comment_added,
+)
 from app.image_strip import strip_image_metadata
 from app.models import (
     ROLE_ADMIN, ROLE_MANAGER,
@@ -580,12 +583,13 @@ def create_bug(
     fresh = db.scalar(_eager_bug().where(Bug.id == bug.id))
     snap = _bug_snapshot(fresh)
     background.add_task(notify_bug_created, snap, actor.id)
+    background.add_task(push_bug_created, snap, actor.id)
     if assignees:
-        background.add_task(
-            notify_assignment, snap,
-            tuple(UserSnapshot(id=a.id, name=a.name, email=a.email) for a in assignees),
-            actor.name,
+        assignee_snaps = tuple(
+            UserSnapshot(id=a.id, name=a.name, email=a.email) for a in assignees
         )
+        background.add_task(notify_assignment, snap, assignee_snaps, actor.name)
+        background.add_task(push_assignment, snap, assignee_snaps, actor.name)
     # Fire outbound webhook.
     background.add_task(
         deliver_event, actor.org_id, "bug.created",
@@ -770,6 +774,9 @@ def _schedule_update_notifications(background: BackgroundTasks, snap: BugSnapsho
         background.add_task(
             notify_bug_updated, snap, list(changes), actor.name, actor.id,
         )
+        background.add_task(
+            push_bug_updated, snap, list(changes), actor.name, actor.id,
+        )
         # Webhook fire — only if there were genuine changes.
         background.add_task(
             deliver_event, actor.org_id, "bug.updated",
@@ -778,11 +785,11 @@ def _schedule_update_notifications(background: BackgroundTasks, snap: BugSnapsho
              "actor_name": actor.name},
         )
     if newly_assigned:
-        background.add_task(
-            notify_assignment, snap,
-            tuple(UserSnapshot(id=u.id, name=u.name, email=u.email) for u in newly_assigned),
-            actor.name,
+        newly_assigned_snaps = tuple(
+            UserSnapshot(id=u.id, name=u.name, email=u.email) for u in newly_assigned
         )
+        background.add_task(notify_assignment, snap, newly_assigned_snaps, actor.name)
+        background.add_task(push_assignment, snap, newly_assigned_snaps, actor.name)
 
 
 @router.put("/{bug_id}", response_model=BugOut)
@@ -1170,6 +1177,9 @@ def add_comment(
     snap = _bug_snapshot(bug)
     background.add_task(
         notify_comment_added, snap, author.name, author.id, payload.body,
+    )
+    background.add_task(
+        push_comment_added, snap, author.name, author.id, payload.body,
     )
     background.add_task(
         deliver_event, author.org_id, "comment.added",

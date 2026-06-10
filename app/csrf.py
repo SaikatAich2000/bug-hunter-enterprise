@@ -109,12 +109,25 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         method = request.method.upper()
         path = request.url.path
 
-        # Always seed the CSRF cookie on responses to documents the SPA
-        # serves (HTML pages, the SPA boot). Cheap; eliminates a
-        # "first POST fails" race on a fresh tab.
+        # Seed the CSRF cookie on:
+        #   1. HTML page responses (SPA boot).
+        #   2. GET /api/health — the bootstrap call for non-HTML clients
+        #      (Android, CLI, third-party integrations). Without this, a
+        #      pure-JSON client never receives a bh_csrf cookie because
+        #      it doesn't load any HTML page first; the next POST/PUT/
+        #      DELETE then 403s with "CSRF check failed" and looks like
+        #      a mysterious permission error.
+        # Cheap; eliminates a "first POST fails" race on a fresh tab AND
+        # on a freshly-installed mobile app.
         seed_cookie = (
             method == "GET"
-            and (path == "/" or path.endswith(".html") or path == "/login" or path == "/signup")
+            and (
+                path == "/"
+                or path.endswith(".html")
+                or path == "/login"
+                or path == "/signup"
+                or path == "/api/health"
+            )
         )
 
         # Skip the check on read-only methods and on the bootstrap

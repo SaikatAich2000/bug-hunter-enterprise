@@ -1114,3 +1114,47 @@ class StatsOut(BaseModel):
     by_project: list[dict[str, Any]]
     by_assignee: list[dict[str, Any]]
     timeline: list[dict[str, Any]]
+
+
+# ---------------------------------------------------------------------------
+# v2.10 — Push notifications (FCM)
+# ---------------------------------------------------------------------------
+class DeviceTokenIn(BaseModel):
+    """Body the Android client POSTs to /api/devices/register.
+
+    `token` is the opaque Firebase registration token (~200 chars in
+    practice). `platform` is a free-form tag — Android sends 'android';
+    we accept anything ≤ 16 chars so a future iOS client doesn't need a
+    schema bump.
+    """
+    token: str = Field(min_length=10, max_length=512)
+    platform: str = Field(default="android", max_length=16)
+
+    @field_validator("platform")
+    @classmethod
+    def _platform_lower(cls, v: str) -> str:
+        return (v or "android").strip().lower() or "android"
+
+
+class DeviceTokenOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    platform: str
+    last_seen_at: Optional[datetime] = None
+    created_at: datetime
+
+
+class NotificationPreferencesOut(BaseModel):
+    """Per-user push channel toggles. Missing row = all-on; the response
+    reflects that derived default rather than 404-ing the client."""
+    mentions: bool = True
+    assignments: bool = True
+    activity: bool = True
+
+
+class NotificationPreferencesIn(BaseModel):
+    """PATCH-style: only the toggled channels need to be present."""
+    mentions: Optional[bool] = None
+    assignments: Optional[bool] = None
+    activity: Optional[bool] = None

@@ -159,6 +159,30 @@ class Settings:
     # Hard cap on webhook URL length to avoid abuse / storage bloat.
     WEBHOOK_MAX_URL_LENGTH: int = _env_int("WEBHOOK_MAX_URL_LENGTH", 500)
 
+    # ──────────────────────────────────────────────────────────────────
+    # FCM push notifications (v2.10)
+    # ──────────────────────────────────────────────────────────────────
+    # Firebase project ID — used to construct the HTTP v1 endpoint URL
+    # (https://fcm.googleapis.com/v1/projects/<id>/messages:send). When
+    # blank, the push service is disabled — every push call short-
+    # circuits to a no-op so dev / test environments without Firebase
+    # creds don't error.
+    FIREBASE_PROJECT_ID: str = os.getenv("FIREBASE_PROJECT_ID", "")
+
+    # Service-account JSON contents, inlined as an env var. The push
+    # service parses this at startup, mints OAuth2 access tokens for the
+    # FCM scope, and caches them ~50 minutes. When blank, the push
+    # service is disabled (see FIREBASE_PROJECT_ID note above).
+    #
+    # Option B in the deployment plan — file-on-disk is intentionally
+    # not supported in this codebase to keep secret-handling consistent
+    # with the existing SESSION_SECRET / SMTP_PASSWORD pattern.
+    FIREBASE_SA_JSON: str = os.getenv("FIREBASE_SA_JSON", "")
+
+    # Wall-clock timeout for the FCM HTTP v1 call. Short by design so a
+    # slow Firebase regional outage can't stall request workers.
+    FIREBASE_HTTP_TIMEOUT_SECONDS: int = _env_int("FIREBASE_HTTP_TIMEOUT_SECONDS", 8)
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

@@ -91,6 +91,48 @@ class TestCSRF:
                              headers={"X-CSRF-Token": "wrong-token"})
         assert r.status_code == 403
 
+    def test_health_endpoint_seeds_csrf_for_json_clients(self, csrf_client):
+        """Mobile / CLI / third-party JSON clients never load an HTML
+        page, so they can't pick up the CSRF cookie that way. GET
+        /api/health is the documented bootstrap call for those clients
+        (the Android app's LoginUseCase calls it before login) — it
+        MUST issue a CSRF cookie so the next mutating POST succeeds.
+
+        Regression-test for the v2.10 bug where mobile-only sessions
+        could never create projects/bugs/events because every mutating
+        call returned 403 'CSRF check failed'."""
+        # Fresh client — no HTML page hit, no cookies yet.
+        assert "bh_csrf" not in csrf_client.cookies
+        r = csrf_client.get("/api/health")
+        assert r.status_code == 200
+        token = csrf_client.cookies.get("bh_csrf")
+        assert token is not None and len(token) > 0, (
+            "GET /api/health must seed bh_csrf for non-HTML clients"
+        )
+
+    def test_json_client_full_signup_and_create_flow(self, csrf_client):
+        """End-to-end: seed CSRF via /api/health, sign up, create a
+        project. Replicates the mobile-client lifecycle."""
+        # 1. Bootstrap CSRF.
+        csrf_client.get("/api/health")
+        token = csrf_client.cookies.get("bh_csrf")
+        assert token, "CSRF cookie should be seeded"
+        # 2. Sign up. CSRF cookie carried automatically by TestClient.
+        r = csrf_client.post("/api/auth/signup", json={
+            "organization_name": "Acme Inc",
+            "name": "Alice Admin",
+            "email": "alice@acme.test",
+            "password": "TestPass1!",
+        })
+        assert r.status_code == 201, r.text
+        # 3. Create a project — would have 403'd before the fix.
+        r = csrf_client.post(
+            "/api/projects",
+            json={"name": "Web", "color": "#6366f1"},
+            headers={"X-CSRF-Token": token},
+        )
+        assert r.status_code == 201, r.text
+
 
 # ---------------------------------------------------------------------------
 # 2FA / TOTP tests

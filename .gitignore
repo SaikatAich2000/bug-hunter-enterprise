@@ -27,6 +27,14 @@ htmlcov/
 .env.local
 .env.*.local
 
+# Firebase service-account JSON — used by the FCM HTTP v1 sender to mint
+# OAuth2 access tokens. Anyone with this file can send pushes to your
+# users AND call Firebase Admin APIs as you — treat like a private key.
+# Rotate immediately via the Firebase Console if leaked.
+.secrets/
+firebase-service-account*.json
+*-firebase-adminsdk-*.json
+
 # --- Local databases (SQLite fallback for dev) ---
 *.db
 *.sqlite

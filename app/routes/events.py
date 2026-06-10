@@ -40,6 +40,9 @@ from app.email_service import (
     EventSnapshot, UserSnapshot,
     notify_event_created, notify_event_deleted, notify_event_updated,
 )
+from app.push_notify import (
+    push_event_created, push_event_deleted, push_event_updated,
+)
 from app.models import (
     ROLE_ADMIN, ROLE_MANAGER,
     Activity, Attachment, Bug, Event, User,
@@ -285,6 +288,7 @@ def create_event(
     if ev and ev.managers:
         snap = _event_snapshot(ev)
         background.add_task(notify_event_created, snap, actor.name, actor.id)
+        background.add_task(push_event_created, snap, actor.name, actor.id)
     return _event_brief(db, ev, actor)
 
 
@@ -368,6 +372,9 @@ def update_event(
         background.add_task(
             notify_event_updated, snap, list(changes), actor.name, actor.id,
         )
+        background.add_task(
+            push_event_updated, snap, list(changes), actor.name, actor.id,
+        )
     return _event_brief(db, ev, actor)
 
 
@@ -404,4 +411,5 @@ def delete_event(
     db.commit()
     if snap is not None:
         background.add_task(notify_event_deleted, snap, actor.name, actor.id)
+        background.add_task(push_event_deleted, snap, actor.name, actor.id)
     return {"message": "Event deleted"}

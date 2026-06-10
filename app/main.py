@@ -31,7 +31,7 @@ from app.observability import (
 )
 from app.chatbot.router import router as chatbot_router
 from app.routes import (
-    audit, auth, bugs, events, invitations, memberships, organizations,
+    audit, auth, bugs, devices, events, invitations, memberships, organizations,
     projects, reports, sessions, stats, users,
     webhooks as webhooks_route,
     saved_views as saved_views_route,
@@ -613,6 +613,7 @@ app.include_router(sessions.router)
 app.include_router(webhooks_route.router)
 app.include_router(saved_views_route.router)
 app.include_router(dsar_route.router)
+app.include_router(devices.router)
 app.include_router(chatbot_router)
 
 
