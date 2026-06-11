@@ -59,14 +59,16 @@ def _audit(
 
 
 def _client_ip(request: Request) -> str:
-    fwd = request.headers.get("x-forwarded-for", "")
-    if fwd:
-        ip = fwd.split(",")[0].strip()
-    elif request.client and request.client.host:
-        ip = request.client.host
-    else:
-        ip = ""
-    return ip[:64]
+    # Only honour X-Forwarded-For when ops has told us a trusted proxy
+    # sits in front (same flag the rate limiter uses) — otherwise any
+    # client could plant a spoofed IP in the invitation audit trail.
+    if get_settings().TRUST_PROXY_FORWARDED_FOR:
+        fwd = request.headers.get("x-forwarded-for", "")
+        if fwd:
+            return fwd.split(",")[0].strip()[:64]
+    if request.client and request.client.host:
+        return request.client.host[:64]
+    return ""
 
 
 # ---------------------------------------------------------------------------

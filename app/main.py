@@ -383,6 +383,14 @@ class CacheControlMiddleware(BaseHTTPMiddleware):
             "Permissions-Policy",
             "geolocation=(), microphone=(), camera=()",
         )
+        # Process isolation: stop cross-origin windows holding a handle
+        # to ours (Spectre-class + tabnabbing surface).
+        response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+        # Block other origins embedding our responses (scripts, images,
+        # attachments) via no-cors requests. Non-browser clients (the
+        # Android app) are unaffected — CORP is a browser-only check.
+        response.headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
+        response.headers.setdefault("X-Permitted-Cross-Domain-Policies", "none")
         if settings.COOKIE_SECURE:
             response.headers.setdefault(
                 "Strict-Transport-Security",
@@ -484,10 +492,25 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory=settings.STATIC_DIR), name="static")
 
 
+# Rendered-HTML cache. The placeholders depend only on asset_version
+# (fixed at process start) and APP_VERSION (env, fixed for the process
+# lifetime), so the rendered page never changes between restarts —
+# re-reading the file from disk on every request was pure I/O waste on
+# the 0.1-vCPU deployment target. Tests that mutate
+# app.state.asset_version key the cache on it, so they stay correct.
+_html_cache: dict[tuple[str, str], str] = {}
+
+
 def _serve_html(filename: str) -> HTMLResponse:
-    body = (settings.STATIC_DIR / filename).read_text(encoding="utf-8")
-    body = body.replace(ASSET_VERSION_PLACEHOLDER, app.state.asset_version)
-    body = body.replace(APP_VERSION_PLACEHOLDER, settings.APP_VERSION)
+    key = (filename, app.state.asset_version)
+    body = _html_cache.get(key)
+    if body is None:
+        body = (settings.STATIC_DIR / filename).read_text(encoding="utf-8")
+        body = body.replace(ASSET_VERSION_PLACEHOLDER, app.state.asset_version)
+        body = body.replace(APP_VERSION_PLACEHOLDER, settings.APP_VERSION)
+        if len(_html_cache) > 32:  # paranoia bound; we serve ~8 pages
+            _html_cache.clear()
+        _html_cache[key] = body
     return HTMLResponse(body)
 
 
@@ -578,7 +601,10 @@ def delete_account_page() -> HTMLResponse:
 # header, which static-file mounts don't easily emit.)
 @app.get("/sw.js", include_in_schema=False)
 def service_worker() -> Response:
-    body = (settings.STATIC_DIR / "sw.js").read_text(encoding="utf-8")
+    body = _html_cache.get(("sw.js", "raw"))
+    if body is None:
+        body = (settings.STATIC_DIR / "sw.js").read_text(encoding="utf-8")
+        _html_cache[("sw.js", "raw")] = body
     return Response(
         content=body,
         media_type="application/javascript",

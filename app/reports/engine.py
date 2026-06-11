@@ -765,7 +765,8 @@ def _distribution_report(
     # Drill-down: every bug that contributed to a non-zero bucket.
     detail_stmt = _apply_bug_filters(_eager_bug(), filters, org_id=org_id).order_by(Bug.id.desc())
     detail_bugs = list(db.scalars(detail_stmt).all())
-    detail_rows = [_bug_to_detail_row(b, _attachments_by_bug(db, [b.id]), {}) for b in detail_bugs]
+    attach = _attachments_by_bug(db, [b.id for b in detail_bugs])
+    detail_rows = [_bug_to_detail_row(b, attach, {}) for b in detail_bugs]
     columns = [
         ReportColumn(label_key, label_header, 18),
         ReportColumn("count", "Count", 12, kind="number", align="right"),

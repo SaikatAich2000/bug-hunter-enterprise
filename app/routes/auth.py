@@ -747,7 +747,7 @@ def confirm_email_change(
             detail="Too many wrong codes. Start the change again.",
         )
 
-    if hash_token(payload.code) != req.code_hash:
+    if not secrets.compare_digest(hash_token(payload.code), req.code_hash or ""):
         req.attempts = (req.attempts or 0) + 1
         db.commit()
         remaining = EMAIL_CHANGE_MAX_ATTEMPTS - req.attempts

@@ -506,6 +506,10 @@ class Bug(Base):
         Index("idx_bugs_project_status", "project_id", "status"),
         Index("idx_bugs_status_priority", "status", "priority"),
         Index("idx_bugs_updated_at", "updated_at"),
+        # v2.9.x — stats timeline (GROUP BY date(created_at)) and the
+        # several "oldest first" report orderings scan on created_at.
+        # Added via init_db's additive index reconciliation pass.
+        Index("idx_bugs_created_at", "created_at"),
         # v2.4 — fast type-tab filtering + event-detail item lookups.
         Index("idx_bugs_item_type", "item_type"),
         Index("idx_bugs_event_id", "event_id"),

@@ -31,6 +31,56 @@ router = APIRouter(prefix="/api/webhooks", tags=["webhooks"])
 
 _URL_RE = re.compile(r"^https?://[\w\-.:/%?&=#~+,;@!$'()*]+$", re.IGNORECASE)
 
+# Hostname suffixes that resolve inside private infrastructure even
+# though they aren't IP literals. ".internal" covers GCP metadata
+# (metadata.google.internal); ".local" is mDNS.
+_BLOCKED_HOST_SUFFIXES = (".localhost", ".local", ".internal")
+_BLOCKED_HOSTS = frozenset({"localhost", "metadata.google.internal"})
+
+_SSRF_ERROR = (
+    "Webhook URLs must point at a public host (no localhost / private ranges)."
+)
+
+
+def _reject_non_public_host(url: str) -> None:
+    """Raise ValueError unless the URL's host is plausibly public.
+
+    IP literals (v4, v6, and integer/short forms that ipaddress accepts)
+    are rejected when loopback / private / link-local / reserved /
+    multicast / unspecified. Known-internal hostnames are rejected by
+    name. DNS names we cannot classify are allowed — resolve-time
+    rebinding is out of scope for this layer (delivery has no redirect
+    following and a short timeout, which bounds the blast radius).
+    """
+    import ipaddress
+    from urllib.parse import urlparse
+
+    try:
+        host = urlparse(url).hostname or ""
+    except ValueError as exc:  # malformed IPv6 brackets etc.
+        raise ValueError(_SSRF_ERROR) from exc
+    host = host.strip().lower().rstrip(".")
+    if not host:
+        raise ValueError(_SSRF_ERROR)
+    if host in _BLOCKED_HOSTS or host.endswith(_BLOCKED_HOST_SUFFIXES):
+        raise ValueError(_SSRF_ERROR)
+    # Plain integers ("2130706433") parse as IPv4 — catch decimal forms.
+    candidate = host
+    if candidate.isdigit():
+        try:
+            candidate = str(ipaddress.ip_address(int(candidate)))
+        except ValueError:
+            return
+    try:
+        ip = ipaddress.ip_address(candidate)
+    except ValueError:
+        return  # DNS hostname — allowed
+    if (
+        ip.is_loopback or ip.is_private or ip.is_link_local
+        or ip.is_reserved or ip.is_multicast or ip.is_unspecified
+    ):
+        raise ValueError(_SSRF_ERROR)
+
 
 class WebhookOut(BaseModel):
     id: int
@@ -72,12 +122,12 @@ class WebhookIn(BaseModel):
             raise ValueError("URL too long")
         if not _URL_RE.match(v):
             raise ValueError("URL must be http:// or https://")
-        # Block obvious SSRF vectors. We disallow private IPs in the
-        # hostname so a malicious admin can't probe internal services.
-        lower = v.lower()
-        for blocked in ("://localhost", "://127.", "://0.", "://10.", "://192.168.", "://169.254."):
-            if blocked in lower:
-                raise ValueError("Webhook URLs must point at a public host (no localhost / private ranges).")
+        # Block SSRF vectors. We disallow private IPs in the hostname so
+        # a malicious admin can't probe internal services. Parse-based
+        # (not substring) so userinfo tricks (http://x@127.0.0.1/),
+        # IPv6 loopback ([::1]), decimal IPs (2130706433) and the full
+        # 172.16/12 range are all caught.
+        _reject_non_public_host(v)
         return v
 
 

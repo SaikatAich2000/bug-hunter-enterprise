@@ -81,10 +81,24 @@ def _user_brief(u: User) -> dict:
     }
 
 
-def _event_brief(db: Session, ev: Event, actor: User) -> dict:
-    item_count = db.scalar(
-        select(func.count(Bug.id)).where(Bug.event_id == ev.id)
-    ) or 0
+def _item_counts_by_event(db: Session, event_ids: list[int]) -> dict[int, int]:
+    """One grouped COUNT for a whole page of events — avoids the N+1 of
+    counting each event's items individually in the list view."""
+    if not event_ids:
+        return {}
+    rows = db.execute(
+        select(Bug.event_id, func.count(Bug.id))
+        .where(Bug.event_id.in_(event_ids))
+        .group_by(Bug.event_id)
+    ).all()
+    return {eid: int(n) for eid, n in rows}
+
+
+def _event_brief(db: Session, ev: Event, actor: User, item_count: Optional[int] = None) -> dict:
+    if item_count is None:
+        item_count = db.scalar(
+            select(func.count(Bug.id)).where(Bug.event_id == ev.id)
+        ) or 0
     return {
         "id": ev.id,
         "name": ev.name,
@@ -210,7 +224,8 @@ def list_events(
     if scheduled_for:
         stmt = stmt.where(Event.scheduled_for == scheduled_for)
     rows = list(db.scalars(stmt).all())
-    return [_event_brief(db, ev, actor) for ev in rows]
+    counts = _item_counts_by_event(db, [ev.id for ev in rows])
+    return [_event_brief(db, ev, actor, counts.get(ev.id, 0)) for ev in rows]
 
 
 # ---------------------------------------------------------------------------

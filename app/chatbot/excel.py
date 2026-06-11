@@ -85,6 +85,20 @@ _HEADER_STYLE_FILL = "1F2A44"   # Bug Hunter dark accent
 _HEADER_STYLE_FG = "FFFFFF"
 
 
+# Characters Excel/Numbers/LibreOffice interpret as a formula when they
+# start a cell. A bug title like `=cmd|'/c calc.exe'!A1` would execute
+# on open. Neutralised by prefixing a single quote — same defence as the
+# CSV export in routes/bugs.py (_csv_safe) and the reports writer
+# (reports/xlsx.py).
+_FORMULA_TRIGGERS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _defang_formula_text(s: str) -> str:
+    if s and s[0] in _FORMULA_TRIGGERS:
+        return "'" + s
+    return s
+
+
 # Column order — matches what executor._bug_row produces.
 _COLUMNS: list[tuple[str, str, int]] = [
     ("id",          "ID",          8),
@@ -132,6 +146,8 @@ def _build_workbook(rows: list[dict[str, Any]], description: str) -> bytes:
     for r, row in enumerate(rows, start=3):
         for c, (key, _h, _w) in enumerate(_COLUMNS, start=1):
             val = row.get(key, "")
+            if isinstance(val, str):
+                val = _defang_formula_text(val)
             # openpyxl chokes on None for some types; coerce to "".
             ws.cell(row=r, column=c, value="" if val is None else val)
 
