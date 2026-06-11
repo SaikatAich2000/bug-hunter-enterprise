@@ -5200,6 +5200,47 @@ function _resetReportFilters() {
   _applyReportTypeDefaults();
 }
 
+function _colAlign(col) {
+  return col.align === "right" ? "right" : "left";
+}
+
+function _renderReportHead(head, columns) {
+  const tr = document.createElement("tr");
+  for (const col of columns) {
+    const th = document.createElement("th");
+    th.scope = "col";
+    th.textContent = col.label;
+    th.style.textAlign = _colAlign(col);
+    tr.append(th);
+  }
+  head.append(tr);
+}
+
+function _reportCellText(value) {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string" && value.length > 200) return value.slice(0, 197) + "…";
+  return String(value);
+}
+
+function _appendReportRow(body, row, columns) {
+  const trd = document.createElement("tr");
+  for (const col of columns) {
+    const td = document.createElement("td");
+    td.textContent = _reportCellText(row[col.key]);
+    td.style.textAlign = _colAlign(col);
+    trd.append(td);
+  }
+  body.append(trd);
+}
+
+function _renderReportTruncation(truncated, result) {
+  if (!truncated) return;
+  truncated.hidden = !result.truncated;
+  if (result.truncated) {
+    $("#reportTruncatedCount").textContent = String(result.truncated_cap || result.rows.length);
+  }
+}
+
 function _renderReportTable(result) {
   const head = $("#reportTableHead");
   const body = $("#reportTableBody");
@@ -5208,15 +5249,7 @@ function _renderReportTable(result) {
   if (!head || !body) return;
   head.innerHTML = "";
   body.innerHTML = "";
-  const tr = document.createElement("tr");
-  for (const col of result.columns) {
-    const th = document.createElement("th");
-    th.scope = "col";
-    th.textContent = col.label;
-    th.style.textAlign = col.align === "right" ? "right" : "left";
-    tr.append(th);
-  }
-  head.append(tr);
+  _renderReportHead(head, result.columns);
 
   if (!result.rows.length) {
     if (empty) empty.hidden = false;
@@ -5226,24 +5259,9 @@ function _renderReportTable(result) {
   if (empty) empty.hidden = true;
 
   for (const row of result.rows) {
-    const trd = document.createElement("tr");
-    for (const col of result.columns) {
-      const td = document.createElement("td");
-      let v = row[col.key];
-      if (v === null || v === undefined) v = "";
-      if (typeof v === "string" && v.length > 200) v = v.slice(0, 197) + "…";
-      td.textContent = String(v);
-      td.style.textAlign = col.align === "right" ? "right" : "left";
-      trd.append(td);
-    }
-    body.append(trd);
+    _appendReportRow(body, row, result.columns);
   }
-  if (truncated) {
-    truncated.hidden = !result.truncated;
-    if (result.truncated) {
-      $("#reportTruncatedCount").textContent = String(result.truncated_cap || result.rows.length);
-    }
-  }
+  _renderReportTruncation(truncated, result);
 }
 
 function _renderReportSummary(result) {
@@ -5323,7 +5341,7 @@ async function downloadReportXlsx() {
       let detail = `HTTP ${res.status}`;
       try {
         const j = await res.json();
-        if (j && j.detail) detail = j.detail;
+        if (j?.detail) detail = j.detail;
       } catch { /* binary or empty */ }
       toast(detail, "error");
       return;

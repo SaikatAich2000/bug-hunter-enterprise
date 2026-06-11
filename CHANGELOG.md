@@ -3,6 +3,14 @@
 All notable changes to Bug Hunter (Enterprise). Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.10] — 2026-06-11
+
+**Maintenance + quality pass.** Schema migrations remain strictly
+additive — zero DB changes.
+
+- SonarQube cleanup: resolved all open issues and security hotspots;
+  raised automated test coverage above the gate threshold.
+
 ## [2.8] — 2026-06-04
 
 **Security hardening** — OWASP audit + remediation. Eight items, all

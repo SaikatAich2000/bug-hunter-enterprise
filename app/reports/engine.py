@@ -305,6 +305,54 @@ def _apply_org_scope_via_project(stmt, org_id: Optional[int]):
     return stmt.where(Bug.project.has(Project.org_id == org_id))
 
 
+def _apply_entity_filters(stmt, filters: Filters):
+    """Who/where filters: item type, project, people, event."""
+    if filters.item_types:
+        stmt = stmt.where(Bug.item_type.in_(filters.item_types))
+    if filters.project_ids:
+        stmt = stmt.where(Bug.project_id.in_(filters.project_ids))
+    if filters.assignee_ids:
+        stmt = stmt.where(Bug.assignees.any(User.id.in_(filters.assignee_ids)))
+    if filters.reporter_ids:
+        stmt = stmt.where(Bug.reporter_id.in_(filters.reporter_ids))
+    if filters.event_id is not None:
+        stmt = stmt.where(Bug.event_id == filters.event_id)
+    return stmt
+
+
+def _apply_attribute_filters(
+    stmt,
+    filters: Filters,
+    *,
+    apply_status: bool,
+    enforce_not_a_bug: bool,
+):
+    """What-kind filters: priority, environment, status, text search."""
+    if filters.priorities:
+        stmt = stmt.where(Bug.priority.in_(filters.priorities))
+    if filters.environments:
+        stmt = stmt.where(Bug.environment.in_(filters.environments))
+    if apply_status and filters.statuses:
+        stmt = stmt.where(Bug.status.in_(filters.statuses))
+    if not filters.include_not_a_bug and enforce_not_a_bug:
+        # Exclude Not-a-Bug from "Total" by default (matches dashboard KPI).
+        stmt = stmt.where(Bug.status != "Not a Bug")
+    if filters.text_search:
+        stmt = _apply_text_search(stmt, filters.text_search)
+    return stmt
+
+
+def _apply_date_range(stmt, filters: Filters, date_column):
+    if not (filters.date_from or filters.date_to):
+        return stmt
+    col = date_column if date_column is not None else Bug.created_at
+    if filters.date_from:
+        stmt = stmt.where(col >= _start_of_day(filters.date_from))
+    if filters.date_to:
+        stmt = stmt.where(col <= _end_of_day(filters.date_to))
+    return stmt
+
+
 def _apply_bug_filters(
     stmt,
     filters: Filters,
@@ -326,35 +374,12 @@ def _apply_bug_filters(
     the actor.
     """
     stmt = _apply_org_scope_via_project(stmt, org_id)
-    if filters.item_types:
-        stmt = stmt.where(Bug.item_type.in_(filters.item_types))
-    if filters.project_ids:
-        stmt = stmt.where(Bug.project_id.in_(filters.project_ids))
-    if filters.assignee_ids:
-        stmt = stmt.where(Bug.assignees.any(User.id.in_(filters.assignee_ids)))
-    if filters.reporter_ids:
-        stmt = stmt.where(Bug.reporter_id.in_(filters.reporter_ids))
-    if filters.event_id is not None:
-        stmt = stmt.where(Bug.event_id == filters.event_id)
-    if filters.priorities:
-        stmt = stmt.where(Bug.priority.in_(filters.priorities))
-    if filters.environments:
-        stmt = stmt.where(Bug.environment.in_(filters.environments))
-    if apply_status and filters.statuses:
-        stmt = stmt.where(Bug.status.in_(filters.statuses))
-    if not filters.include_not_a_bug and enforce_not_a_bug:
-        # Exclude Not-a-Bug from "Total" by default (matches dashboard KPI).
-        stmt = stmt.where(Bug.status != "Not a Bug")
-    if filters.text_search:
-        stmt = _apply_text_search(stmt, filters.text_search)
-
-    if filters.date_from or filters.date_to:
-        col = date_column if date_column is not None else Bug.created_at
-        if filters.date_from:
-            stmt = stmt.where(col >= _start_of_day(filters.date_from))
-        if filters.date_to:
-            stmt = stmt.where(col <= _end_of_day(filters.date_to))
-    return stmt
+    stmt = _apply_entity_filters(stmt, filters)
+    stmt = _apply_attribute_filters(
+        stmt, filters,
+        apply_status=apply_status, enforce_not_a_bug=enforce_not_a_bug,
+    )
+    return _apply_date_range(stmt, filters, date_column)
 
 
 def _eager_bug():
@@ -369,41 +394,59 @@ def _eager_bug():
 # ---------------------------------------------------------------------------
 # Helpers — bug → row dict
 # ---------------------------------------------------------------------------
-def _bug_to_detail_row(b: Bug, attachments_by_bug: dict[int, int],
-                      resolved_info: dict[int, tuple[Optional[str], Optional[datetime]]]) -> dict[str, Any]:
-    """Full detail row — every column on the bug + computed extras."""
-    resolved_by, resolved_at = resolved_info.get(b.id, (None, None))
-    now = datetime.now(timezone.utc)
-    open_until = resolved_at if resolved_at is not None else now
-    created_at = b.created_at
-    days_open = None
-    if created_at is not None:
-        # Both columns are timezone-aware on every modern row; legacy
-        # rows might be naive — coerce defensively.
-        ca = created_at if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc)
-        ou = open_until if open_until.tzinfo else open_until.replace(tzinfo=timezone.utc)
-        days_open = max(0, (ou - ca).days)
+def _days_open_value(created_at: Optional[datetime],
+                     resolved_at: Optional[datetime]) -> Optional[int]:
+    """Whole days a bug stayed open: from creation to resolution, or to
+    now if still open. None when there's no creation timestamp."""
+    if created_at is None:
+        return None
+    open_until = resolved_at if resolved_at is not None else datetime.now(timezone.utc)
+    # Both columns are timezone-aware on every modern row; legacy rows
+    # might be naive — coerce defensively.
+    ca = created_at if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc)
+    ou = open_until if open_until.tzinfo else open_until.replace(tzinfo=timezone.utc)
+    return max(0, (ou - ca).days)
+
+
+def _bug_scalar_fields(b: Bug) -> dict[str, Any]:
+    """Plain columns straight off the bug row."""
     return {
         "id": b.id,
         "item_type": getattr(b, "item_type", None) or "Bug",
         "title": b.title or "",
         "description": (b.description or "")[:32000],   # excel cell cap
-        "project": b.project.name if b.project else "",
-        "event": b.event.name if getattr(b, "event", None) else "",
         "status": b.status or "",
         "priority": b.priority or "",
         "environment": b.environment or "",
-        "reporter_name": b.reporter.name if b.reporter else "",
-        "reporter_email": b.reporter.email if b.reporter else "",
-        "assignees": ", ".join(a.name for a in b.assignees),
         "due_date": b.due_date or "",
         "created_at": _fmt_dt(b.created_at),
         "updated_at": _fmt_dt(b.updated_at),
-        "resolved_at": _fmt_dt(resolved_at) if resolved_at else "",
-        "resolved_by": resolved_by or "",
-        "days_open": days_open if days_open is not None else "",
-        "attachment_count": int(attachments_by_bug.get(b.id, 0)),
     }
+
+
+def _bug_relation_fields(b: Bug) -> dict[str, Any]:
+    """Columns derived from eager-loaded related objects."""
+    return {
+        "project": b.project.name if b.project else "",
+        "event": b.event.name if getattr(b, "event", None) else "",
+        "reporter_name": b.reporter.name if b.reporter else "",
+        "reporter_email": b.reporter.email if b.reporter else "",
+        "assignees": ", ".join(a.name for a in b.assignees),
+    }
+
+
+def _bug_to_detail_row(b: Bug, attachments_by_bug: dict[int, int],
+                      resolved_info: dict[int, tuple[Optional[str], Optional[datetime]]]) -> dict[str, Any]:
+    """Full detail row — every column on the bug + computed extras."""
+    resolved_by, resolved_at = resolved_info.get(b.id, (None, None))
+    days_open = _days_open_value(b.created_at, resolved_at)
+    row = _bug_scalar_fields(b)
+    row.update(_bug_relation_fields(b))
+    row["resolved_at"] = _fmt_dt(resolved_at) if resolved_at else ""
+    row["resolved_by"] = resolved_by or ""
+    row["days_open"] = days_open if days_open is not None else ""
+    row["attachment_count"] = int(attachments_by_bug.get(b.id, 0))
+    return row
 
 
 def _fmt_dt(dt: Optional[datetime]) -> str:
@@ -655,43 +698,66 @@ def _build_throughput_query(filters: Filters, *, org_id: Optional[int] = None):
     return stmt.order_by(Activity.bug_id.asc(), Activity.created_at.asc())
 
 
+def _fold_throughput_row(
+    raw,
+    per_user: dict[int, dict[str, Any]],
+    detail_rows: list[dict[str, Any]],
+) -> None:
+    """Process one throughput-query tuple: count it into the right user
+    bucket and append a detail row. No-op if the row isn't a transition
+    into a resolved state for the item's type."""
+    (bug_id, actor_id, actor_name, created_at, detail,
+     item_type, title, priority, current_status, project_name) = raw
+    it = item_type or "Bug"
+    new_status = _parse_resolution_status(detail or "")
+    if not new_status or not _is_resolved_status(new_status, it):
+        return
+    key = actor_id if actor_id is not None else -1  # -1 = deleted-user actor
+    name = actor_name or "(deleted user)"
+    bucket = per_user.setdefault(key, {
+        "user_id": key if key != -1 else None,
+        "user_name": name,
+        "resolved_count": 0,
+        "by_status": {},
+        "by_type": {},
+    })
+    bucket["resolved_count"] += 1
+    bucket["by_status"][new_status] = bucket["by_status"].get(new_status, 0) + 1
+    bucket["by_type"][it] = bucket["by_type"].get(it, 0) + 1
+    detail_rows.append({
+        "user_name": name,
+        "bug_id": bug_id,
+        "item_type": it,
+        "title": (title or "")[:200],
+        "project": project_name or "",
+        "priority": priority or "",
+        "new_status": new_status,
+        "current_status": current_status or "",
+        "resolved_at": _fmt_dt(created_at),
+    })
+
+
+def _accumulate_throughput(rows_raw) -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]]]:
+    """Fold throughput-query tuples into per-user buckets + detail rows.
+
+    Only rows whose detail string records a transition INTO a resolved
+    state for the item's type are counted. Deleted-user actors collapse
+    onto the -1 sentinel key.
+    """
+    per_user: dict[int, dict[str, Any]] = {}
+    detail_rows: list[dict[str, Any]] = []
+    for raw in rows_raw:
+        _fold_throughput_row(raw, per_user, detail_rows)
+    return per_user, detail_rows
+
+
 def _report_throughput(db: Session, filters: Filters, *, org_id: Optional[int] = None) -> ReportResult:
     """Per-user count of items they moved INTO a resolved state during
     the time window. Multi-counts intentionally if the same bug was
     reopened and re-resolved by different people in the same window —
     that's two real units of work."""
     rows_raw = db.execute(_build_throughput_query(filters, org_id=org_id)).all()
-    per_user: dict[int, dict[str, Any]] = {}
-    detail_rows: list[dict[str, Any]] = []
-    for (bug_id, actor_id, actor_name, created_at, detail,
-         item_type, title, priority, current_status, project_name) in rows_raw:
-        new_status = _parse_resolution_status(detail or "")
-        if not new_status or not _is_resolved_status(new_status, item_type or "Bug"):
-            continue
-        if actor_id is None:
-            actor_id = -1  # sentinel for deleted-user actor
-        bucket = per_user.setdefault(actor_id, {
-            "user_id": actor_id if actor_id != -1 else None,
-            "user_name": actor_name or "(deleted user)",
-            "resolved_count": 0,
-            "by_status": {},
-            "by_type": {},
-        })
-        bucket["resolved_count"] += 1
-        bucket["by_status"][new_status] = bucket["by_status"].get(new_status, 0) + 1
-        it = item_type or "Bug"
-        bucket["by_type"][it] = bucket["by_type"].get(it, 0) + 1
-        detail_rows.append({
-            "user_name": actor_name or "(deleted user)",
-            "bug_id": bug_id,
-            "item_type": it,
-            "title": (title or "")[:200],
-            "project": project_name or "",
-            "priority": priority or "",
-            "new_status": new_status,
-            "current_status": current_status or "",
-            "resolved_at": _fmt_dt(created_at),
-        })
+    per_user, detail_rows = _accumulate_throughput(rows_raw)
     rows: list[dict[str, Any]] = []
     for bucket in per_user.values():
         rows.append({
@@ -988,52 +1054,71 @@ def _report_timeline(db: Session, filters: Filters, *, org_id: Optional[int] = N
     )
 
 
+def _ttr_row(raw, bug_created: Optional[datetime]) -> Optional[dict[str, Any]]:
+    """Build one Time-to-Resolution row from a throughput-query tuple, or
+    return None if the row isn't a resolved transition with a known
+    creation time."""
+    (bug_id, _actor_id, actor_name, created_at, detail,
+     item_type, title, priority, _current_status, project_name) = raw
+    ns = _parse_resolution_status(detail or "")
+    if not (ns and _is_resolved_status(ns, item_type or "Bug")):
+        return None
+    if bug_created is None or created_at is None:
+        return None
+    ca = bug_created if bug_created.tzinfo else bug_created.replace(tzinfo=timezone.utc)
+    ra = created_at if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc)
+    hours = round(max(0.0, (ra - ca).total_seconds()) / 3600, 2)
+    return {
+        "bug_id": bug_id,
+        "item_type": item_type or "Bug",
+        "title": (title or "")[:200],
+        "project": project_name or "",
+        "priority": priority or "",
+        "resolved_by": actor_name or "",
+        "created_at": _fmt_dt(bug_created),
+        "resolved_at": _fmt_dt(created_at),
+        "hours_to_resolve": hours,
+        "days_to_resolve": round(hours / 24, 2),
+    }
+
+
+def _ttr_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate avg / median / p95 / fastest / slowest over built rows."""
+    durations = [r["hours_to_resolve"] for r in rows]
+    if not durations:
+        return {"count": 0, "average_hours": 0, "median_hours": 0,
+                "p95_hours": 0, "fastest_hours": 0, "slowest_hours": 0}
+    return {
+        "count": len(rows),
+        "average_hours": round(sum(durations) / len(durations), 2),
+        "median_hours": round(statistics.median(durations), 2),
+        "p95_hours": round(_percentile(durations, 95), 2),
+        "fastest_hours": rows[0]["hours_to_resolve"],
+        "slowest_hours": rows[-1]["hours_to_resolve"],
+    }
+
+
 def _report_time_to_resolution(db: Session, filters: Filters, *, org_id: Optional[int] = None) -> ReportResult:
     """Per-resolved-item: hours from creation to resolution. Plus aggregate
     avg / median / p95 across the whole filtered set."""
     rows_raw = db.execute(_build_throughput_query(filters, org_id=org_id)).all()
-    durations_hours: list[float] = []
-    rows: list[dict[str, Any]] = []
-    seen_bug: set[int] = set()
     # Load bug creation times in one shot.
     bug_ids = list({row[0] for row in rows_raw})
     creation = dict(db.execute(
         select(Bug.id, Bug.created_at).where(Bug.id.in_(bug_ids))
     ).all()) if bug_ids else {}
-    for (bug_id, _actor_id, actor_name, created_at, detail,
-         item_type, title, priority, current_status, project_name) in rows_raw:
+    rows: list[dict[str, Any]] = []
+    seen_bug: set[int] = set()
+    for raw in rows_raw:
+        bug_id = raw[0]
         if bug_id in seen_bug:
             continue
-        ns = _parse_resolution_status(detail or "")
-        if not (ns and _is_resolved_status(ns, item_type or "Bug")):
+        row = _ttr_row(raw, creation.get(bug_id))
+        if row is None:
             continue
-        bug_created = creation.get(bug_id)
-        if bug_created is None or created_at is None:
-            continue
-        ca = bug_created if bug_created.tzinfo else bug_created.replace(tzinfo=timezone.utc)
-        ra = created_at if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc)
-        seconds = max(0.0, (ra - ca).total_seconds())
-        hours = round(seconds / 3600, 2)
-        durations_hours.append(hours)
         seen_bug.add(bug_id)
-        rows.append({
-            "bug_id": bug_id,
-            "item_type": item_type or "Bug",
-            "title": (title or "")[:200],
-            "project": project_name or "",
-            "priority": priority or "",
-            "resolved_by": actor_name or "",
-            "created_at": _fmt_dt(bug_created),
-            "resolved_at": _fmt_dt(created_at),
-            "hours_to_resolve": hours,
-            "days_to_resolve": round(hours / 24, 2),
-        })
+        rows.append(row)
     rows.sort(key=lambda r: r["hours_to_resolve"])
-    avg = round(sum(durations_hours) / len(durations_hours), 2) if durations_hours else 0
-    median = round(statistics.median(durations_hours), 2) if durations_hours else 0
-    p95 = round(_percentile(durations_hours, 95), 2) if durations_hours else 0
-    fastest = rows[0]["hours_to_resolve"] if rows else 0
-    slowest = rows[-1]["hours_to_resolve"] if rows else 0
     columns = [
         ReportColumn("bug_id", "Item ID", 10, kind="number"),
         ReportColumn("item_type", "Type", 12),
@@ -1051,14 +1136,7 @@ def _report_time_to_resolution(db: Session, filters: Filters, *, org_id: Optiona
         report_label="Time to Resolution",
         columns=columns,
         rows=rows,
-        summary={
-            "count": len(rows),
-            "average_hours": avg,
-            "median_hours": median,
-            "p95_hours": p95,
-            "fastest_hours": fastest,
-            "slowest_hours": slowest,
-        },
+        summary=_ttr_summary(rows),
         filters=filters.to_meta(),
     )
 

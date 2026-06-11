@@ -31,7 +31,7 @@ class Settings:
     ]
 
     APP_NAME: str = os.getenv("APP_NAME", "Bug Hunter")
-    APP_VERSION: str = os.getenv("APP_VERSION", "2.9")
+    APP_VERSION: str = os.getenv("APP_VERSION", "2.10")
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
     # G3: hard ceiling on request body size, in bytes. The 50 MB attachment

@@ -6,8 +6,8 @@ Only the latest minor release receives security fixes.
 
 | Version | Supported |
 |---------|-----------|
-| 2.8.x   | ✅        |
-| < 2.8   | ❌        |
+| 2.10.x  | ✅        |
+| < 2.10  | ❌        |
 
 ## Reporting a vulnerability
 
@@ -34,7 +34,7 @@ Please include:
 
 ## Existing security posture
 
-See the **v2.8** entry in [CHANGELOG.md](CHANGELOG.md) and the
+See the **v2.10** entry in [CHANGELOG.md](CHANGELOG.md) and the
 *Security & multi-tenant isolation* sections of [README.md](README.md)
 for what's already in place — cookie auth with HttpOnly + SameSite +
 signed token, CSRF double-submit middleware, per-IP rate limiting,

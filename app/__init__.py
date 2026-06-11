@@ -1,4 +1,4 @@
 """Bug Hunter — multi-tenant issue tracker."""
 
-__version__ = "2.9"
+__version__ = "2.10"
 

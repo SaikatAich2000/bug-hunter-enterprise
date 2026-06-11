@@ -601,10 +601,12 @@ def delete_account_page() -> HTMLResponse:
 # header, which static-file mounts don't easily emit.)
 @app.get("/sw.js", include_in_schema=False)
 def service_worker() -> Response:
-    body = _html_cache.get(("sw.js", "raw"))
+    sw_filename = "sw.js"
+    cache_key = (sw_filename, "raw")
+    body = _html_cache.get(cache_key)
     if body is None:
-        body = (settings.STATIC_DIR / "sw.js").read_text(encoding="utf-8")
-        _html_cache[("sw.js", "raw")] = body
+        body = (settings.STATIC_DIR / sw_filename).read_text(encoding="utf-8")
+        _html_cache[cache_key] = body
     return Response(
         content=body,
         media_type="application/javascript",

@@ -59,8 +59,8 @@
       function readCookie(name) {
         var prefix = name + '=';
         var parts = document.cookie.split(';');
-        for (var i = 0; i < parts.length; i++) {
-          var c = parts[i].trim();
+        for (var part of parts) {
+          var c = part.trim();
           if (c.indexOf(prefix) === 0) return decodeURIComponent(c.substring(prefix.length));
         }
         return '';

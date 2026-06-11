@@ -5,9 +5,9 @@ PostgreSQL + a zero-framework JavaScript SPA. One Docker command to
 run, no external auth, no external file storage — attachments live
 in the database.
 
-**Current version: v2.8** — security hardening release. OWASP audit
+**Current version: v2.10** — security hardening release. OWASP audit
 remediation + UI fixes; eight additive items, no DB schema change.
-See [CHANGELOG.md](CHANGELOG.md) for the full v2.8 entry. **Zero
+See [CHANGELOG.md](CHANGELOG.md) for the full v2.10 entry. **Zero
 schema changes from v2.4 onward** — production databases are
 byte-for-byte untouched on every upgrade. See
 *[Live-data safety](#live-data-safety)*.
