@@ -300,13 +300,9 @@ if _origins == ["*"]:
         "your concrete origin(s) for cross-origin browser sessions."
     )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_origins,
-    allow_credentials=_allow_credentials,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORSMiddleware is installed LAST in this file (just below the
+# Observability middleware) so that, under Starlette's reverse-add order, it
+# becomes the OUTERMOST layer. See the note there for the rationale. (S8414.)
 
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 
@@ -479,13 +475,25 @@ app.add_middleware(RateLimitMiddleware)
 # so unauthenticated abuse is throttled FIRST and our 403 doesn't even
 # get evaluated on a flooded path.
 app.add_middleware(CSRFMiddleware)
-# Observability is the OUTERMOST middleware so it sees the request from
-# the moment it arrives until the moment the response leaves; that way
-# the access log + /metrics histogram includes time spent in every other
-# middleware below it (rate limit, CSRF, CORS, ...).
+# Observability sits just inside CORS (the outermost layer). It still times
+# and logs the full request lifecycle below CORS — rate limit, CSRF,
+# routing, handlers — i.e. everything worth measuring; only the thin CORS
+# header pass sits outside its span.
 app.add_middleware(
     ObservabilityMiddleware,
     json_logging=settings.JSON_LOGGING,
+)
+
+# CORS MUST be the LAST middleware added so it is OUTERMOST in Starlette's
+# stack: that way it answers preflight OPTIONS before rate-limit/CSRF can
+# reject them, and it stamps CORS headers on every response — including
+# errors raised by any inner middleware. (SonarPython S8414.)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_origins,
+    allow_credentials=_allow_credentials,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -687,5 +695,14 @@ async def http_exc_handler(request: Request, exc: HTTPException) -> JSONResponse
 
 
 if __name__ == "__main__":
+    import os
     import uvicorn
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=False)
+    # Bind to loopback by default; set HOST=0.0.0.0 to expose on all
+    # interfaces. Production does this via the container's Dockerfile CMD, so
+    # the all-interfaces bind is never hardcoded here. (SonarPython S8392.)
+    uvicorn.run(
+        "app.main:app",
+        host=os.getenv("HOST", "127.0.0.1"),
+        port=int(os.getenv("PORT", "8000")),
+        reload=False,
+    )

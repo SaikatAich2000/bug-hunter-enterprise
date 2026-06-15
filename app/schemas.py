@@ -906,7 +906,7 @@ class BugOut(BaseModel):
     status: str
     priority: str
     environment: str
-    due_date: Optional[str]
+    due_date: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     attachment_count: int = 0
