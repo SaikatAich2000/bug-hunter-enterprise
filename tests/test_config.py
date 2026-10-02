@@ -110,6 +110,34 @@ def test_smtp_password_strips_gmail_display_spaces(monkeypatch):
         importlib.reload(fresh_config)
 
 
+# Settings.FCM_CREDENTIALS_JSON / WEB_PUSH_ENABLED
+def test_earlier_edition_firebase_key_variable_still_configures_push(monkeypatch):
+    """FIREBASE_SA_JSON was the earlier enterprise edition's variable for the service-account key."""
+    import importlib
+
+    import app.config as fresh_config
+
+    monkeypatch.delenv("FCM_CREDENTIALS_JSON", raising=False)
+    monkeypatch.delenv("WEB_PUSH_ENABLED", raising=False)
+    try:
+        monkeypatch.delenv("FIREBASE_SA_JSON", raising=False)
+        assert importlib.reload(fresh_config).get_settings().WEB_PUSH_ENABLED is False
+
+        monkeypatch.setenv("FIREBASE_SA_JSON", '{"type": "service_account"}')
+        settings = importlib.reload(fresh_config).get_settings()
+        assert settings.FCM_CREDENTIALS_JSON == '{"type": "service_account"}'
+        assert settings.WEB_PUSH_ENABLED is True
+
+        monkeypatch.setenv("FCM_CREDENTIALS_JSON", '{"type": "new"}')
+        monkeypatch.setenv("WEB_PUSH_ENABLED", "false")
+        settings = importlib.reload(fresh_config).get_settings()
+        assert settings.FCM_CREDENTIALS_JSON == '{"type": "new"}'
+        assert settings.WEB_PUSH_ENABLED is False
+    finally:
+        monkeypatch.undo()
+        importlib.reload(fresh_config)
+
+
 # Settings.APP_BASE_URL
 # _normalize_database_url
 def test_normalize_database_url_no_scheme_separator():

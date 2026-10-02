@@ -341,16 +341,18 @@ class Settings:
     EMAIL_DIGEST_CRON: str = os.getenv("EMAIL_DIGEST_CRON", "").strip()
     EMAIL_DIGEST_TIMEZONE: str = os.getenv("EMAIL_DIGEST_TIMEZONE", "").strip()  # IANA tz, empty = UTC
 
-    # --- Web push (Firebase Cloud Messaging) --- off by default, independent of the email digest.
-    WEB_PUSH_ENABLED: bool = _env_bool("WEB_PUSH_ENABLED", False)
+    # --- Web push (Firebase Cloud Messaging) --- independent of the email digest.
     # Service-account key, either as a mounted file path (FCM_CREDENTIALS_FILE) or
     # inline as an env var (FCM_CREDENTIALS_JSON — raw JSON or base64-encoded JSON).
     # JSON takes priority when both are set; the env var form suits platforms
     # like Azure Container Apps where mounting a secret file is impractical.
+    # FIREBASE_SA_JSON is the earlier enterprise edition's name for the same key.
     FCM_CREDENTIALS_FILE: str = _env_path(
         "FCM_CREDENTIALS_FILE", Path("secrets/firebase-admin.json"), base_dir=BASE_DIR,
     )
-    FCM_CREDENTIALS_JSON: str = os.getenv("FCM_CREDENTIALS_JSON", "")
+    FCM_CREDENTIALS_JSON: str = os.getenv("FCM_CREDENTIALS_JSON", "") or os.getenv("FIREBASE_SA_JSON", "")
+    # Off unless an inline key is provided or WEB_PUSH_ENABLED says otherwise.
+    WEB_PUSH_ENABLED: bool = _env_bool("WEB_PUSH_ENABLED", bool(FCM_CREDENTIALS_JSON))
     FIREBASE_API_KEY: str = os.getenv("FIREBASE_API_KEY", "")
     FIREBASE_AUTH_DOMAIN: str = os.getenv("FIREBASE_AUTH_DOMAIN", "")
     FIREBASE_PROJECT_ID: str = os.getenv("FIREBASE_PROJECT_ID", "")

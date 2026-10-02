@@ -1459,6 +1459,64 @@ def test_cov_database_build_engine_postgres_branch(monkeypatch):
     assert captured["kw"].get("max_overflow") == 10
 
 
+def test_postgres_engine_sends_no_startup_options_and_sets_timeouts_per_session(monkeypatch):
+    # Connection poolers (Neon, PgBouncer, Supabase) reject unknown startup
+    # parameters such as "-c statement_timeout=...", so the timeouts must be
+    # applied with set_config() once the connection is open instead.
+    import app.database as database
+
+    captured = {}
+    listeners = {}
+
+    def fake_create_engine(url, **kw):
+        captured.update(kw)
+        return object()
+
+    def fake_listens_for(_target, name):
+        def register(fn):
+            listeners[name] = fn
+            return fn
+        return register
+
+    class Cursor:
+        def __init__(self):
+            self.statements = []
+
+        def execute(self, sql, params=None):
+            self.statements.append((sql, params))
+
+        def close(self):
+            pass
+
+    class Connection:
+        def __init__(self):
+            self.cursor_obj = Cursor()
+            self.commits = 0
+
+        def cursor(self):
+            return self.cursor_obj
+
+        def commit(self):
+            self.commits += 1
+
+    monkeypatch.setattr(database, "create_engine", fake_create_engine)
+    monkeypatch.setattr(database.event, "listens_for", fake_listens_for)
+    database._build_engine("postgresql+psycopg://u:p@ep-x-pooler.example.com/bh")
+
+    assert "options" not in captured["connect_args"]
+    assert captured["connect_args"]["connect_timeout"] == database._settings.DB_CONNECT_TIMEOUT_SECONDS
+
+    conn = Connection()
+    listeners["connect"](conn, None)
+    statements = conn.cursor_obj.statements
+    assert statements[0][0] == "SET TIME ZONE 'UTC'"
+    assert "set_config('statement_timeout'" in statements[1][0]
+    assert "set_config('lock_timeout'" in statements[1][0]
+    assert statements[1][1] == (
+        str(database._settings.DB_STATEMENT_TIMEOUT_MS), str(database._settings.DB_LOCK_TIMEOUT_MS))
+    assert conn.commits == 1
+
+
 def test_cov_database_add_missing_columns_alters_legacy_db(monkeypatch, tmp_path):
     # Build a minimal SQLite DB that lacks the new columns, then verify
     # _add_missing_columns adds them via ALTER TABLE.

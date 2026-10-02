@@ -274,6 +274,7 @@ BOOTSTRAP_ADMIN_PASSWORD=<a strong password>
 APP_BASE_URL=https://bugs.example.com
 CORS_ORIGINS=https://bugs.example.com
 APP_ENV=production                        # strict checks: https URL, secure cookies, real email backend
+EMAIL_BACKEND=smtp                        # plus the SMTP_* values; console is refused in production
 ALLOW_PUBLIC_SIGNUP=false                 # unless anyone may create an organization on your host
 FIELD_ENCRYPTION_KEY=<Fernet key>         # encrypts 2FA and webhook secrets (see .env.example)
 PRIVACY_CONTACT_EMAIL=privacy@example.com
@@ -324,7 +325,7 @@ image or the repository. The ones that matter most:
 | `EMAIL_BACKEND` | `console` | `console` (log to stdout), `smtp`, or `disabled`. |
 | `EMAIL_DIGEST_ENABLED` | `false` | Batch per-event emails into one daily digest. |
 | `MAX_REPORT_ROWS` | `50000` | Max rows in one Reports Excel export (returns 413 above it). |
-| `WEB_PUSH_ENABLED` | `false` | Master switch for browser push (FCM). |
+| `WEB_PUSH_ENABLED` | `false` (`true` when `FCM_CREDENTIALS_JSON` or `FIREBASE_SA_JSON` is set) | Master switch for push (FCM). |
 | `GIT_BRANCH_CREATION_ENABLED` / `GIT_BRANCH_DELETION_ENABLED` | `false` / `false` | Story feature branches; see [Git integration](#git-integration-story-feature-branches). |
 | `GIT_CREDENTIAL_ENCRYPTION_KEY` | _(blank)_ | Fernet key that encrypts per-project Git tokens. Required before a token can be saved. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | _(blank)_ | OTLP/**gRPC** collector, e.g. `http://otel-collector:4317`. Blank means console-only, with nothing exported. |
@@ -520,7 +521,7 @@ their data and ids. On boot, `project_memberships` are copied into the project r
 role becomes `user`; the old tables stay in place, unread. Check these before switching over:
 
 - Events without a project are now visible to admins only (assign them a project to share them).
-- Settings that were renamed or dropped: `FIREBASE_SA_JSON` is `FCM_CREDENTIALS_JSON` (or a mounted `FCM_CREDENTIALS_FILE`); `JSON_LOGGING=true` is `LOG_FORMAT=json`; `ALLOW_ACCOUNT_ENUMERATION=true` is `FORGOT_PASSWORD_ENUMERATION_SAFE=false`; `CSRF_PROTECTION` is gone (cross-site request protection is always on, based on the request's origin); `FIREBASE_HTTP_TIMEOUT_SECONDS` and `WEBHOOK_MAX_URL_LENGTH` are gone.
+- Settings that were renamed or dropped: `FIREBASE_SA_JSON` is now `FCM_CREDENTIALS_JSON` (or a mounted `FCM_CREDENTIALS_FILE`), and the old name is still read, which also switches push on; `JSON_LOGGING=true` is `LOG_FORMAT=json`; `ALLOW_ACCOUNT_ENUMERATION=true` is `FORGOT_PASSWORD_ENUMERATION_SAFE=false`; `CSRF_PROTECTION` is gone (cross-site request protection is always on, based on the request's origin); `FIREBASE_HTTP_TIMEOUT_SECONDS` and `WEBHOOK_MAX_URL_LENGTH` are gone.
 - Webhook secrets and 2FA secrets keep working. Set `FIELD_ENCRYPTION_KEY` to encrypt them from then on.
 - `AUDIT_RETENTION_DAYS` defaults to 365: older audit rows are deleted on the first daily run. Set `0` first if you keep history for longer.
 - Sign-up is on by default; set `ALLOW_PUBLIC_SIGNUP=false` for a closed installation.
@@ -648,6 +649,7 @@ behind a TLS-intercepting proxy.
 
 - **`APP_VERSION is required`:** add `APP_VERSION=<release>` to `.env`.
 - **App refuses to start in production:** the log lists every unmet requirement (session secret, bootstrap password, auto-login, Git encryption key, and with `APP_ENV=production` also https URL, secure cookies and email backend).
+- **Hosted PostgreSQL behind a pooler (Neon, Supabase, PgBouncer):** supported; the connection sends no startup options, which poolers reject. Platforms that build from `requirements.txt` get the newest allowed versions; `pip install --require-hashes -r requirements-lock.txt` installs the tested set.
 - **Database connection refused:** check `docker compose ps`; the app waits for the database health check, so rerun `./deploy.sh` once it's healthy.
 - **Port 8765 in use:** stop the other service or change the host port in `docker-compose.yml`.
 - **Logged out after every restart:** set a fixed `SESSION_SECRET`.

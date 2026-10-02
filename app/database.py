@@ -78,23 +78,25 @@ def _build_engine(url: str) -> Engine:
         pool_recycle=1800,
         pool_timeout=30,
         # TCP connect to a firewalled/slow Postgres must fail fast.
-        connect_args={
-            "connect_timeout": _settings.DB_CONNECT_TIMEOUT_SECONDS,
-            "options": (
-                f"-c statement_timeout={int(_settings.DB_STATEMENT_TIMEOUT_MS)} "
-                f"-c lock_timeout={int(_settings.DB_LOCK_TIMEOUT_MS)}"
-            ),
-        },
+        connect_args={"connect_timeout": _settings.DB_CONNECT_TIMEOUT_SECONDS},
         future=True,
     )
 
     @event.listens_for(eng, "connect")
-    def _pg_utc_session(dbapi_conn, _):  # pragma: no cover - exercised only on PG
+    def _pg_session_setup(dbapi_conn, _):
         # UTC session TZ keeps func.date() consistent with Python-side .date();
-        # otherwise timeline day buckets can shift by a day.
+        # otherwise timeline day buckets can shift by a day. The timeouts are
+        # session settings rather than startup "options": connection poolers
+        # (Neon, PgBouncer, Supabase) reject unknown startup parameters.
         cur = dbapi_conn.cursor()
         cur.execute("SET TIME ZONE 'UTC'")
+        cur.execute(
+            "SELECT set_config('statement_timeout', %s, false), set_config('lock_timeout', %s, false)",
+            (str(int(_settings.DB_STATEMENT_TIMEOUT_MS)), str(int(_settings.DB_LOCK_TIMEOUT_MS))),
+        )
         cur.close()
+        # Commit so a rolled-back first transaction cannot undo the settings.
+        dbapi_conn.commit()
 
     return eng
 
