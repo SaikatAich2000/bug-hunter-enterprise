@@ -181,3 +181,36 @@ def test_enterprise_tables_are_folded_on_postgres(scratch_db):
     assert "USER_ROLES ['user', 'user']" in out.stdout, out.stdout
     assert "TOKENS 1" in out.stdout, out.stdout
     assert "HAS_STEP True" in out.stdout, out.stdout
+
+
+MIGRATION_LOCK = r"""
+import threading
+from sqlalchemy import create_engine, text
+from app.database import init_db
+
+seeded = []
+other = create_engine(URL)
+held = other.connect()
+held.execute(text("SELECT pg_advisory_xact_lock(72794811)"))
+assert init_db(on_migrated=lambda: seeded.append("busy")) is False
+held.rollback()
+
+def check_lock_held_while_seeding():
+    with other.connect() as c:
+        seeded.append(c.execute(text("SELECT pg_try_advisory_xact_lock(72794811)")).scalar())
+
+assert init_db(on_migrated=check_lock_held_while_seeding) is True
+with other.connect() as c:
+    leftover = c.execute(text("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'")).scalar()
+print("SEEDED", seeded)
+print("LEFTOVER", leftover)
+"""
+
+
+def test_migration_lock_is_transaction_scoped(scratch_db):
+    # A session-level lock leaks behind a transaction-mode pooler (Neon, PgBouncer), so the lock
+    # must be released with its transaction while still covering the seeding step.
+    out = _run(MIGRATION_LOCK, scratch_db)
+    assert out.returncode == 0, (out.stdout + out.stderr)[-3000:]
+    assert "SEEDED [False]" in out.stdout, out.stdout
+    assert "LEFTOVER 0" in out.stdout, out.stdout

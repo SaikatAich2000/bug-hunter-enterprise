@@ -95,6 +95,9 @@ def _signup(pg, base, org="Globex", email=None, name="Gina Owner"):
     pg.click("#signupSubmit")
     pg.wait_for_url(f"{base}/")
     expect(pg.locator("#accountName")).not_to_have_text("")
+    # Callers often reload or navigate next; WebKit reports every request that a navigation
+    # cancels as a page error, so let the home page finish loading first.
+    pg.wait_for_load_state("networkidle")
     return email
 
 

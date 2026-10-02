@@ -750,17 +750,12 @@ def init_db(on_migrated: Callable[[], None] | None = None) -> bool:
             on_migrated()
         return True
 
-    # One connection, explicit commits: the advisory lock is session-level, so
-    # it stays held across the DDL commit and the seeding that follows it.
+    # Transaction-scoped advisory locks, released by commit/rollback. A session
+    # lock would leak behind a transaction-mode pooler (Neon, PgBouncer): after
+    # a commit the pooler hands the server connection to another client, so the
+    # unlock may run elsewhere and every later boot would skip migrating.
     with engine.connect() as conn:
-        try:
-            locked = conn.execute(
-                text("SELECT pg_try_advisory_lock(72794811)")).scalar()
-            conn.commit()
-        except SQLAlchemyError:
-            conn.rollback()
-            locked = True
-        if not locked:
+        if not _try_migration_lock(conn):
             logger.info(
                 "startup reconciliation skipped: another replica holds "
                 "the migration lock; starting to serve without migrating."
@@ -778,21 +773,33 @@ def init_db(on_migrated: Callable[[], None] | None = None) -> bool:
             _backfill_bug_display_id(conn)
             _preserve_legacy_html_descriptions(conn)
             _align_agile_hierarchy(conn)
-            # All DDL commits together; seeding uses its own session and must
-            # see the tables, so it runs after this commit, still under the lock.
+            # All DDL commits together (and releases the lock).
             conn.commit()
-            if on_migrated is not None:
-                on_migrated()
         except BaseException:
             conn.rollback()
             raise
+        if on_migrated is None:
+            return True
+        # Seeding uses its own session and must see the committed tables. This
+        # connection's open transaction holds the lock meanwhile, so replicas
+        # never seed at the same time; seeding is idempotent when sequential.
+        if not _try_migration_lock(conn):
+            logger.info("startup seeding skipped: another replica holds the migration lock.")
+            return True
+        try:
+            on_migrated()
         finally:
-            try:
-                conn.execute(text("SELECT pg_advisory_unlock(72794811)"))
-                conn.commit()
-            except SQLAlchemyError:
-                conn.rollback()
+            conn.rollback()
     return True
+
+
+def _try_migration_lock(conn) -> bool:
+    """Take the migration lock for the connection's current transaction, without waiting."""
+    try:
+        return bool(conn.execute(text("SELECT pg_try_advisory_xact_lock(72794811)")).scalar())
+    except SQLAlchemyError:
+        conn.rollback()
+        return True
 
 
 # Explicit, source-controlled seed data for the global workflow statuses
