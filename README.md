@@ -1,617 +1,677 @@
-# 🐞 Bug Hunter v4
+# Bug Hunter Enterprise Edition
 
-A multi-tenant, self-hostable issue tracker. FastAPI + SQLite or
-PostgreSQL + a zero-framework JavaScript SPA. One Docker command to
-run, no external auth, no external file storage — attachments live
-in the database.
+Bug Hunter Enterprise is a self-hosted, multi-tenant tracker for bugs, requirements, tasks and agile
+delivery. It runs as a single Docker Compose stack: a FastAPI + PostgreSQL
+backend and a React (JavaScript) frontend. It doesn't need an external login
+provider, and attachments are stored in PostgreSQL, so one database backup
+saves everything.
 
-**Current version: v2.10** — security hardening release. OWASP audit
-remediation + UI fixes; eight additive items, no DB schema change.
-See [CHANGELOG.md](CHANGELOG.md) for the full v2.10 entry. **Zero
-schema changes from v2.4 onward** — production databases are
-byte-for-byte untouched on every upgrade. See
-*[Live-data safety](#live-data-safety)*.
+One installation hosts any number of **organizations**. Each has its own people,
+projects, events, branding, invitations and webhooks, and nothing is visible across
+organizations. Sign-in is by email, which also tells Bug Hunter which organization you
+belong to.
 
----
+On top of classic issue tracking it has opt-in, per-project **Sprints & Agile**
+(boards, a ranked backlog, sprint planning, releases and reports), optional
+**GitHub feature branches** for User Stories, **bulk import** from Excel/CSV,
+**OpenTelemetry** observability, and an in-app assistant called **Sleuth**. The enterprise
+layer adds two-factor sign-in, project leads, custom fields, saved views, signed webhooks,
+per-organization branding, and data-subject tools (export and delete).
 
-## What's new in v2.8
+Upgrades only *add* tables and columns. Existing data is never removed or
+changed (see [Live-data safety](#live-data-safety)). The running version is
+whatever `APP_VERSION` in `.env` says, and `/api/health` reports it.
 
-Security hardening after an OWASP-style audit. **All additive**, no DB
-schema change, no API surface change. Highlights — login timing
-equalised (no enumeration), per-account lockout, HaveIBeenPwned breach
-check on every password set, EXIF strip on image uploads, CSV formula
-injection guard, request body-size middleware, X-Forwarded-For trust
-gate, masked emails in INFO logs, unified 401 for inactive accounts.
-UI: `.auth-card-wide` actually renders wider on signup, logout dialog
-z-index now stacks above modals + Sleuth FAB, mobile modals use
-`100dvh`, auth pages get safe-area-inset padding. +62 security tests
-(**752 total, all green**). Full details in [CHANGELOG.md](CHANGELOG.md).
+## Contents
 
----
-
-## What's new in v2.7
-
-A **quality, security, and stability** release. No new user-facing
-features and **zero schema changes** — pure code-quality work driven
-by an end-to-end SonarQube pass. Existing production databases stay
-byte-for-byte intact.
-
-- **SonarQube quality gate fully green.** **0** open issues, **0**
-  unreviewed security hotspots, **0** bugs, **0** vulnerabilities,
-  **0.5%** duplication, **88.1%** project coverage (90.8% line /
-  78.9% branch). Reliability / Security / Security-Review /
-  Maintainability all rated **A**. Block-suppression markers in
-  `app/static/app.js` (`SONAR_RT_BEGIN/END`) protect the v2.6
-  rich-text editor and in `app/csrf.py` (`SONAR_CSRF_BEGIN/END`)
-  document the load-bearing `HttpOnly=False` on the double-submit
-  CSRF cookie. Reproducible via `scripts/sonar-scan.{sh,ps1}`.
-- **Cognitive complexity refactored across the backend.**
-  ~20 Python sites (NLU parser, executor's bug-list builder,
-  action-planner, `update_bug` / `update_event` / `update_user`
-  route handlers, auth session validator, LLM dispatcher,
-  invitation accept/resend flows, sessions index, stats dispatcher,
-  CSRF same-origin builder, database init() per-dialect helpers)
-  and four JS sites (`setView`, `postComment`, `openBugForm`,
-  rich-text apply) were split into focused helpers. Every function
-  now scores under the cognitive-complexity threshold of 15.
-- **Security hotspots eliminated in code, not via UI review.** The
-  bare-title regex became a literal-substring scan; the markdown
-  link converter is now a hand-coded `indexOf` scanner; the
-  user-form password placeholders use a helper + bracket notation;
-  the CSRF same-origin URL builder no longer contains an inline
-  `"http://"` literal; the lone remaining hotspot — the
-  load-bearing `HttpOnly=False` on the CSRF cookie — is suppressed
-  at scan-config level with a full threat-model writeup in
-  `app/csrf.py`.
-- **Mechanical modernization sweeps across the SPA.** All `parseInt`
-  → `Number.parseInt`, optional chaining everywhere safe,
-  `setAttribute("data-X")` → `dataset.X`, `window.*` →
-  `globalThis.*` (non-rich-text only), `replace(/…/g, …)` →
-  `replaceAll`, redundant catches handled, nested ternaries hoisted,
-  string literals deduplicated into constants.
-- **Accessibility polish.** Sidebar + main nav got `aria-label`s,
-  the assignees / managers field groups became `<fieldset>` +
-  `<legend>`, listbox-style multi-selects became
-  `role="menu"`/`menuitemcheckbox`, `.invite-status-*` chips
-  switched to solid backgrounds for WCAG-AA contrast, form labels
-  associated to controls, autocomplete attributes added.
-- **Test suite expanded from 178 → 690 tests** (+512 new unit and
-  integration tests, including the v2.5 status-validation /
-  admin-curation suite and the v2.6 rich-text sanitiser + pagination
-  suite). Coverage on previously under-tested modules:
-  classifier 0%→99%, memory 0%→97%, actions 15%→88%, llm 23%→71%,
-  excel 27%→95%, nlu 30%→94%, executor 34%→84%, webhooks_delivery
-  29%→93%, email_service 61%→98%, routes/sessions 21%→94%,
-  routes/users 39%→86%, routes/bugs 53%→96%, routes/projects
-  55%→90%, routes/memberships 57%→95%.
-
-### Database safety (v2.7)
-
-**Schema migrations remain strictly additive.** Every v2.7 change is
-application-layer:
-
-- `app/models.py` was edited only to lift repeated string literals
-  (`"bugs.id"`, `"users.id"`, `"all, delete-orphan"`, etc.) into
-  module-level constants. SQL emitted by SQLAlchemy is byte-identical.
-- No new Alembic revisions, no `ALTER TABLE`, no `DROP`, no
-  `TRUNCATE`. `init_db()`'s additive 3-pass sync is unchanged.
-- `deploy.sh`, `down.sh` unchanged. The `bugtracker_pgdata` volume is
-  never referenced by any v2.7 code change.
-
-**Upgrade procedure:** `git pull && docker compose up -d --build app`.
-Postgres is not restarted; the data volume is not touched.
-
----
-
-## What's new in v2.6
-
-A **rich-text + UX consistency** release. **Zero schema changes** — every
-new control lands in the SPA, every new server check lands in
-`app/schemas.py` and `app/routes/bugs.py`. Existing production databases
-stay byte-for-byte intact.
-
-- **Rich-text editor for descriptions and comments.** Contenteditable
-  surface replaces plain textareas, with a toolbar (bold, italic,
-  underline, strikethrough, bullet / numbered lists, blockquote, code
-  block, image insert, clear-formatting). `Ctrl+B / Ctrl+I / Ctrl+U`
-  shortcuts. Backend allowlist sanitiser (`sanitize_html()` in
-  `app/schemas.py`) strips `<script>`, `<iframe>`, `javascript:` URLs,
-  on-event attributes — everything not in `_ALLOWED_TAGS` /
-  `_ALLOWED_ATTRS` — before persistence.
-- **Paste images directly into descriptions and comments.** `Ctrl+V`
-  (or `Cmd+V`) of a screenshot in the editor inlines it as a base64
-  `data:image/*` URL (cap ~14 MB). Toolbar 🖼 button opens a file
-  picker. Inline images survive the sanitiser; everything else gets
-  scrubbed.
-- **Custom calendar / date picker.** In-house popover (month nav,
-  Today shortcut, today / selected highlights) replaces native
-  `<input type="date">` everywhere, so the look is consistent across
-  Chrome, Firefox, Safari, Edge. Auto-flips above when the modal
-  doesn't leave room below.
-- **Custom styled dropdowns.** Every `<select>` in the bug modal
-  becomes a styled button + popover listbox matching the calendar
-  and multi-select filter dropdowns. Hover / focus / disabled states
-  unified. `MutationObserver` keeps the visible label in sync when
-  options change programmatically.
-- **Sidebar names are clickable to edit.** Click the colored swatch /
-  avatar to toggle the filter; click the name to open the project /
-  user edit modal (when permitted). The ✎ icon still works.
-- **Audit log loads more by default.** Default page raised from 300 →
-  **5 000 rows**, with a *Load older entries* button (server cap:
-  **10 000 per request**). New `offset` query param on `GET /api/audit`
-  pages the long tail.
-- **Newest-first ordering** for bug attachments, bug comments, and
-  event-detail item lists. (`Bug.comments.order_by` flipped to `desc`;
-  GET endpoints sort by `created_at.desc(), id.desc()`.)
-- **Per-item-type status validation finalised.** `PUT /api/bugs/{id}`
-  rejects any status change to a value not allowed for the effective
-  item type (e.g. `Task → "Not a Bug"`) with `400` and a clear
-  `Allowed: [...]` list. Existing rows with legacy statuses still
-  read; only setting an invalid status is blocked.
-- **Description / comment limits raised** to 1 MB / 200 KB to make
-  room for rich HTML + pasted screenshots, all behind the allowlist
-  sanitiser.
-- **Fully responsive.** Calendar popover, rich-editor toolbar, custom
-  dropdown panel, sidebar name pills all collapse to mobile-portrait
-  widths.
-
-### Database safety (v2.6)
-
-**No new columns, no schema migrations.** The only `models.py` edit is
-an ORM `order_by` flip on `Bug.comments`. `app/schemas.py` raises
-varchar-less Pydantic limits (the SQL columns are already `TEXT`).
-`app/main.py` exposes one new key (`statuses_by_type`) in `/api/meta`.
-The `bugtracker_pgdata` volume is never referenced by any v2.6 code
-change.
-
----
-
-## What's new in v2.5
-
-A **content-curation + UX-consistency** release. **Zero schema
-changes**; existing databases byte-for-byte intact.
-
-- **Per-item-type status sets.** *"Not a Bug"*, *"Resolved"* and
-  *"Resolve Later"* only apply to Bugs; *"Approved"*, *"In Review"*,
-  *"Implemented"*, *"Rejected"*, *"Deferred"* only to Requirements;
-  *"Done"*, *"Blocked"*, *"Cancelled"* only to Tasks. *"New"* is the
-  one status shared by all three. Pre-v2.5 rows with now-invalid
-  statuses still render; only *moving to* an invalid status is
-  blocked (`400 Bad Request` with the allowed list).
-- **Comments and attachments are admin-curated.** Editing or
-  deleting any comment, and deleting any attachment (bug-level or
-  comment-scoped), is **admin-only**. The SPA hides ✎ / 🗑 for
-  non-admins; the API enforces `403` server-side. Creating comments
-  and uploading attachments stays open to anyone with edit
-  permission. Two new endpoints back the SPA affordances:
-  - `PUT /api/bugs/{bug_id}/comments/{comment_id}` — admin-only
-    edit; emits a `comment_edited` audit row.
-  - `DELETE /api/bugs/{bug_id}/comments/{comment_id}` — admin-only
-    delete; cascades attachments via the comment FK; emits a
-    `comment_deleted` audit row.
-- **Post-creation attachment uploader.** New 📎 *Add attachment*
-  button on the bug / requirement / task detail modal, next to the
-  Attachments heading. Stage multiple files, see thumbnail previews,
-  remove with ✕, click *Upload N file(s)*.
-- **Global blocking loader.** Full-page loader overlay on every
-  server action (create, update, delete, upload, password change,
-  session revoke, invitation flows, etc.) — blocks all input until
-  the request finishes, so double-submit is impossible and progress
-  is visible.
-- **Layout polish.** Events / Sessions / Audit / Invitations views
-  get a card-style controls bar (boxed bg-elev + border + radius +
-  shadow); bug table switches to percentage-based column widths
-  with min-widths so wide tables don't squish columns past
-  readability.
-- **Events list + event-detail filters.** Search box + date filter
-  + Clear button above the events grid (`#eventsFilterBar`); inside
-  the event detail, a search box + multi-select Status / Priority /
-  Assignee filter bar (`#eventDetailFilterBar`).
-- **Assignee chip name wrapping fix.** Long names like
-  *"Chinmaya Venkataraman"* truncate cleanly via
-  `.assignee-chip-name` instead of mid-word-breaking.
-- **Fully responsive.** Loader, comment admin actions, attach
-  uploader, events filters all collapse cleanly to mobile-portrait
-  sizes.
-
-### Database safety (v2.5)
-
-**Schema-clean.** Every change is application-layer:
-- Two new comment routes; permission tightening on attachment
-  delete; no column additions, no migrations.
-- Loader / attachment uploader / filter bars are SPA-only.
-- Status validation is Pydantic + route logic — purely runtime.
-- `deploy.sh` / `down.sh` / the `bugtracker_pgdata` volume —
-  unchanged.
-
----
+- [Features](#features)
+- [Organizations & access](#organizations--access)
+- [Sprints & Agile](#sprints--agile)
+- [Architecture](#architecture)
+- [Quick start](#quick-start)
+- [Configuration](#configuration)
+- [Local development](#local-development)
+- [Live-data safety](#live-data-safety)
+- [Upgrading from earlier editions](#upgrading-from-earlier-editions)
+- [Deployment](#deployment)
+- [Sleuth](#sleuth)
+- [Git integration (Story feature branches)](#git-integration-story-feature-branches)
+- [Limitations](#limitations)
+- [Troubleshooting](#troubleshooting)
+- [Security, contributing, license](#security)
 
 ## Features
 
-- **Multi-tenant from the ground up.** Anyone can sign up at
-  `/signup` and create an organization. Strict per-org isolation
-  enforced at every route — cross-org access returns 404 (no
-  existence leak).
-- **Email-based invitations.** Admins / managers invite teammates by
-  email; recipient sets their own password on accept. 7-day
-  expiration.
-- **Project memberships + per-project leads.** Admins see all
-  projects in their org; managers and members see only the projects
-  they're added to. A project lead manages that project's members
-  and can delete its bugs.
-- **Jira-style project keys** — bugs display as `WEB-42`, `API-7`.
-- **Three item types in one numbering system** — Bugs 🐞,
-  Requirements 📐, Tasks ✅ share one `#N` counter. The tab strip
-  scopes KPIs, filters, table columns, and analytics to the active
-  type.
-- **Events** 📅 — containers for groups of work items with one or
-  more managers (admin / manager only). Org-scoped, invisible across
-  tenants.
-- **Login + role-based access** (admin / manager / member, bcrypt).
-  Type-aware enforcement: members can edit Bugs only — Tasks,
-  Requirements, and Events are read-only with a clear banner.
-- **Per-session tracking + admin revocation** — admins see every
-  active session in their org and can log a specific device out.
-- **Comments + attachments** (PDF / image / video) stored as
-  Postgres BLOBs.
-- **Forgot-password flow** via email reset link.
-- **Per-org audit trail** — every create / update / delete / login
-  logged for admins and managers; history survives item deletion.
-  Audit search OR-matches action / detail / actor / entity-type /
-  live bug title + `#id` partial matches.
-- **Email notifications** (Gmail / Outlook / SMTP) on item / event
-  create / update / delete / assignment / new comment. Type-aware
-  subjects.
-- **TOTP / 2FA** for elevated roles.
-- **Webhooks** with retry + signature verification for org-scoped
-  event delivery.
-- **GDPR DSAR** (data subject access request) export and delete
-  endpoints, gated to admins.
-- **Custom fields** per-org, per-item-type.
-- **Branding** — per-org logo, accent colour, and email-from override.
-- **Strict security headers** (CSP, HSTS, X-Frame-Options) on every
-  response.
-- **Sleuth — in-app AI assistant** 🔍. Natural-language questions
-  and audited actions, 100% self-hosted. See *[Sleuth](#sleuth--ai-assistant)*.
-- **Light / dark themes**, fully responsive, CSV export, PWA install.
+| Area | What it does |
+|---|---|
+| Work items | Bugs, requirements and tasks share one `#N` counter with the agile types (Epic, Story, Sub-task). A tab strip filters KPIs, columns and analytics by type. Each type has its own statuses; bugs also have a DEV/UAT/PROD environment. Items can be converted between types in place. |
+| Sprints & Agile | Opt-in per project, modelled on Jira Scrum: ranked backlog and sprint planning, the active sprint board, Epic → issue → Sub-task hierarchy, board settings, and burndown/sprint/velocity/flow reports. See [Sprints & Agile](#sprints--agile). |
+| Projects & events | Projects group your work. Events group items for a standup or review and have one or more managers. |
+| Item links | Link items together: relates, blocks, or duplicate. |
+| Comments & attachments | Rich-text comments (bold, italic, lists, code, quotes) and plain-text descriptions that keep line breaks. PDF, image and video files are stored in PostgreSQL. Pasted images become real attachments, and image metadata (EXIF) is stripped. |
+| Bulk actions | Change status, priority or environment, or delete, across many items at once. |
+| Bulk import | Download an Excel template, fill it in (or use CSV), and import. Every row is validated on its own and errors are reported per row. |
+| Reports | A report builder (manager/admin) that exports a multi-sheet Excel file, plus agile reports (burndown, burnup, velocity, cumulative flow, control chart, workload, scope change, epic progress). |
+| Notifications | In-app bell, email (per event or one daily digest), and optional browser/FCM push. Every notification links straight to its item or event, through the login page if needed. |
+| Audit log | Every create, update, delete and login is recorded for admins and managers, who can filter it and export it as CSV. Entries stay even after an item is deleted (until `AUDIT_RETENTION_DAYS`). |
+| Sessions | Admins see every active session (user, role, IP, browser, time) and can log out a single device. |
+| Organizations | Public sign-up (switchable) creates an organization and its first admin; the bootstrap admin creates the first one. Every record belongs to one organization, and another organization's data answers 404. |
+| Invitations | Admins and managers invite people by email with a role and optional projects (as member or lead). Links are single-use, expire after 7 days and are stored hashed. |
+| Login | Local accounts with bcrypt-hashed passwords, three roles (admin / manager / user), email password reset, a verified email change, per-account lockout, and optional **two-factor sign-in** with an authenticator app and one-time recovery codes. |
+| Project leads | Each project member is a *lead* or a *member*. Leads (and admins) manage the project's members and custom fields. |
+| Custom fields | Per-project text, number, date or choice fields, optionally required, shown on every item form. |
+| Saved views | Save the current filters under a name; admins and managers can share a view with the whole organization. |
+| Webhooks | Admins send item and comment events to HTTPS endpoints, signed with HMAC-SHA256. Private networks are refused; a failing endpoint is suspended automatically. |
+| Branding | Per organization: logo, accent colour and the From address of its emails. |
+| Privacy | A public privacy notice and delete-account page, and, in Account settings, a JSON export of your data and self-service account deletion. Old audit rows are purged after `AUDIT_RETENTION_DAYS`. |
+| Metrics | Optional Prometheus counters at `/api/metrics`. |
+| Git integration | Optional: create a deterministic `feature_<id>_<slug>` branch in a GitHub repository for a User Story, and remove exactly that branch again. |
+| Observability | Optional OpenTelemetry export (traces, metrics, logs) to SigNoz or any OTLP/gRPC collector. |
+| API docs | Self-hosted Swagger UI (`/docs`) and ReDoc (`/redoc`) in development. Production hides them unless `ENABLE_API_DOCS=true`. |
+| Sleuth assistant | Answers plain-English questions and runs actions (with confirmation). Runs locally by default; see [Sleuth](#sleuth). |
+| UI | The Bug Hunter Steam-style dark theme and a light theme, responsive layout, auto-refresh. |
 
----
+### Roles
+
+Organization roles:
+
+- **Admin** has full access in the organization, including user management, branding, webhooks and all deletes, and sees every project.
+- **Manager** can edit any item or event they can see, enable Agile, manage sprints, boards, releases and labels, and invite people. Managers can't delete items, grant the admin role, or edit existing admins.
+- **User** can create and edit Bugs, User Stories and Sub-tasks, move them on the board, and view and export agile reports. Tasks and Requirements are read-only to users, and sprint lifecycle and board/workflow/taxonomy configuration need a manager.
+
+Managers and users see only the projects they belong to. Within a project, a member is a
+**lead** or a plain **member**; leads manage that project's members and custom fields even
+when their organization role is *user*.
+
+## Organizations & access
+
+**Tenancy.** Users, projects, events, audit entries, invitations, saved views and webhooks
+carry an organization; everything else (items, comments, boards, sprints, …) is scoped
+through its project. An id from another organization answers `404 Not Found`, the same as an
+id that doesn't exist, on every endpoint, in bulk import and in Sleuth. Email addresses are
+unique across the whole installation, so signing in needs no organization picker.
+
+**Getting started.**
+
+- *Sign-up:* with `ALLOW_PUBLIC_SIGNUP=true` (the default) anyone can create an organization at `/signup`: it starts with a *General* project and its creator is the admin. Turn it off for a closed installation.
+- *Bootstrap:* `BOOTSTRAP_ADMIN_EMAIL` / `_PASSWORD` create `BOOTSTRAP_ORG_NAME` and its admin on first boot. Leave the email empty to start with no account and rely on sign-up.
+- *Invitations:* **Organization → Invitations**. A manager can only attach projects they lead; only admins invite admins. An invitation for an address that already has an account anywhere is refused.
+
+**Visibility.** Admins see every project of their organization. Everyone else sees the projects
+they belong to, and events that belong to those projects. Events without a project are
+visible to admins only.
+
+**Two-factor sign-in.** *Account settings → Security → Enable 2FA* shows a QR code (and the
+key) for any authenticator app, then confirms with a code and shows ten one-time recovery
+codes once. A code works once: replaying it fails. Turning it off, or making new recovery
+codes, needs the password. An admin can turn it off for someone who lost both their
+authenticator and their recovery codes (open the person in the sidebar, **Turn off their 2FA**).
+`TOTP_ENABLED=false` switches the feature off for the server.
+
+**Webhooks.** *Organization → Webhooks* (admins). Events: `bug.created`, `bug.updated`,
+`bug.deleted`, `comment.added`, `bugs.bulk_updated`, `bugs.bulk_deleted` and the test
+`webhook.ping`; subscribe to `*`, a name, or a family such as `bug.*`. Each delivery is a
+`POST` of
+
+```json
+{"delivery_id": "…", "event": "bug.created", "org_id": 1, "delivered_at": "…", "payload": {}}
+```
+
+with the headers `X-BugHunter-Event`, `X-BugHunter-Delivery` (same as `delivery_id`; use it to
+deduplicate) and `X-BugHunter-Signature: sha256=<hex>`, the HMAC-SHA256 of the raw body with the
+hook's secret. The secret is shown once, when the hook is created or rotated; with
+`FIELD_ENCRYPTION_KEY` set it is encrypted in the database. Deliveries run right after the
+request commits, are best-effort (no queue, redirects are not followed) and are lost if the
+worker restarts mid-flight. Ten failures in a row suspend the hook until an admin resumes it.
+Targets on loopback, private or link-local networks are refused when saved and again when
+delivered; `WEBHOOK_ALLOW_PRIVATE_NETWORKS=true` allows them for listeners inside your own
+network.
+
+**Branding.** *Organization → Branding*: logo (PNG, JPEG, SVG, GIF or WebP up to 100 KB), accent
+colour (applied with automatically readable text) and the From address of the organization's
+emails (your mail server must be allowed to send as it).
+
+**Privacy and data rights.** `/privacy` and `/delete-account` are public pages (the latter is
+the deletion URL an app-store listing asks for). In *Account settings → Privacy* people download
+a JSON file of what is stored about them or delete their account; items they reported stay,
+without their name. The last admin of an organization can't delete the account until another
+admin exists. `PRIVACY_CONTACT_EMAIL` is shown on the privacy page.
+
+**Audit retention.** Audit rows older than `AUDIT_RETENTION_DAYS` (default 365, `0` keeps
+everything) are deleted once a day. Reports built from history, such as status changes and time
+to resolution, only cover that window.
+
+**Metrics.** With `METRICS_ENABLED=true`, `GET /api/metrics` serves Prometheus counters
+(request counts and latency per route, logins, webhook deliveries); set `METRICS_TOKEN` to
+require `Authorization: Bearer <token>`. Counters are per worker process.
+
+Deleting items, editing/deleting comments, and deleting attachments are
+admin-only for every type. Everyone sees only the projects they are a member of,
+except admins.
+
+## Sprints & Agile
+
+Sprints work the way Jira Software's Scrum boards do. Agile is **off for every
+project** until a manager or admin opens **Sprints**, picks the project and
+clicks **Set up Scrum board**. That creates the project's board (To Do, In
+Progress, Testing, Done) and a backlog ranked from its open issues; nothing is
+deleted or changed.
+
+**Hierarchy.** There are three levels, as in Jira:
+
+- **Epic**: a large body of work. Epics are never in a sprint.
+- **Standard issues**: Story, Task, Bug and Requirement. Each can belong to one
+  Epic and is planned into sprints.
+- **Sub-task**: always has a standard issue as its parent, and always follows
+  that parent's sprint and Epic.
+
+The server enforces these rules on every write path (API, bulk edit, import,
+Sleuth), and records each change to status, sprint, estimate, Epic, parent,
+type and project in a change log the reports are built from.
+
+| Tab | What it does |
+|---|---|
+| Backlog | Future and active sprints above the ranked backlog. Drag issues (or several ticked issues) to rank them or plan them into a sprint; the ⋯ menu and the keyboard do the same without dragging. Create, edit, start and complete sprints here. Starting needs at least one issue and opens the board. Completing keeps finished issues with the closed sprint and moves the rest to the backlog, a future sprint or a new sprint. |
+| Active sprint | The board: columns map to statuses, and dragging a card moves it to that column's status. Column min/max (WIP) limits, swimlanes (stories, assignees, Epics, priority), quick filters and flags. An issue is done when its status is in the right-most column. |
+| Epics | Each Epic with its issues and their sub-tasks, progress by estimate, and the issues not yet in an Epic. Link or unlink issues here. |
+| Reports | Burndown, burnup, sprint report, velocity, cumulative flow diagram, control chart, Epic report, daily summary and workload, each with CSV export. |
+| Releases & labels | Versions/releases, components and labels. |
+| Capacity | Per-sprint capacity: each member's hours per day and days off against the committed estimate. |
+| Board settings | Columns and their statuses, column limits, estimation statistic (story points, hours or issue count), working days and time zone (used by the burndown guideline), and quick filters. |
+
+Reports replay the change log, so a sprint's commitment is what it held when
+it started, scope added or removed afterwards is shown separately, and
+re-estimates count as scope changes. Lifecycle and bulk endpoints accept an
+`Idempotency-Key` header so retried requests are safe.
+
+**Upgrading from the earlier Sprints preview.** The first boot converts the
+retired Collection and Feature levels into labels on the issues they grouped
+(a Story under a Feature joins that Feature's Epic), turns sub-tasks without a
+valid parent into Tasks, takes Epics out of sprints and re-ranks every issue in
+the list it sits in. The conversion runs once and is safe to repeat.
+
+## Architecture
+
+- **Backend:** FastAPI, SQLAlchemy 2.x and Pydantic 2. PostgreSQL 16 in production; SQLite for tests and quick local runs.
+- **Frontend:** React 18 in plain JavaScript (JSX), built with Vite into `app/static`, which FastAPI serves directly. Tested with Vitest and linted with ESLint.
+- **Packaging:** Docker Compose runs the app and its own PostgreSQL. The image is built on `python:3.12-slim`, and the frontend is compiled in a throwaway `node:20-slim` stage.
+- **Sleuth:** pure-Python rules and a TF-IDF classifier, plus an optional local LLM and an optional cloud LLM with tool calling.
+
+```
+app/
+├── config.py · database.py · main.py · models.py · schemas.py · telemetry.py
+├── auth.py · access.py · tenancy.py · project_keys.py   # sessions · tenant scoping · org setup
+├── totp.py · secrets_box.py · webhooks_delivery.py · metrics.py
+├── email_service.py · notification_service.py · push_service.py · fcm_transport.py
+├── bulk_import.py  # spreadsheet template + row-by-row validation
+├── agile/       # boards · workflow · sprints · backlog/ranking · planning
+│                # hierarchy · integrity · item types · releases · taxonomy
+│                # reports · permissions · idempotency · upgrade
+├── git/         # branches · naming · provider · github · credentials · tls
+├── routes/      # auth · totp · dsar · organizations · invitations · users · projects
+│                # memberships · custom_fields · saved_views · webhooks · devices
+│                # bugs · events · stats · audit · sessions · reports
+│                # notifications · push · git
+│                # agile · agile_board · agile_planning · agile_reports · agile_taxonomy
+├── chatbot/     # Sleuth: nlu · classifier · llm · cloud_llm · redaction
+│                # rag · retrieval · verify · agent · evals · tools
+│                # llm_tools_agent · executor · actions · memory · excel · router
+├── jobs/        # email_digest · audit_retention
+└── static/      # built React bundle + icon.png / favicon.png
+frontend/        # React + Vite SPA source → builds into app/static
+tests/           # SQLite-backed pytest suite (+ Playwright browser suites, marker `ui`)
+scripts/         # load test, release packaging, SonarQube, RAG index builder
+models/          # GGUF files for Sleuth's optional local LLM (gitignored)
+```
+
+There's no `migrations/` folder or Alembic. Schema changes are additive edits
+in `app/models.py`, applied automatically and idempotently by `init_db()` on
+every boot. On PostgreSQL, a database advisory lock serializes concurrent boots.
 
 ## Quick start
 
-**Prerequisites:** [Docker Desktop](https://www.docker.com/products/docker-desktop/).
+You need [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Docker Engine + Compose v2).
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/bug-hunter.git
-cd bug-hunter
-cp .env.example .env       # edit if you want email enabled — see below
+git clone https://github.com/<your-org>/bug-hunter-enterprise.git
+cd bug-hunter-enterprise
+cp .env.example .env       # set APP_VERSION, POSTGRES_PASSWORD, BOOTSTRAP_ADMIN_* at minimum
 ./deploy.sh
 ```
 
-Open **<http://localhost:8765>**. Postgres runs on container port
-`55432` (deliberately non-standard). The named volume
-`bugtracker_pgdata` holds your data and is **never** removed by
-`./deploy.sh` or `./down.sh` — see *[Live-data safety](#live-data-safety)*.
+`./deploy.sh` builds the image (including the frontend), starts PostgreSQL,
+waits for it to be healthy, then starts the app. Open <http://localhost:8765>.
+
+PostgreSQL runs in its own container, published only on `127.0.0.1:55432` so it
+doesn't clash with a local PostgreSQL install. Data lives in the named volume
+`bugtracker_pgdata`, which `./deploy.sh` and `./down.sh` never delete.
+
+For a clean rebuild, run `BUILD_CLEAN=1 ./deploy.sh`. Behind a corporate proxy or
+air gap, set `BASE_IMAGE` in `.env` to an internal mirror, or pre-load
+`python:3.12-slim` and `node:20-slim` with `docker save | docker load`.
 
 ### First login
 
-Bug Hunter v4 is multi-tenant. Two ways to get the first admin:
+On first boot, Bug Hunter creates the organization `BOOTSTRAP_ORG_NAME` with an admin from
+`BOOTSTRAP_ADMIN_EMAIL` / `BOOTSTRAP_ADMIN_PASSWORD` (Compose defaults the email
+to `admin@bughunter.local`; the password has no default and must be set). Change
+the password right away from the profile menu. Other organizations are created at `/signup`
+or by that admin's invitations; turn sign-up off with `ALLOW_PUBLIC_SIGNUP=false`. A production deploy refuses to
+start while the `.env.example` placeholder password is still set.
 
-**Option A — public signup (default).** Visit `/signup` and create
-your organization. You become its first admin. Set
-`ALLOW_PUBLIC_SIGNUP=false` in `.env` to disable signup for closed
-deployments.
-
-**Option B — bootstrap admin** (single-org deployments without
-signup hassle). Before the first boot:
-
-```env
-BOOTSTRAP_ADMIN_EMAIL=you@yourcompany.com
-BOOTSTRAP_ADMIN_PASSWORD=<a strong password>
-BOOTSTRAP_ADMIN_NAME=Admin
-BOOTSTRAP_ORG_NAME=Your Company
-```
-
-The app creates one organization and one admin user on first boot.
-The bootstrap is **strictly idempotent** — once the user exists, env
-vars are ignored. Change the password from the Account panel after
-first login.
-
-**Locked out?** If a prior deployment created the user with a
-different password, set `BOOTSTRAP_ADMIN_RESET_PASSWORD=true`
-alongside the same `BOOTSTRAP_ADMIN_EMAIL` and your new
-`BOOTSTRAP_ADMIN_PASSWORD`, then redeploy. The app resets the
-password, re-promotes to admin, re-activates if disabled, and
-invalidates existing sessions. A `WARNING` log line confirms the
-reset. **Always unset the reset flag after** — otherwise every
-redeploy stomps the password back to the env value.
-
-### Roles in one sentence
-
-**Admins** do everything in their org. **Managers** edit + delete on
-projects they lead and invite member / manager (not admin).
-**Members** create + edit Bugs on projects they're added to; Tasks,
-Requirements, and Events are read-only. Comment edit / delete and
-attachment delete are admin-only across every type.
+Set `AUTO_LOGIN_ENABLED=true` to skip the login screen entirely: every visitor
+is signed in automatically as the bootstrap admin. Use it only on a trusted
+local deployment. Production refuses to start with it on.
 
 ### Production checklist
 
 ```bash
-SESSION_SECRET=$(openssl rand -hex 32)
-COOKIE_SECURE=true                        # only if serving over HTTPS
-ALLOW_PUBLIC_SIGNUP=true                  # or false for a closed install
-APP_BASE_URL=https://bugs.yourcompany.com
-CORS_ORIGINS=https://bugs.yourcompany.com
-BCRYPT_ROUNDS=10                          # raise if you have CPU headroom
+APP_VERSION=<release tag>
+SESSION_SECRET=$(openssl rand -hex 32)    # at least 32 characters, never the placeholder
+COOKIE_SECURE=true                        # only when serving over HTTPS
+BOOTSTRAP_ADMIN_EMAIL=you@example.com
+BOOTSTRAP_ADMIN_PASSWORD=<a strong password>
+APP_BASE_URL=https://bugs.example.com
+CORS_ORIGINS=https://bugs.example.com
+APP_ENV=production                        # strict checks: https URL, secure cookies, real email backend
+ALLOW_PUBLIC_SIGNUP=false                 # unless anyone may create an organization on your host
+FIELD_ENCRYPTION_KEY=<Fernet key>         # encrypts 2FA and webhook secrets (see .env.example)
+PRIVACY_CONTACT_EMAIL=privacy@example.com
 ```
 
-Then `./down.sh && ./deploy.sh`.
+Then `./down.sh && ./deploy.sh`. If a requirement is unmet, the app logs every
+problem at once and refuses to start.
 
----
-
-## Configuring email (optional)
-
-By default `EMAIL_BACKEND=console` logs emails to stdout. To send
-real mail via Gmail: enable 2-Step Verification, generate an [App
-Password](https://myaccount.google.com/apppasswords), then in `.env`:
-
-```env
-EMAIL_BACKEND=smtp
-EMAIL_FROM=Bug Hunter <you@gmail.com>
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USERNAME=you@gmail.com
-SMTP_PASSWORD=xxxx xxxx xxxx xxxx
-SMTP_USE_TLS=true
-```
-
-Restart with `./down.sh && ./deploy.sh`. Office 365, Mailtrap,
-SendGrid all work the same way.
-
----
-
-## Live-data safety
-
-`./deploy.sh` rebuilds the image and restarts the stack. It does
-**not** touch the `bugtracker_pgdata` volume that holds your Postgres
-data. `./down.sh` (no flags) stops containers and leaves the volume
-intact. The only ways to lose data are explicitly opt-in:
-
-- `./down.sh --wipe-db` (asks you to type `YES`)
-- `docker compose down -v` (manual destructive call)
-- Manually deleting the named volume
-
-**Schema migrations are strictly additive.** `init_db()` runs three
-idempotent passes on every boot:
-
-1. `create_all()` — adds new tables.
-2. Index reconciliation — `CREATE INDEX IF NOT EXISTS` for any
-   index the model declares but the DB lacks.
-3. Column reconciliation — `ALTER TABLE ... ADD COLUMN` for any
-   column the model declares but the DB lacks (NULL-tolerant
-   definition so existing rows backfill cleanly).
-
-Notable additions over time:
-
-- `sessions` (v3.1) — created on first start if missing.
-- Branding columns (v2.2) — `organizations.logo_data_url`,
-  `accent_color`, `email_from_override`.
-- TOTP columns (v2.2) — `users.totp_secret`, `totp_enabled`,
-  `totp_enrolled_at`.
-- `activity_log.bug_id` (v2.4) — fresh installs use
-  `ON DELETE SET NULL` so audit history outlives the bug. Existing
-  production databases keep the old `CASCADE`; the route handler
-  detaches activity rows before deleting the bug, so the same
-  retention applies on legacy schemas without a DDL change.
-- `bugs.item_type` (v2.4) — server-side default `'Bug'` backfills
-  every pre-v2.4 row at the DB level.
-- `bugs.event_id` + `events` + `event_managers` (v2.4) — nullable
-  FK, `ON DELETE SET NULL`. Org-scoped via `events.org_id`.
-- **v2.7 — no schema changes at all.** `app/models.py` was edited
-  only to lift repeated string literals (`"bugs.id"`,
-  `"all, delete-orphan"`, etc.) into module-level constants. The
-  SQL emitted by SQLAlchemy is byte-identical. No columns added,
-  removed, renamed, or retyped; no indexes added or dropped; no
-  cascade rules changed. **Redeploys of v2.7 against a v2.4 (or
-  any v2.x) production database are zero-DDL.**
-
-Cookies issued by older builds (without a `jti`) are still accepted
-as legacy sessions, so a redeploy doesn't kick every user out at
-once.
-
-Sleuth adds **no tables and modifies no columns**. Read intents only
-`SELECT`; write intents go through the same audited paths the REST
-API uses, including permission checks and audit logging.
-
----
-
-## Sleuth — AI assistant
-
-Sleuth (🔍) is the in-app assistant — a floating widget in the
-bottom-right of every page. Press `Ctrl + /` (or `⌘ + /`) to open.
-Every write goes through Yes/Cancel confirmation; every change is
-audited in the same trail the REST API uses.
-
-**Ask things:**
-
-- *show open bugs assigned to alice*
-- *how many critical bugs are in PROD?*
-- *bug 42* · *summary* · *recent activity*
-- *bugs created in the last 7 days*
-- *export all bugs in apollo to excel* (returns a real `.xlsx`)
-
-**Do things** (always confirmed before changing anything):
-
-- *close bug 5* · *reopen #12* · *mark #7 as resolved*
-- *assign bug 3 to alice* · *unassign bob from #5*
-- *set bug 9 priority to high* · *due bug 8 2026-06-15*
-- *comment on #5: looks fixed in v2.1*
-- *create a bug titled "Login broken" in project Apollo*
-
-**Pronouns:** after a turn that named a bug, *close it* /
-*comment on that bug: …* / *assign it to alice* work for 30 minutes.
-
-### Architecture
-
-Three layers, cheapest first:
-
-1. **Rules** (`app/chatbot/nlu.py`) — regex classifier of verbs,
-   filters, names, IDs. Microseconds. Handles ~80% of queries.
-2. **Statistical classifier** (`app/chatbot/classifier.py`) — TF-IDF
-   + cosine similarity over a hand-curated corpus. ~1 ms. Catches
-   paraphrases (~10–15%).
-3. **Local LLM** (`app/chatbot/llm.py`) — *optional*, lazy-loaded
-   `llama.cpp` against a GGUF model in `models/`. Only used when
-   layers 1 + 2 are uncertain.
-
-**No data leaves the server.** No outbound HTTP, no telemetry, no
-third-party API. Even Layer 3 runs inference locally.
-
-### Optional LLM
-
-Useful only for unusual phrasings the rules / classifier missed.
-Slowest path (5–15 s per query on a 1-CPU 2 GB box). To enable:
+### Stopping
 
 ```bash
-pip install llama-cpp-python
-cd models && wget https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf -O sleuth.gguf
-# raise services.app.deploy.resources.limits.memory to 1500M in docker-compose.yml
-./deploy.sh
-```
-
-**RAM safety:** before loading any model, Sleuth measures the
-container's actual memory ceiling (cgroup v2/v1) and the projected
-peak (weights + KV cache + overhead). If it won't fit, Layer 3 is
-disabled entirely with an operator-facing warning. Users see the
-same friendly "I didn't understand" fallback they'd get if no model
-file existed. No OOM crashes. See `app/chatbot/llm.py::memory_budget()`.
-
-### Configuration
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `SLEUTH_LLM_MODEL_PATH` | `models/sleuth.gguf` | absolute path to GGUF |
-| `SLEUTH_LLM_TIMEOUT_S` | `12` | inference budget |
-| `SLEUTH_LLM_IDLE_UNLOAD_S` | `600` | unload after idle |
-| `SLEUTH_LLM_MAX_TOKENS` | `120` | max generated tokens |
-| `SLEUTH_LLM_CTX_LEN` | `1024` | context window |
-| `SLEUTH_LLM_THREADS` | `1` | CPU threads |
-
-Rate limit: 30 chat messages per minute per user.
-
----
-
-## Stopping
-
-```bash
-./down.sh                  # stop containers, KEEP database volume + image
-./down.sh --wipe-db        # also wipe the database (asks for YES)
+./down.sh                  # stop containers; keep database volume and image
+./down.sh --wipe-db        # also delete the database volume (asks for confirmation)
 ./down.sh --remove-images  # also remove the built image
 ./down.sh --full-clean     # both
 ```
 
----
+## Configuration
 
-## Code-quality scan (SonarQube)
+All settings come from environment variables. Copy [`.env.example`](.env.example)
+to `.env`. Every variable is explained inline there and read in
+[`app/config.py`](app/config.py). Never commit `.env`. Secret values belong in
+`.env` (local), a Compose `--env-file`, or a platform secret store, never in the
+image or the repository. The ones that matter most:
 
-The repo ships `sonar-project.properties` and `scripts/sonar-scan.{sh,ps1}`
-that drive a Dockerized SonarQube end-to-end (pytest with coverage,
-then sonar-scanner-cli over the generated reports).
+| Variable | Default | Purpose |
+|---|---|---|
+| `APP_VERSION` | _(required)_ | Release shown in the UI, API docs and `/api/health`, and the image tag. The single source of truth; there's no hardcoded fallback. |
+| `APP_NAME` | `Bug Hunter` | Product name in HTML titles, API docs, email subjects, reports and notifications. |
+| `APP_ENV` | _(blank = development)_ | `production` turns on the strict start-up checks. |
+| `SESSION_SECRET` | _(blank)_ | Signs session cookies. Blank makes a new secret every restart, which logs everyone out, and is refused in production. |
+| `COOKIE_SECURE` | `false` | Set `true` only when serving over HTTPS. Also counts as a production deploy. |
+| `APP_BASE_URL` | `http://localhost:8765` | Public URL used in email links. |
+| `CORS_ORIGINS` | _(blank = same-origin)_ | Comma-separated list of allowed cross-origin clients. |
+| `ENABLE_API_DOCS` | `false` | Serve `/docs`, `/redoc` and `/openapi.json` in production too. They are always on in development. |
+| `BOOTSTRAP_ADMIN_EMAIL` / `_PASSWORD` / `_NAME` | `admin@bughunter.local` (Compose) / _(required)_ / `Admin` | First admin, created only when the database has no users. |
+| `BOOTSTRAP_ORG_NAME` | `Default Organization` | Organization created together with the bootstrap admin. |
+| `BOOTSTRAP_ADMIN_RESET_PASSWORD` | `false` | Recovery: every boot resets the bootstrap admin's password to `BOOTSTRAP_ADMIN_PASSWORD`. Turn it off again afterwards. |
+| `ALLOW_PUBLIC_SIGNUP` | `true` | Anyone may create an organization at `/signup`. |
+| `TOTP_ENABLED` | `true` | Two-factor sign-in with an authenticator app (each user opts in). |
+| `BCRYPT_ROUNDS` | `12` | Cost of new password hashes (minimum 10). |
+| `FIELD_ENCRYPTION_KEY` | _(blank)_ | Fernet key encrypting 2FA and webhook secrets at rest. Values written under a key can't be read without it. |
+| `AUDIT_RETENTION_DAYS` | `365` | Audit rows older than this are deleted daily; `0` keeps everything. |
+| `WEBHOOK_ALLOW_PRIVATE_NETWORKS` | `false` | Allow webhook targets on private networks. |
+| `PRIVACY_CONTACT_EMAIL` | _(blank)_ | Contact shown on `/privacy`. |
+| `METRICS_ENABLED` / `METRICS_TOKEN` | `false` / _(blank)_ | Prometheus counters at `/api/metrics`, optionally behind a bearer token. |
+| `AUTO_LOGIN_ENABLED` | `false` | Sign every visitor in as the bootstrap admin. Trusted local use only. |
+| `EMAIL_BACKEND` | `console` | `console` (log to stdout), `smtp`, or `disabled`. |
+| `EMAIL_DIGEST_ENABLED` | `false` | Batch per-event emails into one daily digest. |
+| `MAX_REPORT_ROWS` | `50000` | Max rows in one Reports Excel export (returns 413 above it). |
+| `WEB_PUSH_ENABLED` | `false` | Master switch for browser push (FCM). |
+| `GIT_BRANCH_CREATION_ENABLED` / `GIT_BRANCH_DELETION_ENABLED` | `false` / `false` | Story feature branches; see [Git integration](#git-integration-story-feature-branches). |
+| `GIT_CREDENTIAL_ENCRYPTION_KEY` | _(blank)_ | Fernet key that encrypts per-project Git tokens. Required before a token can be saved. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | _(blank)_ | OTLP/**gRPC** collector, e.g. `http://otel-collector:4317`. Blank means console-only, with nothing exported. |
+| `LOG_FORMAT` | `text` | `json` writes one JSON object per line for log shippers. |
+| `SLEUTH_CLOUD_ENABLED` | `0` | Opt-in cloud LLM fallback for Sleuth. |
+
+### Observability (OpenTelemetry / SigNoz)
+
+Set `OTEL_EXPORTER_OTLP_ENDPOINT` and the app streams three signals to the
+collector over OTLP/gRPC. Leave it blank and everything stays on the console.
+
+| Signal | Details |
+| --- | --- |
+| **Traces** | One server span per HTTP request from FastAPI, DB spans from SQLAlchemy, and outbound spans from `httpx`. Health checks and `/static` are excluded by default (`OTEL_TRACES_EXCLUDED_URLS`). |
+| **Metrics** | HTTP server and DB client metrics, exported every `OTEL_METRICS_EXPORT_INTERVAL_MS` (default 60 s). |
+| **Logs** | The same `bug_hunter.*` records as the console, with `trace_id`/`span_id` so a log pivots to its request. Audit-trail entries arrive as `audit …` records. Sensitive attribute keys are redacted before export (`OTEL_LOG_REDACT_SENSITIVE`). |
+
+The service name defaults to `bug-hunter` (`OTEL_SERVICE_NAME`), and the
+deployment environment defaults to `APP_ENV` (`OTEL_DEPLOYMENT_ENVIRONMENT`).
+Per-signal switches (`OTEL_TRACES_ENABLED`, `OTEL_METRICS_ENABLED`,
+`OTEL_LOGS_ENABLED`), the sampler (`OTEL_TRACES_SAMPLER`), collector headers and
+TLS options are all documented in `.env.example`.
+
+**No traces?** Check, in order: the startup log says `OTLP export enabled -> …`,
+`OTEL_TRACES_ENABLED` isn't `false`, the sampler isn't `always_off`, and your
+collector's environment filter includes `OTEL_DEPLOYMENT_ENVIRONMENT`.
+
+### Email (optional)
+
+By default, `EMAIL_BACKEND=console` prints emails to the log. For real delivery,
+set `EMAIL_BACKEND=smtp` and the `SMTP_*` variables (host, port, username,
+password, TLS), then restart. Any standard SMTP provider works. For Gmail, use an
+[App Password](https://myaccount.google.com/apppasswords), not the account
+password.
+
+Set `EMAIL_DIGEST_ENABLED=true` to batch each user's notifications into one
+email per day. Password-reset and other security emails always send immediately.
+With the digest on, immediate work-item emails are off, so make sure a scheduler
+runs. Either run `python -m app.jobs.email_digest` from cron/Task Scheduler, or
+set `EMAIL_DIGEST_CRON` (5-field cron) and `EMAIL_DIGEST_TIMEZONE` (IANA name) to
+let the app run it itself (the log confirms with `Email-digest scheduler started`).
+The job is idempotent, bounded by `EMAIL_DIGEST_LOOKBACK_HOURS` (default 50), and
+retries failed sends on the next run.
+
+### Web push (optional)
+
+Browser push uses Firebase Cloud Messaging and is off by default. One-time setup:
+
+1. Create or reuse a project at <https://console.firebase.google.com>.
+2. Add a Web app and copy its config into `FIREBASE_API_KEY`, `FIREBASE_AUTH_DOMAIN`, `FIREBASE_PROJECT_ID`, `FIREBASE_MESSAGING_SENDER_ID` and `FIREBASE_APP_ID`.
+3. Generate a Web Push key pair and put the public key in `FIREBASE_VAPID_KEY`.
+4. Provide a service-account key in one of two ways:
+   - **File mount** (default Compose setup): save it as `secrets/firebase-admin.json` (`FCM_CREDENTIALS_FILE`).
+   - **Env var** (no mount, e.g. Azure Container Apps): put the JSON, raw or base64-encoded, in `FCM_CREDENTIALS_JSON` as a platform secret. It takes priority over the file.
+5. Set `WEB_PUSH_ENABLED=true`, restart, and serve over HTTPS (`localhost` is exempt).
+
+Each user then enables push once from the profile menu. The Firebase SDK is
+self-hosted (no CDN). If a token fails to register, the client retries with
+backoff and again on reconnect. Devices still need to reach Google's FCM
+endpoints, and on networks that block them push never arrives. The in-app bell
+doesn't depend on FCM.
+
+## Local development
+
+### One command
+
+```powershell
+.\scripts\run_local.ps1              # Windows; add -Reload to auto-restart on code changes
+```
 
 ```bash
-docker run -d --name sonarqube -p 9000:9000 sonarqube:community
-# wait ~60s, log in admin/admin, change password,
-# Create a project with key "Bug-Hunter-Enterprise"
-# My Account → Security → Generate Tokens → copy the value
-pip install -r requirements-dev.txt
-SONAR_TOKEN=sqp_xxxxxxxxxxxx ./scripts/sonar-scan.sh
+bash scripts/run_local.sh            # macOS / Linux / Git Bash; RELOAD=1 for auto-restart
 ```
 
-Three driver scripts under `scripts/`:
+The first run creates `.venv` (Python 3.12, via [uv](https://docs.astral.sh/uv/)
+when installed) and a `.env` with generated secrets. Set `APP_VERSION` in `.env`,
+then open <http://127.0.0.1:8000> and sign in with `BOOTSTRAP_ADMIN_EMAIL` /
+`BOOTSTRAP_ADMIN_PASSWORD` from `.env`. The prebuilt frontend in `app/static` is
+served as-is, so Node isn't needed just to run the app.
 
-- `sonar-scan.{sh,ps1}` — run pytest+coverage, then the
-  scanner-cli Docker image. Uploads the result to the SonarQube
-  server at `$SONAR_HOST_URL` (default `http://localhost:9000`).
-- `sonar-export.ps1` — dump every open issue and hotspot to
-  `sonar-issues.{json,csv}` / `sonar-hotspots.{json,csv}` for
-  offline triage. Hotspots require a USER token (`sqa_*`); issues
-  work with either a project token (`sqp_*`) or a user token.
-- `sonar-mark-hotspots-safe.ps1` — bulk-mark every open hotspot as
-  REVIEWED + SAFE with a justification comment (USER token only).
-
-Dashboard: `http://localhost:9000/dashboard?id=Bug-Hunter-Enterprise`.
-Override `SONAR_HOST_URL` for a remote instance. Generated
-`coverage.xml`, `junit.xml`, and `.scannerwork/` are gitignored.
-
-SonarQube is purely static analysis — it does not touch the runtime
-database.
-
-**Current scan state (v2.7):** 0 issues · 0 bugs · 0 vulnerabilities ·
-0 unreviewed hotspots · 88.1% coverage · 0.5% duplication · A across
-all four ratings.
-
----
-
-## Running tests
-
-The test suite is hermetic — every test file spins up its own temp
-SQLite database and never touches your production data.
+### Backend by hand
 
 ```bash
-pip install -r requirements-dev.txt
-pytest                                 # all tests
-pytest tests/test_multitenant.py       # multi-tenant isolation
-pytest tests/test_enterprise.py        # enterprise features
-pytest tests/test_sleuth_safety.py     # database-safety guarantees
+python -m venv .venv
+source .venv/bin/activate            # Windows: .venv\Scripts\Activate.ps1
+pip install -r requirements.txt -r requirements-dev.txt
+python scripts/gen_local_env_secrets.py   # creates .env with generated secrets
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
----
+On Linux you can install the exact CI pins instead with
+`pip install --require-hashes -r requirements-dev-lock.txt`. The lockfile is
+compiled for Linux, so it doesn't install on Windows or macOS.
 
-## Tech stack
+Without `DATABASE_URL`, the app uses SQLite (`bug_hunter.db`) and creates the
+schema on first run. API docs are at <http://127.0.0.1:8000/docs> and `/redoc`.
 
-FastAPI 0.115 · SQLAlchemy 2.0 · Pydantic 2 · psycopg 3 · PostgreSQL
-16 · vanilla JS SPA · Python 3.12 slim container. Sleuth: in-process
-rules + TF-IDF classifier (pure Python); optional `llama-cpp-python`
-for the local LLM layer.
+To use PostgreSQL instead, set
+`DATABASE_URL=postgresql+psycopg://user:password@localhost:5432/bughunter`.
 
----
+### Frontend
 
-## Project structure
-
-```
-app/
-├── config.py · database.py · email_service.py · main.py · schemas.py
-├── csrf.py · observability.py · totp.py · webhooks_delivery.py
-├── models.py             # User, Project, Bug (Bug/Requirement/Task),
-│                         # Event, event_managers, Comment, Attachment,
-│                         # Activity, PasswordResetToken, Session,
-│                         # Organization, Membership, Invitation,
-│                         # CustomField, SavedView, Webhook
-├── routes/
-│   ├── auth · users · projects · bugs · events · stats · audit · sessions
-│   ├── organizations · memberships · invitations · saved_views
-│   ├── totp · webhooks · branding · custom_fields · dsar
-├── chatbot/              # Sleuth (rules · classifier · LLM · executor
-│                         # · actions · memory · excel · router)
-└── static/               # index.html · login.html · reset.html
-                          # · signup.html · accept-invite.html
-                          # · app.js · styles.css · chatbot.{js,css}
-                          # · sw.js · manifest.webmanifest
-tests/                    # hermetic SQLite-backed tests
-models/                   # GGUF files for Sleuth (gitignored)
-scripts/sonar-scan.*      # SonarQube scan driver
-deploy.sh · down.sh       # idempotent + data-safe
-docker-compose.yml · Dockerfile · requirements.txt · .env.example
+```bash
+cd frontend
+npm ci               # lockfile-faithful install
+npm test             # Vitest behaviour tests
+npm run lint         # ESLint
+npm run build        # writes the bundle into ../app/static
+npm run dev          # optional Vite dev server on :5173, proxies /api (see vite.config.js)
 ```
 
----
+Commit the rebuilt `app/static` together with frontend changes so a plain
+`uvicorn` run serves the current UI. The Docker image rebuilds it anyway.
 
-## Contributing & security
+### Tests and checks
 
-- Bug reports / feature ideas — GitHub Issues.
-- Code contributions — see [CONTRIBUTING.md](CONTRIBUTING.md).
-- Vulnerabilities — **don't open a public issue**; see
-  [SECURITY.md](SECURITY.md) for the private disclosure path.
+```bash
+pytest -m "not ui"                           # backend suite (coverage gate: 80%)
+python -m playwright install chromium firefox webkit   # one-time browser download
+pytest -m ui                                 # browser suites (Chromium)
+PW_BROWSERS=chromium,firefox,webkit pytest tests/test_e2e_browser.py -m ui
+
+python -m compileall -q app tests scripts
+ruff check app tests scripts
+bandit -c pyproject.toml -r app -q
+pip-audit -r requirements-lock.txt --strict
+cd frontend && npm run lint && npm test && npm audit --omit=dev --audit-level=high
+```
+
+The browser suites start their own server on a throwaway database. Besides
+the main workflows (login and deep links, every view, board drag-and-drop,
+sprint configuration and reports, role gating, logout, phone width) and the
+enterprise journeys (sign-up, two-factor sign-in, account settings, branding,
+invitations and webhooks, project members and custom fields, saved views, the public
+pages) they run
+axe-core WCAG 2.1 AA checks in the dark and light themes, which needs
+`npm ci` in `frontend/` first. Any uncaught page error, browser console error
+or HTTP 5xx fails a test.
+
+Load test a running instance (read-only and bounded; credentials come from
+`--email/--password` or `BH_LOAD_EMAIL`/`BH_LOAD_PASSWORD`):
+
+```bash
+python scripts/load_test.py --base-url http://localhost:8765 --users 15 --duration 90 --docker-container bugtracker_app
+```
+
+SonarQube: `scripts/sonar-server-up.ps1` starts a local server,
+`scripts/sonar-scan.ps1` / `sonar-scan.sh` scan, and
+`python scripts/sonar_gate.py apply` installs the `bug-hunter-gate` quality gate
+(80% coverage overall and on new code, security rating A, zero vulnerabilities).
+
+The GitHub Actions pipeline (`.github/workflows/build-and-push.yml`) runs on
+pushes and pull requests to `main`: compile, ruff, bandit, the backend suite
+with the 80% coverage gate, ESLint, the frontend tests and build, `npm audit`
+and `pip-audit`. All actions are pinned to commit SHAs. Three repository
+variables control the rest:
+
+| Variable | Effect |
+| --- | --- |
+| `SONAR_ENABLED=true` | Run the SonarQube scan and wait for its quality gate (needs `SONAR_TOKEN` and `SONAR_HOST_URL` secrets). |
+| `IMAGE_PUSH_ENABLED=true` | Build and push the image on `main` after every check passes (needs the `ACR_*` secrets). |
+| `RUN_TESTS=false` | Skip the backend and frontend test jobs and the SonarQube gate for an image-only run. Lint, build and dependency audits still gate the push. |
+
+Browser suites are not run in CI.
+
+## Live-data safety
+
+- `./deploy.sh` rebuilds the image and restarts containers without touching the `bugtracker_pgdata` volume.
+- `./down.sh` (no flags) stops containers and keeps the volume.
+- Data is lost only through explicit commands: `./down.sh --wipe-db` (asks for confirmation) or `docker compose down -v`.
+- `init_db()` only creates missing tables, columns and indexes. Existing rows are never deleted, and the only in-place writes are one-time backfills of new columns (for example display IDs and default workflow statuses).
+- Because the schema is additive, an older release still runs against a newer database. Rolling back is still a manual step, so take a backup before upgrading.
+
+**Backup & restore:**
+
+```bash
+docker exec -t bugtracker_db pg_dump -U bugtracker bugtracker > backup.sql
+cat backup.sql | docker exec -i bugtracker_db psql -U bugtracker bugtracker
+```
+
+If you changed `POSTGRES_USER`/`POSTGRES_DB`, substitute those values.
+
+**Rollback:** `./down.sh`, check out the previous tag (or `docker load` a saved
+image and set `APP_VERSION` to it), then `./deploy.sh`.
+
+## Upgrading from earlier editions
+
+The schema upgrade is automatic and additive on first boot; take a backup first.
+
+**From the earlier Bug Hunter Enterprise edition.** Organizations, users, projects and items keep
+their data and ids. On boot, `project_memberships` are copied into the project roles
+(lead / member), `device_tokens` into the push registrations, and the retired `member`
+role becomes `user`; the old tables stay in place, unread. Check these before switching over:
+
+- Events without a project are now visible to admins only (assign them a project to share them).
+- Settings that were renamed or dropped: `FIREBASE_SA_JSON` is `FCM_CREDENTIALS_JSON` (or a mounted `FCM_CREDENTIALS_FILE`); `JSON_LOGGING=true` is `LOG_FORMAT=json`; `ALLOW_ACCOUNT_ENUMERATION=true` is `FORGOT_PASSWORD_ENUMERATION_SAFE=false`; `CSRF_PROTECTION` is gone (cross-site request protection is always on, based on the request's origin); `FIREBASE_HTTP_TIMEOUT_SECONDS` and `WEBHOOK_MAX_URL_LENGTH` are gone.
+- Webhook secrets and 2FA secrets keep working. Set `FIELD_ENCRYPTION_KEY` to encrypt them from then on.
+- `AUDIT_RETENTION_DAYS` defaults to 365: older audit rows are deleted on the first daily run. Set `0` first if you keep history for longer.
+- Sign-up is on by default; set `ALLOW_PUBLIC_SIGNUP=false` for a closed installation.
+
+**From the single-tenant Bug Hunter.** Every existing user, project, event and audit row joins
+one organization (`BOOTSTRAP_ORG_NAME`, created if none exists), project keys are generated
+from the project names, and everything else works as before.
+
+## Deployment
+
+To upgrade production: take a database backup, `git pull`, set `APP_VERSION`
+in `.env` to the new release, and run `./deploy.sh`. There's no separate
+migration step: `init_db()` adds missing tables, columns and indexes on boot and
+never drops or rewrites existing rows (see *Live-data safety*), apart from
+the one-time Sprints upgrade described under *Features*. `./down.sh`
+keeps all data; only `./down.sh --wipe-db` deletes it. To roll back, `./down.sh`,
+check out the previous tag and `./deploy.sh` again (an older app still runs
+against a newer schema).
+
+| Aspect | How it's handled |
+| --- | --- |
+| Services | The app container and a PostgreSQL container |
+| Ports | App `8765 → 8000`; PostgreSQL only on `127.0.0.1:55432` |
+| Resource limits | 0.5 vCPU / 512 MB for the whole stack (app 0.30 / 320 MB, database 0.20 / 192 MB) |
+| Workers | One Uvicorn worker and a small SQLAlchemy pool (`DB_POOL_SIZE` + `DB_MAX_OVERFLOW`, 2 + 2 in Compose). Requests beyond what the pool can serve queue on the event loop instead of tying up worker threads, so bursts slow down rather than fail. The digest scheduler and rate limiters are per process, so scale out only after moving them out of the app. |
+| Secrets | Injected from `.env` / `secrets/` by Compose, or by the platform; never baked into the image |
+| Health | `curl -fsS http://localhost:8765/api/health` |
+
+The app container runs only the app. It doesn't run Docker or Compose and
+doesn't mount the Docker socket. Without Compose (for example on Azure Container
+Apps), the platform must inject a `DATABASE_URL` that points at an external
+PostgreSQL, never `localhost`.
+
+## Sleuth
+
+Sleuth is the in-app assistant, a floating widget on every page (open it with
+`Ctrl + /` or `⌘ + /`).
+
+**Ask questions** (answered by exact SQL handlers):
+
+- *show open bugs assigned to alice*
+- *how many critical bugs are in PROD?*
+- *export all bugs in apollo to excel* (returns a real `.xlsx`)
+
+**Run actions** (always confirmed before any change, always audited):
+
+- *close bug 5* · *reopen #12* · *assign bug 3 to alice* · *set bug 9 priority to high*
+- *comment on #5: looks fixed in v2.1*
+- *create a bug titled "Login broken" in project Apollo*
+
+With the cloud layer on, Sleuth can also call tools for agile work: create a
+work item under a parent, move it through the workflow, and add it to or remove
+it from a sprint. Every write still needs your confirmation and uses your own
+permissions.
+
+### How it works
+
+Sleuth tries the cheapest layer first:
+
+1. **Rules** (`app/chatbot/nlu.py`) is a regex parser over verbs, filters, names and IDs.
+2. **Statistical classifier** (`app/chatbot/classifier.py`) uses TF-IDF and cosine similarity, with no external models.
+3. **Local LLM** (`app/chatbot/llm.py`) is an optional `llama.cpp` backend for a GGUF model in `models/`. It stays dormant without a model file.
+4. **Cloud LLM** (`app/chatbot/cloud_llm.py`, `llm_tools_agent.py`) is optional and off by default: Groq (primary) or OpenRouter (fallback), with tool calling.
+
+With the defaults (`SLEUTH_CLOUD_ENABLED=0`, no model file), Sleuth is fully
+local and makes no outbound HTTP calls. The cloud layer is the only path that
+sends text off the box, and all text first passes through a secret-redaction
+filter (`app/chatbot/redaction.py`). Optional read-only add-ons for the cloud
+layer are `SLEUTH_RETRIEVAL_ENABLED` (keyword grounding),
+`SLEUTH_AGENT_ENABLED` (multi-step lookups), `SLEUTH_VERIFY_ANSWERS` (citation
+check) and `SLEUTH_EVAL_ENABLED` (LLM-as-judge note). `/api/chat` is limited to
+30 messages per minute per user.
+
+## Git integration (Story feature branches)
+
+Bug Hunter supports exactly two optional remote Git operations, both disabled by
+default:
+
+1. create one feature branch for one **User Story** in one GitHub repository;
+2. remove exactly that tracked branch again.
+
+Pull requests, merges, tags, pipeline sync and bulk deletion are out of scope.
+Bug Hunter never runs local `git`; every provider call is REST.
+
+**Project settings → Git integration** holds the API base URL, organization,
+default base branch and an encrypted project token (Fernet, via
+`GIT_CREDENTIAL_ENCRYPTION_KEY`), and has **Test connection** and read-only
+repository discovery (at most 200 repositories). There's no repository
+allow-list: the repository is chosen when a branch is created.
+
+**Creating.** `POST /api/git/work-items/{id}/branches` accepts only
+`provider_repo_id` and `base_branch`. The name is deterministic:
+`feature_<story-number>_<title-slug>` (slug from the first 25 characters of the
+title). The server verifies the repository and base branch, reads the base SHA,
+creates the branch, reconciles an uncertain success, and audits the outcome.
+Repeated requests are idempotent. `GET .../branches/preview` validates the same
+way without creating anything. Other item types are refused with
+`Feature branches can be created only for User Stories.`
+
+**Removing.** `DELETE /api/git/branches/{branch_record_id}` needs
+`GIT_BRANCH_DELETION_ENABLED=true`. Any member of the Story's project may remove
+the branch, and anyone outside the project gets a 404. The server deletes only
+the exact `refs/heads/<stored-name>` of an `Active` record with a `feature_`
+prefix, and it refuses protected names (`main`, `master`, `dev`, `develop`,
+`release`) and the project's base branch. A provider 404 counts as already gone.
+Auth, TLS, timeout, rate-limit and 5xx failures leave the record `Active` so the
+removal can be retried. Removed branches stay visible as history.
+
+**Credentials.** The project token takes precedence over the deployment-wide
+`GITHUB_TOKEN`. A token is never accepted from API payloads, returned in a
+response, or written to logs or audit rows. Use a fine-grained PAT with
+`Metadata: Read` and `Contents: Read and Write`, and set `GIT_CA_BUNDLE_FILE`
+behind a TLS-intercepting proxy.
+
+## Limitations
+
+- Webhook deliveries are in-process and best-effort: no queue, no retries, and a delivery in flight is lost if the worker restarts. Use `delivery_id` to deduplicate and treat webhooks as notifications, not a ledger. Sprint planning changes (ranking, moving between sprints) do not emit events; item creation, updates, board moves, deletion and comments do.
+- Rate limits, account lockout and metrics are per worker process. Run one worker (the default) or move them out before scaling out.
+- Invitation links are only sent by email; there is no copy-link option, and an address that already has an account in any organization can't be invited.
+- There is no single sign-on (SAML/OIDC), no organization deletion, and no moving a person between organizations.
+- Audit-based reports only cover `AUDIT_RETENTION_DAYS`.
+- The data export covers the signed-in person's own records, not an organization-wide export; use a database backup for that.
+
+## Troubleshooting
+
+- **`APP_VERSION is required`:** add `APP_VERSION=<release>` to `.env`.
+- **App refuses to start in production:** the log lists every unmet requirement (session secret, bootstrap password, auto-login, Git encryption key, and with `APP_ENV=production` also https URL, secure cookies and email backend).
+- **Database connection refused:** check `docker compose ps`; the app waits for the database health check, so rerun `./deploy.sh` once it's healthy.
+- **Port 8765 in use:** stop the other service or change the host port in `docker-compose.yml`.
+- **Logged out after every restart:** set a fixed `SESSION_SECRET`.
+- **Password rejected as too weak:** the default policy is at least `PASSWORD_MIN_LENGTH` (8) characters containing at least one letter and one number (`PASSWORD_REQUIRE_COMPLEXITY`); a few very common passwords are refused outright.
+- **Emails not sent:** check `EMAIL_BACKEND=smtp` and the `SMTP_*` values, and set `LOG_LEVEL=DEBUG` for SMTP details.
+- **Blank page or 404 on assets:** rebuild the frontend (`cd frontend && npm run build`) and restart the backend so it recalculates the asset version.
+- **401s right after login:** `COOKIE_SECURE=true` needs https; use `false` for plain http.
+- **Sprints shows "Scrum isn't set up":** Agile is off for that project. A manager or admin clicks **Set up Scrum board** on the Sprints page.
+- **Sign-up says it's disabled / the login page has no sign-up link:** `ALLOW_PUBLIC_SIGNUP=false`; ask an admin for an invitation.
+- **A record that exists answers 404:** it belongs to another organization or to a project you aren't a member of.
+- **"Invitation expired" or "already used":** ask the inviter to send a new one; a new invitation replaces the earlier one.
+- **Webhook shows "public host" errors or stays suspended:** the target resolves to a private network (`WEBHOOK_ALLOW_PRIVATE_NETWORKS`), or ten deliveries in a row failed; fix the endpoint and use **Resume**.
+- **Logs:** `docker compose logs -f app`.
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for supported versions, private vulnerability
+reporting, and the security posture.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Run the test suites before opening a pull
+request. Report vulnerabilities privately via [SECURITY.md](SECURITY.md), not as
+public issues.
 
 ## License
 

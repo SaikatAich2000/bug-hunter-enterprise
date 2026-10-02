@@ -1,38 +1,45 @@
-"""TOTP (2FA) enrolment + verification endpoints.
+"""Two-factor (TOTP) enrolment endpoints.
 
-Endpoints:
-  GET    /api/auth/2fa/status            — am I enrolled?
-  POST   /api/auth/2fa/begin             — start enrollment, returns secret + otpauth URI
-  POST   /api/auth/2fa/confirm           — confirm with first 6-digit code; issues recovery codes
-  POST   /api/auth/2fa/disable           — requires password; clears secret + codes
-  POST   /api/auth/2fa/recovery-codes/regenerate — invalidate old, issue new
+  GET  /api/auth/2fa/status                      enrolled? how many recovery codes are left
+  POST /api/auth/2fa/begin                       start enrolment: secret and otpauth URI
+  POST /api/auth/2fa/confirm                     prove it with a first code; recovery codes issued
+  POST /api/auth/2fa/disable                     needs the password
+  POST /api/auth/2fa/recovery-codes/regenerate   replace the recovery codes (needs the password)
 
-The login flow itself lives in routes/auth.py — the two-step "password
-then TOTP" handshake uses /api/auth/login (returns requires_totp:true if
-the user has TOTP on) and /api/auth/login/totp.
+The two-step sign-in itself lives in routes/auth.py (/login and /login/totp).
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
+from app.api_docs import BAD_REQUEST_FORBIDDEN_CONFLICT_NOT_FOUND_404
 from app.auth import get_current_user, verify_password
 from app.config import get_settings
 from app.database import get_db
 from app.models import Activity, TotpRecoveryCode, User
 from app.totp import (
-    generate_recovery_codes, generate_secret, hash_recovery_code,
-    provisioning_uri, verify_code,
+    accept_code,
+    generate_recovery_codes,
+    generate_secret,
+    hash_recovery_code,
+    provisioning_uri,
+    store_secret,
 )
 
 router = APIRouter(prefix="/api/auth/2fa", tags=["auth"])
 
+_DISABLED = "Two-factor authentication is disabled on this server."
+
 
 class TotpStatus(BaseModel):
     enabled: bool
+    available: bool = True
     enrolled_at: datetime | None = None
     unused_recovery_codes: int = 0
 
@@ -43,7 +50,7 @@ class TotpBeginOut(BaseModel):
 
 
 class TotpConfirmIn(BaseModel):
-    code: str = Field(..., min_length=6, max_length=10)
+    code: str = Field(min_length=6, max_length=10)
 
 
 class TotpConfirmOut(BaseModel):
@@ -51,134 +58,118 @@ class TotpConfirmOut(BaseModel):
     recovery_codes: list[str]
 
 
-class TotpDisableIn(BaseModel):
-    password: str = Field(..., min_length=1, max_length=200)
+class TotpPasswordIn(BaseModel):
+    password: str = Field(min_length=1, max_length=200)
 
 
-@router.get("/status", response_model=TotpStatus)
-def status(
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> TotpStatus:
-    settings = get_settings()
-    if not settings.TOTP_ENABLED:
-        return TotpStatus(enabled=False)
+def _audit(db: Session, user: User, action: str, detail: str) -> None:
+    db.add(Activity(
+        org_id=user.org_id, bug_id=None, entity_type="auth", entity_id=user.id,
+        actor_user_id=user.id, actor_name=user.name, action=action, detail=detail,
+    ))
+
+
+def _require_available() -> None:
+    if not get_settings().TOTP_ENABLED:
+        raise HTTPException(status_code=403, detail=_DISABLED)
+
+
+def _issue_recovery_codes(db: Session, user: User) -> list[str]:
+    codes = generate_recovery_codes(get_settings().TOTP_RECOVERY_CODE_COUNT)
+    db.add_all(
+        TotpRecoveryCode(user_id=user.id, code_hash=hash_recovery_code(c)) for c in codes
+    )
+    return codes
+
+
+@router.get("/status")
+def status(user: Annotated[User, Depends(get_current_user)], db: Annotated[Session, Depends(get_db)]) -> TotpStatus:
+    if not get_settings().TOTP_ENABLED:
+        return TotpStatus(enabled=False, available=False)
     unused = 0
     if user.totp_enabled:
-        unused = db.query(TotpRecoveryCode).filter(
-            TotpRecoveryCode.user_id == user.id,
-            TotpRecoveryCode.used_at.is_(None),
-        ).count()
+        unused = db.scalar(
+            select(func.count()).select_from(TotpRecoveryCode)
+            .where(TotpRecoveryCode.user_id == user.id, TotpRecoveryCode.used_at.is_(None))
+        ) or 0
     return TotpStatus(
-        enabled=bool(user.totp_enabled),
-        enrolled_at=user.totp_enrolled_at,
+        enabled=bool(user.totp_enabled), enrolled_at=user.totp_enrolled_at,
         unused_recovery_codes=unused,
     )
 
 
-@router.post("/begin", response_model=TotpBeginOut)
-def begin(
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> TotpBeginOut:
-    settings = get_settings()
-    if not settings.TOTP_ENABLED:
-        raise HTTPException(status_code=403, detail="Two-factor auth is disabled site-wide.")
-    # If they're already enrolled, force them to disable first — never
-    # silently overwrite the existing secret (would lock them out of
-    # their authenticator app).
+@router.post("/begin",
+             responses=BAD_REQUEST_FORBIDDEN_CONFLICT_NOT_FOUND_404)
+def begin(user: Annotated[User, Depends(get_current_user)], db: Annotated[Session, Depends(get_db)]) -> TotpBeginOut:
+    _require_available()
+    # Never overwrite an active secret: that would lock the user out of their authenticator.
     if user.totp_enabled:
-        raise HTTPException(status_code=409, detail="2FA is already enabled. Disable it first to re-enrol.")
+        raise HTTPException(
+            status_code=409, detail="2FA is already enabled. Disable it first to enrol again.",
+        )
     secret = generate_secret()
-    user.totp_secret = secret
-    user.totp_enabled = False  # stays false until confirm()
-    db.add(Activity(
-        org_id=user.org_id, bug_id=None, entity_type="auth", entity_id=user.id,
-        actor_user_id=user.id, actor_name=user.name,
-        action="2fa_begin", detail=f"{user.email} started 2FA enrolment",
-    ))
+    store_secret(user, secret)
+    user.totp_last_step = None
+    user.totp_enabled = False  # stays off until confirm()
+    _audit(db, user, "2fa_begin", f"{user.email} started 2FA enrolment")
     db.commit()
-    uri = provisioning_uri(secret, user.email, issuer=settings.APP_NAME)
-    return TotpBeginOut(secret=secret, otpauth_uri=uri)
+    return TotpBeginOut(
+        secret=secret,
+        otpauth_uri=provisioning_uri(secret, user.email, issuer=get_settings().APP_NAME),
+    )
 
 
-@router.post("/confirm", response_model=TotpConfirmOut)
+@router.post("/confirm",
+             responses=BAD_REQUEST_FORBIDDEN_CONFLICT_NOT_FOUND_404)
 def confirm(
-    payload: TotpConfirmIn,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    payload: TotpConfirmIn, user: Annotated[User, Depends(get_current_user)], db: Annotated[Session, Depends(get_db)],
 ) -> TotpConfirmOut:
-    settings = get_settings()
-    if not settings.TOTP_ENABLED:
-        raise HTTPException(status_code=403, detail="Two-factor auth is disabled site-wide.")
+    _require_available()
     if not user.totp_secret:
-        raise HTTPException(status_code=400, detail="No enrolment in progress. Click Enable 2FA first.")
+        raise HTTPException(status_code=400, detail="No enrolment in progress. Start with Enable 2FA.")
     if user.totp_enabled:
         raise HTTPException(status_code=409, detail="2FA is already enabled.")
-    if not verify_code(user.totp_secret, payload.code):
-        raise HTTPException(status_code=400, detail="That code didn't match. Try the current one in your authenticator app.")
+    if not accept_code(db, user, payload.code):
+        raise HTTPException(
+            status_code=400,
+            detail="That code didn't match. Use the current one from your authenticator app.",
+        )
     user.totp_enabled = True
     user.totp_enrolled_at = datetime.now(timezone.utc)
-    # Issue recovery codes
-    codes = generate_recovery_codes(settings.TOTP_RECOVERY_CODE_COUNT)
-    for c in codes:
-        db.add(TotpRecoveryCode(user_id=user.id, code_hash=hash_recovery_code(c)))
-    db.add(Activity(
-        org_id=user.org_id, bug_id=None, entity_type="auth", entity_id=user.id,
-        actor_user_id=user.id, actor_name=user.name,
-        action="2fa_enabled",
-        detail=f"{user.email} enabled 2FA; {len(codes)} recovery codes issued",
-    ))
+    codes = _issue_recovery_codes(db, user)
+    _audit(db, user, "2fa_enabled", f"{user.email} enabled 2FA; {len(codes)} recovery codes issued")
     db.commit()
     return TotpConfirmOut(enabled=True, recovery_codes=codes)
 
 
-@router.post("/disable", status_code=204)
+@router.post("/disable", status_code=204, responses=BAD_REQUEST_FORBIDDEN_CONFLICT_NOT_FOUND_404)
 def disable(
-    payload: TotpDisableIn,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    # Re-authenticate with password (sudo-mode) so a hijacked session
-    # can't silently disable 2FA.
+    payload: TotpPasswordIn, user: Annotated[User, Depends(get_current_user)], db: Annotated[Session, Depends(get_db)],
+) -> None:
+    # Re-authenticate so a hijacked session cannot quietly switch 2FA off.
     if not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=400, detail="Current password is incorrect.")
     user.totp_secret = None
     user.totp_enabled = False
     user.totp_enrolled_at = None
-    # Invalidate any unused recovery codes.
-    db.query(TotpRecoveryCode).filter(
-        TotpRecoveryCode.user_id == user.id,
-        TotpRecoveryCode.used_at.is_(None),
-    ).delete(synchronize_session=False)
-    db.add(Activity(
-        org_id=user.org_id, bug_id=None, entity_type="auth", entity_id=user.id,
-        actor_user_id=user.id, actor_name=user.name,
-        action="2fa_disabled",
-        detail=f"{user.email} disabled 2FA",
-    ))
+    user.totp_last_step = None
+    db.execute(delete(TotpRecoveryCode).where(TotpRecoveryCode.user_id == user.id))
+    _audit(db, user, "2fa_disabled", f"{user.email} disabled 2FA")
     db.commit()
 
 
-@router.post("/recovery-codes/regenerate", response_model=TotpConfirmOut)
+@router.post("/recovery-codes/regenerate",
+             responses=BAD_REQUEST_FORBIDDEN_CONFLICT_NOT_FOUND_404)
 def regenerate_recovery_codes(
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    payload: TotpPasswordIn, user: Annotated[User, Depends(get_current_user)], db: Annotated[Session, Depends(get_db)],
 ) -> TotpConfirmOut:
-    settings = get_settings()
     if not user.totp_enabled:
         raise HTTPException(status_code=400, detail="Enable 2FA before generating recovery codes.")
-    db.query(TotpRecoveryCode).filter(
-        TotpRecoveryCode.user_id == user.id,
-    ).delete(synchronize_session=False)
-    codes = generate_recovery_codes(settings.TOTP_RECOVERY_CODE_COUNT)
-    for c in codes:
-        db.add(TotpRecoveryCode(user_id=user.id, code_hash=hash_recovery_code(c)))
-    db.add(Activity(
-        org_id=user.org_id, bug_id=None, entity_type="auth", entity_id=user.id,
-        actor_user_id=user.id, actor_name=user.name,
-        action="2fa_recovery_regenerated",
-        detail=f"{user.email} regenerated {len(codes)} recovery codes",
-    ))
+    if not verify_password(payload.password, user.password_hash):
+        raise HTTPException(status_code=400, detail="Current password is incorrect.")
+    db.execute(delete(TotpRecoveryCode).where(TotpRecoveryCode.user_id == user.id))
+    codes = _issue_recovery_codes(db, user)
+    _audit(db, user, "2fa_recovery_regenerated",
+           f"{user.email} regenerated {len(codes)} recovery codes")
     db.commit()
     return TotpConfirmOut(enabled=True, recovery_codes=codes)

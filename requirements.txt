@@ -1,41 +1,78 @@
-fastapi==0.115.6
-uvicorn[standard]==0.32.1
-sqlalchemy==2.0.36
-pydantic==2.11.4
-psycopg[binary]==3.2.3
-python-dotenv==1.0.1
-httpx==0.28.1
-python-multipart==0.0.20
-bcrypt==4.2.1
-itsdangerous==2.2.0
+# Floor-only version constraints (no exact pins, no upper bounds).
+# This lets pip resolve whatever mutually-compatible, security-patched
+# versions exist for the interpreter actually running the install —
+# whether that's Python 3.12 in CI or 3.14 on a dev machine — instead of
+# fighting a frozen dependency graph across Python releases.
+#
+# Reproducible installs: `requirements-lock.txt` is the pinned runtime
+# lock for the Docker/CI Linux Python (regenerate with:
+#   uv pip compile --python-version 3.12 --python-platform linux --generate-hashes \
+#     --output-file requirements-lock.txt requirements.txt
+# ), consumed via `pip install -r requirements-lock.txt`. Keep this file
+# the human-maintained source of truth; regenerate the lock after any
+# dependency change and after a successful `pip-audit`.
+fastapi>=0.115.6
+uvicorn[standard]>=0.32.1
+sqlalchemy>=2.0.36
+pydantic>=2.10.4
+psycopg[binary]>=3.2.3
+python-dotenv>=1.2.2
+httpx>=0.28.1
+python-multipart>=0.0.31
+bcrypt>=4.2.1
+itsdangerous>=2.2.0
+
+# IANA time-zone database for the email-digest scheduler (app/scheduler.py).
+# The slim base image ships no system zoneinfo, so without this package
+# ZoneInfo(EMAIL_DIGEST_TIMEZONE) — e.g. "Asia/Kolkata" — cannot resolve and the
+# scheduler silently falls back to UTC, firing the digest at the cron time in UTC
+# instead of local time (08:00 IST would run at 13:30 IST). Data-only package.
+tzdata>=2026.3
+
+# T6: EXIF / metadata stripper for uploaded images. Pillow is lazily
+# imported by app/image_strip.py so deploys that skip it (or fail to
+# install it) still serve uploads — they just keep the source metadata.
+Pillow>=12.3.0
+
+# --- Git provider transport (branch creation) ---
+# Corporate TLS interception: Python's bundled certifi roots do not include the
+# interception CA, so httpx fails with CERTIFICATE_VERIFY_FAILED even though the
+# OS trusts it. truststore delegates verification to the platform trust store
+# instead (app/git/tls.py). Verification is never disabled. Data-only package.
+truststore>=0.10.0
+
+# Fernet (AES-128-CBC + HMAC-SHA256) for project-level Git credentials at rest
+# (app/git/credentials.py). The key is server-only (GIT_CREDENTIAL_ENCRYPTION_KEY)
+# and is never derived from SESSION_SECRET. Already a transitive dependency of
+# other packages; declared directly because app code imports it.
+cryptography>=42.0.0
 
 # --- Sleuth: Excel export ---
 # openpyxl is pure-Python and lightweight (~3 MB), suitable for the
 # 1-vCPU / 2 GB target box. It powers the "export to excel" replies.
-openpyxl==3.1.5
+openpyxl>=3.1.5
 
-# --- Enterprise feature dependencies (v2.2 expansion) ---
-# pyotp: RFC 6238 TOTP for login-time 2FA. Pure-Python, ~50 KB.
-pyotp==2.9.0
-# qrcode in pure-Python mode (no PIL required) — we render QR codes as
-# SVG, served straight to the browser, so 2FA enrollment never needs a
-# bitmap toolchain on the deployment host.
-qrcode==7.4.2
-
-# T6 (v2.8): EXIF / metadata stripper for uploaded images. Pillow is
-# lazily imported by app/image_strip.py so deploys that skip it (or
-# fail to install it) still serve uploads — they just keep the source
-# metadata on the image.
-Pillow==12.2.0
-
-# v2.10: Firebase Cloud Messaging HTTP v1 sender. We avoid the heavyweight
-# Firebase Admin SDK (pulls in gRPC + protobuf, ~25 MB) and instead use
-# google-auth directly to mint OAuth2 access tokens, then POST to FCM
-# with the existing httpx dependency. Pure-Python, ~1 MB.
-google-auth==2.35.0
+# --- Web push (Firebase Cloud Messaging) ---
+# Backend transport for browser push notifications. Lazily imported by
+# app/fcm_transport.py, and only used when WEB_PUSH_ENABLED=true AND a Firebase
+# service-account JSON is configured — so a deploy that doesn't use push runs
+# fine even if this import is unavailable (the transport just disables itself).
+firebase-admin>=6.6.0
 
 # --- Sleuth: optional local LLM layer ---
 # Uncomment to enable Layer 3 (local llama.cpp inference). Requires a
-# GGUF model file at models/sleuth.gguf. See models/README.md for
-# recommended models and the privacy/RAM tradeoffs.
+# GGUF model file at models/sleuth.gguf (the folder is created by you and
+# gitignored; a 1-3B instruct model in Q4 needs roughly 1-2 GB of RAM).
 # llama-cpp-python==0.3.2
+
+# --- SigNoz observability: OTLP/gRPC traces + metrics + logs (app/telemetry.py) ---
+# gRPC receiver confirmed at OTEL_EXPORTER_OTLP_ENDPOINT (http:// scheme = cleartext h2c).
+opentelemetry-sdk>=1.44.0
+opentelemetry-exporter-otlp-proto-grpc>=1.44.0
+# Auto-instrumentation: FastAPI server spans/HTTP metrics, SQLAlchemy DB spans,
+# httpx outbound spans, and the stdlib-logging bridge (trace correlation).
+opentelemetry-instrumentation-fastapi>=0.66b0
+opentelemetry-instrumentation-sqlalchemy>=0.66b0
+opentelemetry-instrumentation-httpx>=0.66b0
+opentelemetry-instrumentation-logging>=0.66b0
+pyotp>=2.9.0

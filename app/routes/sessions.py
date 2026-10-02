@@ -1,29 +1,40 @@
-"""Sessions admin API — admins see only sessions of users in their org."""
+"""Sessions admin API: list active sessions and revoke one device at a time.
+
+Admin-only (narrower than user/project management) — silently logging
+people out is sensitive. Admins only ever see the sessions of their own organization.
+"""
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import select
+from sqlalchemy import delete, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.api_docs import BAD_REQUEST_NOT_FOUND_404 as NOT_FOUND_400
 from app.auth import COOKIE_NAME, parse_session_token, require_admin
 from app.database import get_db
-from app.models import Activity, Session as SessionRow, User
+from app.models import Activity, User
+from app.models import Session as SessionRow
 from app.schemas import SessionOut
+
+logger = logging.getLogger("bug_hunter.sessions")
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
 
-def _audit(db: Session, org_id: int, actor: User, action: str, detail: str, entity_id: int | None = None) -> None:
+def _audit(db: Session, actor: User, action: str, detail: str, entity_id: int | None = None) -> None:
     db.add(Activity(
-        org_id=org_id, bug_id=None, entity_type="session", entity_id=entity_id,
+        org_id=actor.org_id, bug_id=None, entity_type="session", entity_id=entity_id,
         actor_user_id=actor.id, actor_name=actor.name,
         action=action, detail=detail,
     ))
 
 
 def _is_current(request: Request, sess: SessionRow) -> bool:
+    """True when the row matches the caller's cookie — labels it and blocks self-revoke."""
     token = request.cookies.get(COOKIE_NAME, "")
     parsed = parse_session_token(token)
     if not parsed:
@@ -32,47 +43,36 @@ def _is_current(request: Request, sess: SessionRow) -> bool:
     return jti is not None and jti == sess.jti
 
 
-def _sweep_expired_sessions(db: Session, now: datetime) -> None:
-    """Delete expired session rows so the admin panel stays tidy.
-
-    Extracted from list_sessions to keep the public handler's cognitive
-    complexity under SonarQube's threshold (S3776). No behaviour change.
-    """
-    expired = db.scalars(select(SessionRow).where(SessionRow.expires_at < now)).all()
-    if expired:
-        for s in expired:
-            db.delete(s)
-        db.commit()
-
-
 @router.get("", response_model=list[SessionOut])
 def list_sessions(
     request: Request,
-    actor: User = Depends(require_admin),
     db: Session = Depends(get_db),
+    actor: User = Depends(require_admin),
 ) -> list[dict]:
+    """List non-expired sessions with user info, sweeping expired rows on read."""
     now = datetime.now(timezone.utc)
 
-    # Sweep expired rows on read so the panel stays tidy.
-    _sweep_expired_sessions(db, now)
-
-    # Only sessions belonging to users in the admin's org.
-    org_user_ids = list(db.scalars(
-        select(User.id).where(User.org_id == actor.org_id)
-    ).all())
-    if not org_user_ids:
-        return []
+    # set-based DELETE avoids the concurrent-admin StaleDataError; a failed
+    # sweep is harmless since the SELECT below filters expired rows anyway
+    try:
+        db.execute(delete(SessionRow).where(SessionRow.expires_at < now))
+        db.commit()
+    except SQLAlchemyError:
+        logger.exception("Session expiry sweep failed; serving the listing anyway.")
+        db.rollback()
 
     rows = db.scalars(
         select(SessionRow)
-        .where(SessionRow.expires_at >= now, SessionRow.user_id.in_(org_user_ids))
+        .join(User, User.id == SessionRow.user_id)
+        .where(SessionRow.expires_at >= now, User.org_id == actor.org_id)
         .order_by(SessionRow.last_seen_at.desc(), SessionRow.id.desc())
     ).all()
 
+    # batch-load users — avoids N+1
+    user_ids = sorted({r.user_id for r in rows})
     user_map: dict[int, User] = {}
-    if rows:
-        ids = sorted({r.user_id for r in rows})
-        for u in db.scalars(select(User).where(User.id.in_(ids))).all():
+    if user_ids:
+        for u in db.scalars(select(User).where(User.id.in_(user_ids))).all():
             user_map[u.id] = u
 
     out: list[dict] = []
@@ -94,22 +94,20 @@ def list_sessions(
     return out
 
 
-@router.delete("/{session_id}", status_code=200)
+@router.delete("/{session_id}", status_code=200, responses=NOT_FOUND_400)
 def revoke_session(
     session_id: int,
     request: Request,
-    actor: User = Depends(require_admin),
     db: Session = Depends(get_db),
+    actor: User = Depends(require_admin),
 ) -> dict[str, str]:
+    """Revoke one session row; other sessions for the same user are untouched."""
     sess = db.get(SessionRow, session_id)
-    if sess is None:
+    target = db.get(User, sess.user_id) if sess is not None else None
+    if sess is None or target is None or target.org_id != actor.org_id:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    target = db.get(User, sess.user_id)
-    # Org isolation: admin can only revoke sessions of users in their org.
-    if target is None or target.org_id != actor.org_id:
-        raise HTTPException(status_code=404, detail="Session not found")
-
+    # no undo — admins must use logout, not self-revocation
     if _is_current(request, sess):
         raise HTTPException(
             status_code=400,
@@ -119,8 +117,7 @@ def revoke_session(
     target_label = f"{target.name} <{target.email}>"
     db.delete(sess)
     _audit(
-        db, actor.org_id, actor, "session_revoked",
-        f"Revoked session for {target_label}",
+        db, actor, "session_revoked", f"Revoked session for {target_label}",
         entity_id=sess.user_id,
     )
     db.commit()

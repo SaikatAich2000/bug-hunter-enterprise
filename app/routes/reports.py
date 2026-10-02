@@ -1,17 +1,6 @@
-"""Reports REST router.
+"""Reports REST router: /types, /run, /export.xlsx — all manager-or-admin only.
 
-Three endpoints, all manager-or-admin only:
-
-  GET  /api/reports/types         — catalog of report types + filter schema
-                                    for the frontend dropdown.
-  POST /api/reports/run           — run a report and return JSON for the
-                                    on-screen table.
-  POST /api/reports/export.xlsx   — run a report and stream the workbook
-                                    as a download.
-
-A regular user hitting any of these gets a 403; the sidebar entry is also
-hidden for them via data-needs-role="manager", so this is defense in
-depth, not the primary boundary.
+The sidebar hiding is UI convenience; the role dependency is the access gate.
 """
 from __future__ import annotations
 
@@ -21,20 +10,27 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
+from app.access import accessible_project_ids
+from app.api_docs import BAD_REQUEST_400, EXPORT_ERRORS, XLSX_FILE_200
 from app.auth import require_manager_or_admin
+from app.config import get_settings
 from app.database import get_db
 from app.models import User
 from app.reports import (
-    Filters,
     REPORT_CATALOG,
     REPORT_TYPES,
+    Filters,
     UnknownReportError,
     build_workbook_bytes,
     run_report,
+)
+from app.reports.engine import (
+    OPEN_STATUSES_BY_TYPE,
+    RESOLVED_STATUSES_BY_TYPE,
 )
 from app.reports.xlsx import XlsxBuildError
 from app.schemas import (
@@ -43,30 +39,23 @@ from app.schemas import (
     ALLOWED_PRIORITIES,
     ALLOWED_STATUSES,
 )
-from app.reports.engine import (
-    OPEN_STATUSES_BY_TYPE,
-    RESOLVED_STATUSES_BY_TYPE,
-)
 
 logger = logging.getLogger("bug_hunter.reports")
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
 
-# ---------------------------------------------------------------------------
-# I/O models
-# ---------------------------------------------------------------------------
 class FilterIn(BaseModel):
-    """Inbound filter blob. Every field is optional; missing → no filter."""
+    """Inbound filter blob; omitted fields mean no filter."""
     date_from: Optional[str] = None
     date_to: Optional[str] = None
     item_types: list[str] = Field(default_factory=list)
     statuses: list[str] = Field(default_factory=list)
     priorities: list[str] = Field(default_factory=list)
     environments: list[str] = Field(default_factory=list)
-    project_ids: list[int] = Field(default_factory=list)
-    assignee_ids: list[int] = Field(default_factory=list)
-    reporter_ids: list[int] = Field(default_factory=list)
+    project_ids: list[int] = Field(default_factory=list, max_length=1000)
+    assignee_ids: list[int] = Field(default_factory=list, max_length=1000)
+    reporter_ids: list[int] = Field(default_factory=list, max_length=1000)
     event_id: Optional[int] = None
     include_not_a_bug: bool = False
     text_search: Optional[str] = Field(default=None, max_length=400)
@@ -98,9 +87,6 @@ class ReportRunIn(BaseModel):
     filters: FilterIn = Field(default_factory=FilterIn)
 
 
-# ---------------------------------------------------------------------------
-# Endpoints
-# ---------------------------------------------------------------------------
 @router.get("/types")
 def list_report_types(
     _user: User = Depends(require_manager_or_admin),
@@ -123,7 +109,7 @@ def _build_filters(payload: ReportRunIn) -> Filters:
     return Filters.from_dict(payload.filters.model_dump())
 
 
-def _run_or_400(payload: ReportRunIn, db: Session, actor: User):
+def _run_or_400(payload: ReportRunIn, db: Session, user: User):
     if payload.report_key not in REPORT_CATALOG:
         raise HTTPException(
             status_code=400,
@@ -133,26 +119,22 @@ def _run_or_400(payload: ReportRunIn, db: Session, actor: User):
             ),
         )
     filters = _build_filters(payload)
+    # restrict_project_ids is route-set, never payload — a manager can't widen scope
+    filters.restrict_project_ids = accessible_project_ids(db, user)
     try:
-        # Enterprise multi-tenancy: ALWAYS pass actor.org_id so the engine
-        # can't accidentally return cross-org rows.
-        return run_report(payload.report_key, filters, db, org_id=actor.org_id), filters
+        return run_report(payload.report_key, filters, db), filters
     except UnknownReportError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.post("/run")
+@router.post("/run", responses=BAD_REQUEST_400)
 def run(
     payload: ReportRunIn,
     db: Session = Depends(get_db),
-    actor: User = Depends(require_manager_or_admin),
+    user: User = Depends(require_manager_or_admin),
 ) -> dict[str, Any]:
-    """Run a report and return JSON. For driving the on-screen table.
-
-    Inline rendering is capped at 1000 rows to keep payloads sensible —
-    the XLSX export endpoint has no cap (see below).
-    """
-    result, _filters = _run_or_400(payload, db, actor)
+    """Run a report and return JSON rows, capped at 1000; XLSX export has full data."""
+    result, _filters = _run_or_400(payload, db, user)
     api = result.to_api()
     rendered_cap = 1000
     if len(api["rows"]) > rendered_cap:
@@ -177,25 +159,35 @@ def _safe_filename(report_key: str, label: str) -> str:
     return f"bug-hunter-report-{base}-{stamp}.xlsx"
 
 
-@router.post("/export.xlsx")
+@router.post("/export.xlsx", response_class=Response, responses={**XLSX_FILE_200, **EXPORT_ERRORS})
 def export_xlsx(
     payload: ReportRunIn,
     db: Session = Depends(get_db),
-    actor: User = Depends(require_manager_or_admin),
+    user: User = Depends(require_manager_or_admin),
 ) -> StreamingResponse:
-    """Run the report and stream the resulting workbook.
-
-    NO row cap here — Reports exports are an audit / compliance surface,
-    so the caller decides how big a slice they want. The route layer
-    bounds total cost via request size and timeouts; very-large reports
-    will time out, which is the right pressure relief.
-    """
-    result, filters = _run_or_400(payload, db, actor)
+    """Run the report and stream the workbook; 413 past MAX_REPORT_ROWS (in-memory build)."""
+    result, filters = _run_or_400(payload, db, user)
+    # max() covers detail vs aggregate reports; truncated catches a capped scan
+    # that would otherwise silently ship under-counted totals
+    settings = get_settings()
+    n_rows = max(result.total, len(result.detail_rows))
+    if n_rows > settings.MAX_REPORT_ROWS or result.truncated:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"This export exceeds the {settings.MAX_REPORT_ROWS}-row limit. "
+                "Narrow the date range or add filters and try again."
+            ),
+        )
     try:
         payload_bytes = build_workbook_bytes(result)
     except XlsxBuildError as exc:
+        # log the real cause server-side; don't leak config state to the client
         logger.exception("XLSX build failed: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=500,
+            detail="Could not build the report workbook. Please try again or contact an administrator.",
+        ) from exc
     filename = _safe_filename(payload.report_key, filters.label)
     safe_filename = filename.replace('"', "_").replace("\r", "").replace("\n", "")
     return StreamingResponse(

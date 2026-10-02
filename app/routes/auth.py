@@ -1,10 +1,11 @@
-"""Authentication endpoints — signup, login, logout, password management."""
+"""Authentication endpoints: sign-up, login (with two-factor), logout, profile, email change
+and password management."""
 from __future__ import annotations
 
 import logging
-import re
 import secrets
 from datetime import datetime, timedelta, timezone
+from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 from sqlalchemy import select
@@ -12,104 +13,110 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import account_lockout
+from app.api_docs import (
+    AUTH_401,
+    FORGOT_PASSWORD_404,
+    PASSWORD_CHANGE_400,
+    RESET_TOKEN_400,
+)
 from app.auth import (
     PASSWORD_RESET_TTL,
     clear_session_cookie,
-    generate_reset_token,
+    generate_token,
     get_current_user,
     hash_password,
-    hash_reset_token,
     hash_token,
     invalidate_outstanding_reset_tokens,
     new_jti,
+    purge_consumed_reset_tokens,
     set_session_cookie,
+    trusted_forwarded_ip,
     verify_password,
 )
 from app.config import get_settings
-from app.password_breach import is_password_breached
 from app.database import get_db
-from app.email_service import notify_password_reset
+from app.email_service import notify_email_change_code, notify_password_reset
+from app.metrics import record_event
 from app.models import (
     ROLE_ADMIN,
     Activity,
-    Organization,
+    EmailChangeRequest,
     PasswordResetToken,
-    Session as SessionRow,
+    TotpRecoveryCode,
     User,
 )
+from app.models import Session as SessionRow
+from app.password_breach import is_password_breached
 from app.schemas import (
     ChangePasswordIn,
+    EmailChangeConfirmIn,
+    EmailChangeRequestIn,
     ForgotPasswordIn,
     LoginIn,
+    LoginTotpIn,
     MeOut,
+    ProfileUpdateIn,
     ResetPasswordIn,
     SignupIn,
+)
+from app.tenancy import create_organization
+from app.totp import (
+    accept_code,
+    hash_recovery_code,
+    make_pending_token,
+    parse_pending_token,
 )
 
 logger = logging.getLogger("bug_hunter.auth")
 
+# Verified for unknown emails so timing can't distinguish "no account" from "wrong password".
+# Cost depends on construction order vs env: the test suite sets BCRYPT_TEST_ROUNDS
+# in tests/conftest.py, but conftest imports app modules first is NOT guaranteed
+# across files (pytest resolves conftest at collection; imports of app.routes by
+# earlier test modules can happen first). So compute it lazily per call instead
+# of baking a production-cost hash at import time — otherwise CI pays rounds=12
+# on EVERY unknown-email verify (~0.5s each) even when the override is set.
+def _dummy_password_hash() -> str:
+    if not hasattr(_dummy_password_hash, "cached"):
+        _dummy_password_hash.cached = hash_password("dummy-not-a-real-credential")  # type: ignore[attr-defined]
+    return _dummy_password_hash.cached  # type: ignore[attr-defined]
+
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
-# S1192: extract duplicated detail string into a module constant.
+
 _DETAIL_INVALID_RESET_TOKEN = "Invalid or expired reset token"
-_MSG_ACCOUNT_MISCONFIGURED = "Account misconfigured"
-# v2.8 — unified login-failure message. Identical for unknown email, wrong
-# password, and disabled account so an attacker can't enumerate.
 _DETAIL_INVALID_LOGIN = "Invalid email or password"
-
-# G1 (v2.8): precomputed dummy bcrypt hash used by the login path when no
-# user matches the supplied email. Without this, the code path skips the
-# bcrypt verify entirely on unknown-email and returns ~50 ms faster than
-# the wrong-password path — an attacker can enumerate accounts by timing
-# the login response. Calling verify_password against the dummy in the
-# no-user branch equalises the work done, closing the timing oracle.
-_DUMMY_PASSWORD_HASH = hash_password("dummy-not-a-real-credential")
+_DETAIL_WRONG_PASSWORD = "Current password is incorrect"
+_EMAIL_CHANGE_TTL = timedelta(minutes=15)
+_EMAIL_CHANGE_MAX_ATTEMPTS = 5
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 def _audit(
-    db: Session, org_id: int, actor: User | None, action: str,
-    detail: str, entity_id: int | None = None,
+    db: Session, user: User, action: str, detail: str, entity_id: int | None = None,
+    as_system: bool = False,
 ) -> None:
+    """One audit row in ``user``'s organization, attributed to them unless ``as_system``
+    (events that are not an action of a signed-in person, such as a reset request)."""
     db.add(Activity(
-        org_id=org_id, bug_id=None, entity_type="auth", entity_id=entity_id,
-        actor_user_id=actor.id if actor else None,
-        actor_name=actor.name if actor else "system",
+        org_id=user.org_id, bug_id=None, entity_type="auth", entity_id=entity_id,
+        actor_user_id=None if as_system else user.id,
+        actor_name="system" if as_system else user.name,
         action=action, detail=detail,
     ))
 
 
-def _client_ip(request: Request) -> str:
-    """Best-effort client IP for the session log + audit trail.
-
-    G4 (v2.8): only honour X-Forwarded-For when the deploy explicitly
-    opted in via TRUST_PROXY_FORWARDED_FOR. Without this gate, a client
-    behind a non-proxied deploy can set X-Forwarded-For to anything and
-    spoof the IP recorded in their session row and audit entries —
-    making it look like the login came from a different machine. This
-    matches the rate-limit middleware's ``_client_ip`` in app/main.py.
-    """
-    if get_settings().TRUST_PROXY_FORWARDED_FOR:
-        fwd = request.headers.get("x-forwarded-for", "")
-        if fwd:
-            ip = fwd.split(",")[0].strip()
-            return ip[:64]
-    if request.client and request.client.host:
-        return request.client.host[:64]
-    return ""
+def _reject_if_breached(plain: str) -> None:
+    """Reject an HIBP-breached password; fails open on network errors (see app/password_breach.py)."""
+    if is_password_breached(plain):
+        raise HTTPException(
+            status_code=400,
+            detail="This password appears in a known breach corpus. "
+                   "Please choose a different one.",
+        )
 
 
 def _mask_email(email: str) -> str:
-    """Mask the local part of an email for safe inclusion in logs.
-
-    G5 (v2.8): log lines feed centralised log stores (Loki / CloudWatch
-    / etc.) whose access controls are usually broader than the app DB's.
-    Writing raw emails there is unnecessary PII leakage when a
-    one-character + asterisks form keeps the line just as useful for
-    diagnosing the event. ``alice@example.com`` -> ``a***@example.com``.
-    """
+    """Mask email local part for logs (``alice@x.com`` -> ``a***@x.com``); avoids PII in log stores."""
     if not email or "@" not in email:
         return "***"
     local, _, domain = email.partition("@")
@@ -119,107 +126,74 @@ def _mask_email(email: str) -> str:
     return f"{head}***@{domain}"
 
 
-def _reject_if_breached(plain: str) -> None:
-    """T4 (v2.8): refuse to accept a password that appears in the HIBP
-    corpus. Called from every code path that sets a password (login flow
-    excluded — the user can't change their existing creds at login time).
-    Fail-open on network errors so an HIBP outage doesn't block
-    legitimate password changes; see app/password_breach.py."""
-    if is_password_breached(plain):
-        raise HTTPException(
-            status_code=400,
-            detail="This password appears in a known breach corpus. "
-                   "Please choose a different one.",
-        )
+def _client_ip(request: Request) -> str:
+    """Client IP for sessions/audit. X-Forwarded-For is honoured only when
+    TRUST_PROXY_FORWARDED_FOR is set (spoofable otherwise); matches the rate limiter."""
+    settings = get_settings()
+    if settings.TRUST_PROXY_FORWARDED_FOR:
+        fwd = request.headers.get("x-forwarded-for", "")
+        if fwd:
+            # Right-most proxy-appended entry; the left-most is client-spoofable.
+            ip = trusted_forwarded_ip(fwd, settings.TRUST_PROXY_HOP_COUNT)
+            if ip is not None:
+                return ip[:64]
+    if request.client and request.client.host:
+        return request.client.host[:64]
+    return ""
 
 
-def _to_me(user: User, org: Organization) -> dict:
+def to_me(user: User) -> dict:
+    """The /me payload: the user plus their organization and its branding."""
+    org = user.organization
     return {
-        "id": user.id,
-        "name": user.name,
-        "email": user.email,
-        "role": user.role,
+        "id": user.id, "name": user.name, "email": user.email, "role": user.role,
         "is_active": user.is_active,
-        "org_id": org.id,
-        "organization_name": org.name,
-        "organization_slug": org.slug,
-        # v2.2 additions — let the SPA paint branding on first load and
-        # know whether to surface the 2FA banner.
-        "totp_enabled": bool(getattr(user, "totp_enabled", False)),
-        "branding": {
-            "logo_data_url": getattr(org, "logo_data_url", None),
-            "accent_color": getattr(org, "accent_color", None),
-        },
+        "org_id": org.id, "organization_name": org.name, "organization_slug": org.slug,
+        "totp_enabled": bool(user.totp_enabled),
+        "branding": {"logo_data_url": org.logo_data_url, "accent_color": org.accent_color},
     }
 
 
-_SLUG_BAD = re.compile(r"[^a-z0-9]+")
+def start_session(db: Session, user: User, request: Request, response: Response) -> None:
+    """Create the session row and set the signed cookie. The caller commits."""
+    jti = new_jti()
+    db.add(SessionRow(
+        user_id=user.id,
+        jti=jti,
+        user_agent=(request.headers.get("user-agent") or "")[:400],
+        ip_address=_client_ip(request),
+        expires_at=datetime.now(timezone.utc) + timedelta(seconds=get_settings().SESSION_TTL_SECONDS),
+    ))
+    set_session_cookie(response, user, jti=jti)
 
 
-def _slugify(name: str) -> str:
-    base = _SLUG_BAD.sub("-", (name or "").lower()).strip("-")
-    return base[:60] or "org"
+def _email_taken(db: Session, email: str, exclude_id: int | None = None) -> bool:
+    stmt = select(User.id).where(User.email == email)
+    if exclude_id is not None:
+        stmt = stmt.where(User.id != exclude_id)
+    return db.scalar(stmt) is not None
 
 
-def _make_unique_slug(db: Session, name: str) -> str:
-    """Find a free slug derived from `name`. Appends a short random
-    suffix on collision so signups race-safe even under contention."""
-    base = _slugify(name)
-    candidate = base
-    for _ in range(8):
-        exists = db.scalar(select(Organization.id).where(Organization.slug == candidate))
-        if not exists:
-            return candidate
-        candidate = f"{base}-{secrets.token_hex(3)}"
-    # Extremely unlikely; fall through to a fully random slug.
-    return f"{base}-{secrets.token_hex(6)}"
-
-
-# ---------------------------------------------------------------------------
-# Sign up — creates org + admin user in one transaction
-# ---------------------------------------------------------------------------
-@router.post("/signup", response_model=MeOut, status_code=201)
+@router.post("/signup", response_model=MeOut, status_code=201, responses=AUTH_401)
 def signup(
-    payload: SignupIn,
-    request: Request,
-    response: Response,
-    db: Session = Depends(get_db),
+    payload: SignupIn, request: Request, response: Response, db: Session = Depends(get_db),
 ) -> dict:
-    settings = get_settings()
-    if not settings.ALLOW_PUBLIC_SIGNUP:
+    """Create an organization and its first admin, and sign them in."""
+    if not get_settings().ALLOW_PUBLIC_SIGNUP:
         raise HTTPException(
             status_code=403,
             detail="Public sign-up is disabled. Ask your administrator for an invite.",
         )
-
-    # Reject duplicate email up front so we give a clear error instead of
-    # a generic IntegrityError. The unique index is still authoritative.
-    if db.scalar(select(User).where(User.email == payload.email)):
+    if _email_taken(db, payload.email):
         raise HTTPException(
             status_code=409,
             detail="An account with that email already exists. Try signing in.",
         )
-
-    # T4 (v2.8): HIBP check on the signup password. Done after the
-    # duplicate-email check so we don't reveal breach status for
-    # already-used addresses.
     _reject_if_breached(payload.password)
-
-    org = Organization(
-        name=payload.organization_name,
-        slug=_make_unique_slug(db, payload.organization_name),
-        description="",
-    )
-    db.add(org)
-    db.flush()  # we need org.id for the user FK
-
+    org = create_organization(db, payload.organization_name)
     user = User(
-        org_id=org.id,
-        name=payload.name,
-        email=payload.email,
-        role=ROLE_ADMIN,
-        is_active=True,
-        password_hash=hash_password(payload.password),
+        org_id=org.id, name=payload.name, email=payload.email, role=ROLE_ADMIN,
+        is_active=True, password_hash=hash_password(payload.password),
     )
     db.add(user)
     try:
@@ -227,212 +201,119 @@ def signup(
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(
-            status_code=409,
-            detail="An account with that email already exists.",
+            status_code=409, detail="An account with that email already exists.",
         ) from exc
-
-    # Establish a session for the signup user so they land straight in
-    # the app — no extra "now log in" hop.
-    jti = new_jti()
-    expires_at = datetime.now(timezone.utc) + timedelta(seconds=settings.SESSION_TTL_SECONDS)
-    db.add(SessionRow(
-        user_id=user.id,
-        jti=jti,
-        user_agent=(request.headers.get("user-agent") or "")[:400],
-        ip_address=_client_ip(request),
-        expires_at=expires_at,
-    ))
-
-    _audit(
-        db, org.id, user, "org_created",
-        f"Organization '{org.name}' created by {user.email}",
-        entity_id=org.id,
-    )
-    _audit(
-        db, org.id, user, "user_signup",
-        f"{user.email} signed up as admin of '{org.name}'",
-        entity_id=user.id,
-    )
+    start_session(db, user, request, response)
+    _audit(db, user, "org_created", f"Organization '{org.name}' created by {user.email}",
+           entity_id=org.id)
+    _audit(db, user, "user_signup", f"{user.email} signed up as admin of '{org.name}'",
+           entity_id=user.id)
     db.commit()
-
-    set_session_cookie(response, user, jti=jti)
-    return _to_me(user, org)
+    return to_me(user)
 
 
-# ---------------------------------------------------------------------------
-# Login (step 1: password — if 2FA is on, returns requires_totp instead
-# of issuing a session cookie)
-# ---------------------------------------------------------------------------
-def _issue_session(
-    db: Session, user: User, org: Organization,
-    request: Request, response: Response,
+def _complete_login(
+    db: Session, user: User, request: Request, response: Response,
 ) -> dict:
-    """Helper shared by both single-step login and the second
-    (TOTP / recovery-code) step. Caller is responsible for verifying
-    credentials BEFORE calling this."""
-    settings = get_settings()
-    jti = new_jti()
-    expires_at = datetime.now(timezone.utc) + timedelta(seconds=settings.SESSION_TTL_SECONDS)
-    db.add(SessionRow(
-        user_id=user.id, jti=jti,
-        user_agent=(request.headers.get("user-agent") or "")[:400],
-        ip_address=_client_ip(request),
-        expires_at=expires_at,
-    ))
-    set_session_cookie(response, user, jti=jti)
-    _audit(db, user.org_id, user, "login", f"{user.email} logged in")
+    start_session(db, user, request, response)
+    _audit(db, user, "login", f"{user.email} logged in")
     db.commit()
-    from app.observability import record_event
     record_event("login_success")
-    return _to_me(user, org)
+    return to_me(user)
 
 
-@router.post("/login")
+@router.post("/login", responses=AUTH_401)
 def login(
-    payload: LoginIn, request: Request, response: Response,
-    db: Session = Depends(get_db),
-):
-    # T3 (v2.8): short-circuit if this email is currently locked out. Raised
-    # BEFORE the bcrypt verify so a flood of bad logins doesn't amplify into
-    # a flood of bcrypt rounds — keeping the lockout cheap to enforce.
+    payload: LoginIn, request: Request, response: Response, db: Session = Depends(get_db),
+) -> dict:
+    """Verify credentials; sign in, or - for a user with two-factor on - return a short-lived
+    ``pending_token`` to trade for a session at /login/totp. The cookie's `jti` maps back to
+    the session row, enabling per-session admin revocation."""
+    # Check lockout before bcrypt so a login flood doesn't become a CPU flood.
     account_lockout.check_locked(payload.email)
 
+    # LoginIn already lowercases the email.
     user = db.scalar(select(User).where(User.email == payload.email))
-    # G1 (v2.8): equalise the timing of unknown-email vs wrong-password. If
-    # we skipped verify_password when user is None, an attacker could
-    # enumerate accounts by measuring response latency (bcrypt costs ~50 ms;
-    # the no-user branch returns in <1 ms). Always run the bcrypt verify,
-    # against the real hash when we have a user and against a server-side
-    # dummy otherwise.
+    # Run bcrypt even for unknown emails to keep response timing uniform.
     if user is None:
-        verify_password(payload.password, _DUMMY_PASSWORD_HASH)
+        verify_password(payload.password, _dummy_password_hash())
         password_ok = False
     else:
         password_ok = verify_password(payload.password, user.password_hash)
-
+    # Same 401 for all failures so existence/disabled status doesn't leak.
     if user is None or not password_ok:
-        from app.observability import record_event
         record_event("login_failure")
-        # T3: tick the lockout counter for every failed attempt, including
-        # ones against unknown emails. Ticking only known emails would let
-        # an attacker enumerate accounts by which addresses ever lock.
         account_lockout.record_failure(payload.email)
         raise HTTPException(status_code=401, detail=_DETAIL_INVALID_LOGIN)
     if not user.is_active:
-        # G5: don't put the raw email in INFO logs — masked form keeps
-        # the event diagnosable without writing PII to centralised log
-        # stores.
         logger.info("Login refused: inactive account %s", _mask_email(user.email))
-        # T3: still tick the counter — an inactive account is a failed
-        # login. v2.8: unified 401 so an attacker can't distinguish
-        # "exists but disabled" from "wrong password".
         account_lockout.record_failure(payload.email)
         raise HTTPException(status_code=401, detail=_DETAIL_INVALID_LOGIN)
 
-    org = db.get(Organization, user.org_id)
-    if org is None:
-        logger.error("User %d has no organization (org_id=%s)", user.id, user.org_id)
-        raise HTTPException(status_code=500, detail="Account misconfigured. Contact support.")
-
-    # 2FA gate. If enabled, password-only response carries a short-
-    # lived pending token that the next step (POST /login/totp) trades
-    # for a real session.
-    settings = get_settings()
-    if settings.TOTP_ENABLED and user.totp_enabled and user.totp_secret:
-        from app.totp import make_pending_token
-        token = make_pending_token(user.id)
-        _audit(db, user.org_id, user, "login_password_ok_awaiting_2fa",
-               f"{user.email} passed password, awaiting 2FA")
+    if get_settings().TOTP_ENABLED and user.totp_enabled and user.totp_secret:
+        # The login isn't complete until the second factor passes, so the lockout bucket
+        # stays; /login/totp clears it.
+        _audit(db, user, "login_password_ok_awaiting_2fa",
+               f"{user.email} passed the password step, awaiting 2FA")
         db.commit()
-        # Don't clear the lockout bucket yet — the login isn't complete
-        # until the 2FA step succeeds. The /login/totp handler clears it.
-        return {"requires_totp": True, "pending_token": token}
+        return {"requires_totp": True, "pending_token": make_pending_token(user.id)}
 
-    # T3: success — clear the bucket so transient typos don't carry forward.
+    # Clear the lockout bucket so transient typos don't carry forward.
     account_lockout.clear(payload.email)
-    return _issue_session(db, user, org, request, response)
+    return _complete_login(db, user, request, response)
 
 
-class LoginTotpIn(LoginIn.__mro__[1]):  # type: ignore[misc]
-    pass
+def _consume_second_factor(db: Session, user: User, code: str) -> bool | None:
+    """Check ``code`` as an authenticator code, else as an unused recovery code (which it
+    consumes). Returns True/False for authenticator/recovery success, None for a wrong code."""
+    if accept_code(db, user, code):
+        return False
+    recovery = db.scalar(
+        select(TotpRecoveryCode).where(
+            TotpRecoveryCode.user_id == user.id,
+            TotpRecoveryCode.code_hash == hash_recovery_code(code),
+            TotpRecoveryCode.used_at.is_(None),
+        )
+    )
+    if recovery is None:
+        return None
+    recovery.used_at = datetime.now(timezone.utc)
+    return True
 
 
-from pydantic import BaseModel as _BM, Field as _F  # noqa: E402
-
-
-class LoginTotpStepIn(_BM):
-    pending_token: str = _F(..., min_length=1, max_length=400)
-    code: str = _F(..., min_length=6, max_length=20)
-
-
-@router.post("/login/totp")
+@router.post("/login/totp", responses=AUTH_401)
 def login_totp(
-    payload: LoginTotpStepIn, request: Request, response: Response,
-    db: Session = Depends(get_db),
-):
-    """Step 2 of login when the user has 2FA on. Accepts either a
-    6-digit TOTP code or a 11-char recovery code."""
-    from app.totp import parse_pending_token, verify_code, hash_recovery_code
-    from app.models import TotpRecoveryCode
-
+    payload: LoginTotpIn, request: Request, response: Response, db: Session = Depends(get_db),
+) -> dict:
+    """Second step of a two-factor login: a 6-digit authenticator code or a recovery code."""
     user_id = parse_pending_token(payload.pending_token)
+    user = db.get(User, user_id) if user_id is not None else None
     if user_id is None:
         raise HTTPException(status_code=400, detail="Login session expired. Sign in again.")
-    user = db.get(User, user_id)
     if user is None or not user.is_active or not user.totp_enabled or not user.totp_secret:
         raise HTTPException(status_code=400, detail="Login session invalid. Sign in again.")
-
-    # T3 (v2.8): check the per-account lockout on the 2FA step too — an
-    # attacker who's stolen the password could otherwise brute-force the
-    # 6-digit code unchecked.
+    # The second factor is a credential too: rate-limit it like the password.
     account_lockout.check_locked(user.email)
-
-    org = db.get(Organization, user.org_id)
-    if org is None:
-        raise HTTPException(status_code=500, detail="Account misconfigured.")
-
-    code = payload.code.strip().upper()
-    used_recovery = False
-    if verify_code(user.totp_secret, code):
-        pass  # success via TOTP app
-    else:
-        # Try recovery codes — single-use, hashed lookup.
-        h = hash_recovery_code(code)
-        rc = db.scalar(
-            select(TotpRecoveryCode).where(
-                TotpRecoveryCode.user_id == user.id,
-                TotpRecoveryCode.code_hash == h,
-                TotpRecoveryCode.used_at.is_(None),
-            )
+    used_recovery = _consume_second_factor(db, user, payload.code.strip().upper())
+    if used_recovery is None:
+        record_event("login_totp_failure")
+        account_lockout.record_failure(user.email)
+        raise HTTPException(
+            status_code=400, detail="Invalid code. Try again or use a recovery code.",
         )
-        if rc is None:
-            from app.observability import record_event
-            record_event("login_totp_failure")
-            # T3: tick the lockout counter — a wrong TOTP / recovery code is
-            # a credential failure and must be rate-limited the same as a
-            # wrong password.
-            account_lockout.record_failure(user.email)
-            raise HTTPException(status_code=400, detail="Invalid code. Try again or use a recovery code.")
-        rc.used_at = datetime.now(timezone.utc)
-        used_recovery = True
-
-    if used_recovery:
-        _audit(db, user.org_id, user, "login_recovery_code_used",
-               f"{user.email} signed in with a one-time recovery code")
-    else:
-        _audit(db, user.org_id, user, "login_totp_ok",
-               f"{user.email} completed 2FA verification")
-    db.commit()
-    # T3: full login success — clear the lockout bucket.
+    _audit(
+        db, user,
+        "login_recovery_code_used" if used_recovery else "login_totp_ok",
+        f"{user.email} signed in with "
+        + ("a one-time recovery code" if used_recovery else "a 2FA code"),
+    )
     account_lockout.clear(user.email)
-    return _issue_session(db, user, org, request, response)
+    return _complete_login(db, user, request, response)
 
 
-# ---------------------------------------------------------------------------
-# Logout
-# ---------------------------------------------------------------------------
 @router.post("/logout", status_code=204)
 def logout(request: Request, db: Session = Depends(get_db)) -> Response:
+    """Clear the session cookie and its server-side row; always 204 (idempotent)."""
     from app.auth import COOKIE_NAME, parse_session_token
     token = request.cookies.get(COOKIE_NAME, "")
     parsed = parse_session_token(token)
@@ -440,135 +321,225 @@ def logout(request: Request, db: Session = Depends(get_db)) -> Response:
         user_id, _version, jti = parsed
         user = db.get(User, user_id)
         if user:
-            _audit(db, user.org_id, user, "logout", f"{user.email} logged out")
+            _audit(db, user, "logout", f"{user.email} logged out")
         if jti:
-            db.execute(SessionRow.__table__.delete().where(SessionRow.jti == jti))
+            # Only this session; the user's other sessions remain.
+            db.execute(
+                SessionRow.__table__.delete().where(SessionRow.jti == jti)
+            )
         db.commit()
     response = Response(status_code=204)
     clear_session_cookie(response)
     return response
 
 
-# ---------------------------------------------------------------------------
-# Whoami
-# ---------------------------------------------------------------------------
 @router.get("/me", response_model=MeOut)
-def me(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
-    org = db.get(Organization, user.org_id)
-    if org is None:
-        raise HTTPException(status_code=500, detail=_MSG_ACCOUNT_MISCONFIGURED)
-    return _to_me(user, org)
+def me(user: User = Depends(get_current_user)) -> dict:
+    """Return the currently logged-in user with their organization."""
+    return to_me(user)
 
 
-# ---------------------------------------------------------------------------
-# Change password
-# ---------------------------------------------------------------------------
-@router.post("/change-password", status_code=204)
+@router.put("/profile", response_model=MeOut)
+def update_profile(
+    payload: ProfileUpdateIn,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Session = Depends(get_db),
+) -> dict:
+    """Change your own display name. The email goes through the verified change below;
+    the role is set by an admin."""
+    if payload.name != user.name:
+        old = user.name
+        user.name = payload.name
+        _audit(db, user, "profile_updated", f"Display name: '{old}' → '{user.name}'",
+               entity_id=user.id)
+        db.commit()
+    return to_me(user)
+
+
+@router.post("/email-change/request", status_code=202, responses=PASSWORD_CHANGE_400)
+def request_email_change(
+    payload: EmailChangeRequestIn,
+    background: BackgroundTasks,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    """Step 1: re-authenticate, stage the new address and mail it a 6-digit code."""
+    if not verify_password(payload.current_password, user.password_hash):
+        raise HTTPException(status_code=400, detail=_DETAIL_WRONG_PASSWORD + ".")
+    if payload.new_email == user.email:
+        raise HTTPException(status_code=400, detail="That's already your email.")
+    if _email_taken(db, payload.new_email):
+        raise HTTPException(
+            status_code=409,
+            detail="That email is already in use. Try signing in with it instead.",
+        )
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    now = datetime.now(timezone.utc)
+    # Only one pending change at a time.
+    db.execute(
+        EmailChangeRequest.__table__.update()
+        .where(EmailChangeRequest.user_id == user.id, EmailChangeRequest.used_at.is_(None))
+        .values(used_at=now)
+    )
+    db.add(EmailChangeRequest(
+        user_id=user.id, new_email=payload.new_email, code_hash=hash_token(code),
+        expires_at=now + _EMAIL_CHANGE_TTL,
+    ))
+    _audit(db, user, "email_change_requested", f"Requested email change to {payload.new_email}",
+           entity_id=user.id)
+    db.commit()
+    background.add_task(
+        notify_email_change_code, payload.new_email, user.name, code,
+        user.organization.email_from_override,
+    )
+    return {"message": f"Verification code sent to {payload.new_email}."}
+
+
+def _void(db: Session, req: EmailChangeRequest, now: datetime, detail: str) -> HTTPException:
+    req.used_at = now
+    db.commit()
+    return HTTPException(status_code=400, detail=detail)
+
+
+@router.post("/email-change/confirm", response_model=MeOut, responses=PASSWORD_CHANGE_400)
+def confirm_email_change(
+    payload: EmailChangeConfirmIn,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Session = Depends(get_db),
+) -> dict:
+    """Step 2: complete the change with the code mailed to the new address."""
+    req = db.scalar(
+        select(EmailChangeRequest)
+        .where(EmailChangeRequest.user_id == user.id, EmailChangeRequest.used_at.is_(None))
+        .order_by(EmailChangeRequest.created_at.desc(), EmailChangeRequest.id.desc())
+    )
+    if req is None:
+        raise HTTPException(status_code=400, detail="No pending email change. Request one first.")
+    now = datetime.now(timezone.utc)
+    if req.expires_at < now:
+        raise _void(db, req, now, "Code expired. Start the change again.")
+    if req.attempts >= _EMAIL_CHANGE_MAX_ATTEMPTS:
+        raise _void(db, req, now, "Too many wrong codes. Start the change again.")
+    if not secrets.compare_digest(hash_token(payload.code), req.code_hash):
+        req.attempts += 1
+        db.commit()
+        left = _EMAIL_CHANGE_MAX_ATTEMPTS - req.attempts
+        detail = (f"Wrong code. {left} attempt(s) left." if left > 0
+                  else "Too many wrong codes. Start the change again.")
+        raise HTTPException(status_code=400, detail=detail)
+    # Still unclaimed after the wait?
+    if _email_taken(db, req.new_email, exclude_id=user.id):
+        req.used_at = now
+        db.commit()
+        raise HTTPException(
+            status_code=409,
+            detail="That email was claimed by someone else while we waited. Try a different address.",
+        )
+    old_email = user.email
+    user.email = req.new_email
+    req.used_at = now
+    _audit(db, user, "email_changed", f"Email: {old_email} → {user.email}", entity_id=user.id)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="That email is already in use.") from exc
+    return to_me(user)
+
+
+@router.post("/change-password", status_code=204, responses=PASSWORD_CHANGE_400)
 def change_password(
     payload: ChangePasswordIn,
     request: Request,
+    user: Annotated[User, Depends(get_current_user)],
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
 ) -> Response:
+    """Change own password: bumps session_version (killing other sessions), invalidates
+    outstanding reset tokens, and re-issues a fresh session so the caller stays logged in."""
     if not verify_password(payload.current_password, user.password_hash):
-        raise HTTPException(status_code=400, detail="Current password is incorrect")
+        raise HTTPException(status_code=400, detail=_DETAIL_WRONG_PASSWORD)
 
-    # T4 (v2.8): HIBP check on the new password — fail before we touch the DB.
+    # Reject same-password change: it would boot every other device for no gain.
+    if verify_password(payload.new_password, user.password_hash):
+        raise HTTPException(
+            status_code=400,
+            detail="New password must be different from the current password.",
+        )
+
     _reject_if_breached(payload.new_password)
 
     user.password_hash = hash_password(payload.new_password)
     user.session_version = (user.session_version or 0) + 1
     invalidated = invalidate_outstanding_reset_tokens(db, user.id)
 
+    # Rows are already invalid via the version bump; delete so the admin session list stays clean.
     db.execute(SessionRow.__table__.delete().where(SessionRow.user_id == user.id))
 
-    settings = get_settings()
-    jti = new_jti()
-    new_sess = SessionRow(
-        user_id=user.id,
-        jti=jti,
-        user_agent=(request.headers.get("user-agent") or "")[:400],
-        ip_address=_client_ip(request),
-        expires_at=datetime.now(timezone.utc) + timedelta(seconds=settings.SESSION_TTL_SECONDS),
-    )
-    db.add(new_sess)
-
-    _audit(
-        db, user.org_id, user, "password_changed",
-        f"{user.email} changed their password"
-        + (f" (invalidated {invalidated} outstanding reset link(s))" if invalidated else ""),
-    )
-    db.commit()
-
+    # Fresh session for the current device so the user isn't bounced to login.
     out = Response(status_code=204)
-    set_session_cookie(out, user, jti=jti)
+    start_session(db, user, request, out)
+
+    _audit(db, user, "password_changed",
+           f"{user.email} changed their password"
+           + (f" (invalidated {invalidated} outstanding reset link(s))" if invalidated else ""))
+    db.commit()
     return out
 
 
-# ---------------------------------------------------------------------------
-# Forgot password
-# ---------------------------------------------------------------------------
-@router.post("/forgot-password", status_code=204)
+@router.post("/forgot-password", status_code=204, responses=FORGOT_PASSWORD_404)
 def forgot_password(
     payload: ForgotPasswordIn,
     background: BackgroundTasks,
     db: Session = Depends(get_db),
 ) -> Response:
-    """Issue a password-reset email.
-
-    Product decision: this endpoint validates the email against the DB
-    before sending. If no account matches we return 404 so the user
-    immediately knows they typed the wrong address instead of waiting
-    for an email that will never arrive.
-
-    Trade-off: this allows account enumeration. The product owner
-    accepted that risk in exchange for friendlier UX. Login is still
-    protected by strong passwords + session revocation, and every reset
-    attempt (success or miss) is captured in the audit log."""
+    """Issue a password-reset email. With FORGOT_PASSWORD_ENUMERATION_SAFE (default)
+    always 204 so account existence never leaks; otherwise 404s on unknown addresses."""
+    settings = get_settings()
     user = db.scalar(select(User).where(User.email == payload.email))
     if user is None or not user.is_active:
+        # Run (and discard) the same token work so timing doesn't reveal account existence.
+        if settings.FORGOT_PASSWORD_ENUMERATION_SAFE:
+            generate_token()
         if user is not None:
-            _audit(
-                db, user.org_id, None, "password_reset_no_account",
-                f"Password reset attempted for inactive email: {payload.email}",
-            )
+            _audit(db, user, "password_reset_no_account",
+                   f"Password reset attempted for inactive account {_mask_email(payload.email)}",
+                   as_system=True)
             db.commit()
-        # Enterprise default (ALLOW_ACCOUNT_ENUMERATION=false):
-        # respond 204 regardless so the endpoint can't be used to
-        # probe which emails have accounts. Set
-        # ALLOW_ACCOUNT_ENUMERATION=true if you prefer the friendlier
-        # "we couldn't find that email" message (consumer-app UX).
-        if not get_settings().ALLOW_ACCOUNT_ENUMERATION:
+        else:
+            logger.info("Password reset requested for unknown email %s", _mask_email(payload.email))
+        if settings.FORGOT_PASSWORD_ENUMERATION_SAFE:
             return Response(status_code=204)
         raise HTTPException(
             status_code=404,
             detail="We couldn't find an account with that email. Check the address or contact an administrator",
         )
-    raw_token, token_hash = generate_reset_token()
+    # Purge stale tokens inline; there's no background job for this table.
+    purge_consumed_reset_tokens(db)
+    raw_token, token_hash = generate_token()
     prt = PasswordResetToken(
         user_id=user.id,
         token_hash=token_hash,
         expires_at=datetime.now(timezone.utc) + PASSWORD_RESET_TTL,
     )
     db.add(prt)
-    _audit(
-        db, user.org_id, None, "password_reset_requested",
-        f"Password reset requested for {user.email}",
-    )
+    _audit(db, user, "password_reset_requested", f"Password reset requested for {user.email}",
+           as_system=True)
     db.commit()
 
     base = get_settings().APP_BASE_URL.rstrip("/")
     reset_url = f"{base}/reset.html?token={raw_token}"
-    background.add_task(notify_password_reset, user.email, user.name, reset_url)
+    background.add_task(
+        notify_password_reset, user.email, user.name, reset_url,
+        user.organization.email_from_override,
+    )
     return Response(status_code=204)
 
 
-# ---------------------------------------------------------------------------
-# Reset password
-# ---------------------------------------------------------------------------
-@router.post("/reset-password", status_code=204)
+@router.post("/reset-password", status_code=204, responses=RESET_TOKEN_400)
 def reset_password(payload: ResetPasswordIn, db: Session = Depends(get_db)) -> Response:
-    h = hash_reset_token(payload.token)
+    """Set a new password via reset token; bumps session_version and
+    invalidates the user's other outstanding reset tokens."""
+    h = hash_token(payload.token)
     prt = db.scalar(select(PasswordResetToken).where(PasswordResetToken.token_hash == h))
     if prt is None:
         raise HTTPException(status_code=400, detail=_DETAIL_INVALID_RESET_TOKEN)
@@ -576,214 +547,39 @@ def reset_password(payload: ResetPasswordIn, db: Session = Depends(get_db)) -> R
     expires = prt.expires_at
     if expires.tzinfo is None:
         expires = expires.replace(tzinfo=timezone.utc)
-    if prt.used_at is not None or expires < now:
+    if expires < now:
         raise HTTPException(status_code=400, detail=_DETAIL_INVALID_RESET_TOKEN)
 
     user = db.get(User, prt.user_id)
     if user is None or not user.is_active:
         raise HTTPException(status_code=400, detail=_DETAIL_INVALID_RESET_TOKEN)
 
-    # T4 (v2.8): HIBP check before we accept the reset. Done AFTER the
-    # token is validated so we don't leak the breach signal back to a
-    # holder of an invalid token.
+    # HIBP check after token validation so invalid-token callers can't probe the breach signal.
     _reject_if_breached(payload.new_password)
+
+    # Guarded UPDATE consumes the token once: a racing request sees rowcount 0, closing replay.
+    consumed = (
+        db.query(PasswordResetToken)
+        .filter(
+            PasswordResetToken.id == prt.id,
+            PasswordResetToken.used_at.is_(None),
+        )
+        .update({PasswordResetToken.used_at: now}, synchronize_session=False)
+    )
+    if not consumed:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=_DETAIL_INVALID_RESET_TOKEN)
 
     user.password_hash = hash_password(payload.new_password)
     user.session_version = (user.session_version or 0) + 1
-    prt.used_at = now
     invalidated = invalidate_outstanding_reset_tokens(db, user.id)
 
+    # Rows are already invalid via the version bump; delete so the admin session list stays clean.
     db.execute(SessionRow.__table__.delete().where(SessionRow.user_id == user.id))
 
-    _audit(
-        db, user.org_id, user, "password_reset",
-        f"{user.email} reset their password via token"
-        + (f" (invalidated {invalidated - 1} other outstanding reset link(s))" if invalidated > 1 else ""),
-    )
+    _audit(db, user, "password_reset",
+           f"{user.email} reset their password via token"
+           + (f" (invalidated {invalidated} other outstanding reset link(s))"
+              if invalidated else ""))
     db.commit()
     return Response(status_code=204)
-
-
-# ---------------------------------------------------------------------------
-# Profile — self-service
-# ---------------------------------------------------------------------------
-import secrets as _secrets
-from app.email_service import notify_email_change_code as _notify_email_change_code
-from app.models import EmailChangeRequest
-from app.schemas import (
-    EmailChangeConfirmIn,
-    EmailChangeRequestIn,
-    ProfileUpdateIn,
-)
-
-EMAIL_CHANGE_TTL = timedelta(minutes=15)
-EMAIL_CHANGE_MAX_ATTEMPTS = 5
-
-
-@router.put("/profile", response_model=MeOut)
-def update_profile(
-    payload: ProfileUpdateIn,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> dict:
-    """Update the caller's own name. Email is NOT editable here — it
-    goes through the two-step verification flow below. Role is set by
-    admins via /api/users/{id}."""
-    if payload.name and payload.name != user.name:
-        old = user.name
-        user.name = payload.name
-        _audit(
-            db, user.org_id, user, "profile_updated",
-            f"Display name: '{old}' → '{user.name}'",
-            entity_id=user.id,
-        )
-    db.commit()
-    org = db.get(Organization, user.org_id)
-    if org is None:
-        raise HTTPException(status_code=500, detail=_MSG_ACCOUNT_MISCONFIGURED)
-    return _to_me(user, org)
-
-
-@router.post("/email-change/request", status_code=202)
-def request_email_change(
-    payload: EmailChangeRequestIn,
-    background: BackgroundTasks,
-    request: Request,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> dict[str, str]:
-    """Step 1: verify current password, stage the new email, mail a code."""
-    # Re-authenticate with current password — same idea as "sudo mode".
-    # Without this, a session hijack would let an attacker change the
-    # recovery email at leisure.
-    if not verify_password(payload.current_password, user.password_hash):
-        raise HTTPException(status_code=400, detail="Current password is incorrect.")
-
-    new_email = payload.new_email
-    if new_email == user.email:
-        raise HTTPException(status_code=400, detail="That's already your email.")
-
-    # Globally unique check — same constraint as signup. The DB unique
-    # index would also catch this, but we want a friendly error first.
-    other = db.scalar(select(User).where(User.email == new_email))
-    if other is not None:
-        # Don't reveal which account if it's in another org — same
-        # tenant-isolation pattern as the invite endpoint, but here we
-        # do leak enough to let the user reuse a forgotten account.
-        raise HTTPException(
-            status_code=409,
-            detail="That email is already in use. Try signing in with it instead.",
-        )
-
-    # Generate a 6-digit code. Six digits is enough entropy for a
-    # 15-minute window when paired with rate limiting and attempt cap.
-    code = f"{_secrets.randbelow(1_000_000):06d}"
-    code_hash = hash_token(code)
-
-    # Invalidate any outstanding requests for this user — only one
-    # pending email change at a time.
-    now = datetime.now(timezone.utc)
-    db.execute(
-        EmailChangeRequest.__table__.update()
-        .where(
-            EmailChangeRequest.user_id == user.id,
-            EmailChangeRequest.used_at.is_(None),
-        )
-        .values(used_at=now)
-    )
-    req = EmailChangeRequest(
-        user_id=user.id,
-        new_email=new_email,
-        code_hash=code_hash,
-        expires_at=now + EMAIL_CHANGE_TTL,
-    )
-    db.add(req)
-    _audit(
-        db, user.org_id, user, "email_change_requested",
-        f"Requested email change to {new_email}",
-        entity_id=user.id,
-    )
-    db.commit()
-
-    background.add_task(_notify_email_change_code, new_email, user.name, code)
-    return {"message": f"Verification code sent to {new_email}."}
-
-
-@router.post("/email-change/confirm", response_model=MeOut)
-def confirm_email_change(
-    payload: EmailChangeConfirmIn,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> dict:
-    """Step 2: complete the change by entering the code sent to the
-    new address."""
-    req = db.scalar(
-        select(EmailChangeRequest)
-        .where(
-            EmailChangeRequest.user_id == user.id,
-            EmailChangeRequest.used_at.is_(None),
-        )
-        .order_by(EmailChangeRequest.created_at.desc())
-    )
-    if req is None:
-        raise HTTPException(
-            status_code=400,
-            detail="No pending email change. Request one first.",
-        )
-    now = datetime.now(timezone.utc)
-    expires = req.expires_at
-    if expires.tzinfo is None:
-        expires = expires.replace(tzinfo=timezone.utc)
-    if expires < now:
-        req.used_at = now
-        db.commit()
-        raise HTTPException(status_code=400, detail="Code expired. Start the change again.")
-
-    if req.attempts >= EMAIL_CHANGE_MAX_ATTEMPTS:
-        req.used_at = now
-        db.commit()
-        raise HTTPException(
-            status_code=400,
-            detail="Too many wrong codes. Start the change again.",
-        )
-
-    if not secrets.compare_digest(hash_token(payload.code), req.code_hash or ""):
-        req.attempts = (req.attempts or 0) + 1
-        db.commit()
-        remaining = EMAIL_CHANGE_MAX_ATTEMPTS - req.attempts
-        if remaining > 0:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Wrong code. {remaining} attempt(s) left.",
-            )
-        raise HTTPException(
-            status_code=400,
-            detail="Too many wrong codes. Start the change again.",
-        )
-
-    # Double-check email is still unclaimed (race during the 15-min window).
-    other = db.scalar(select(User).where(
-        User.email == req.new_email, User.id != user.id,
-    ))
-    if other is not None:
-        req.used_at = now
-        db.commit()
-        raise HTTPException(
-            status_code=409,
-            detail="That email was claimed by someone else while we waited. Try a different address.",
-        )
-
-    old_email = user.email
-    user.email = req.new_email
-    req.used_at = now
-    _audit(
-        db, user.org_id, user, "email_changed",
-        f"Email: {old_email} → {user.email}",
-        entity_id=user.id,
-    )
-    db.commit()
-    db.refresh(user)
-    org = db.get(Organization, user.org_id)
-    if org is None:
-        raise HTTPException(status_code=500, detail=_MSG_ACCOUNT_MISCONFIGURED)
-    return _to_me(user, org)

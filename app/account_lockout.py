@@ -1,26 +1,8 @@
-"""Per-account login lockout (T3).
+"""Per-account login lockout: in-memory sliding window keyed by email (not IP).
 
-In-memory sliding-window counter keyed by email. After N failed attempts
-in a rolling window, the email is locked for L seconds — subsequent
-requests are rejected with 429 before the bcrypt verify even runs.
-
-Design notes:
-  - The bucket is keyed by email, not by IP. IP rate limit lives in
-    app/main.py and complements this. A determined attacker proxying
-    through many IPs is stopped by the per-account counter.
-  - Unknown emails also tick the counter. If we only ticked known emails
-    after they existed, an attacker could enumerate accounts by which
-    addresses do or do not lock — same enumeration risk we closed for
-    response timing (G1).
-  - Lockout is a known DoS vector: a hostile party can lock a target
-    user's account by spamming bad logins. Operators who can't accept
-    that trade-off should keep the limit high and the window short, or
-    disable via LOGIN_FAIL_LIMIT=0.
-  - Multi-worker uvicorn deployments get per-worker buckets, which
-    means the effective limit is N * threshold. For stricter global
-    enforcement, push limits into nginx (limit_req) or a shared store.
-  - Memory is bounded by _LOCKOUT_BUCKETS_MAX so a churn of unique
-    emails can't grow unboundedly.
+After N failures in the window the email gets a 429 lock before bcrypt runs.
+Unknown emails tick the counter too, to prevent account enumeration; buckets
+are per-worker and bounded by _LOCKOUT_BUCKETS_MAX.
 """
 from __future__ import annotations
 
@@ -40,7 +22,7 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-# Configuration knobs — env-overridable for ops.
+# All three limits overridable via env vars.
 _LOGIN_FAIL_LIMIT = _env_int("LOGIN_FAIL_LIMIT", 10)
 _LOGIN_FAIL_WINDOW_SECONDS = _env_int("LOGIN_FAIL_WINDOW_SECONDS", 900)  # 15 min
 _LOGIN_LOCKOUT_SECONDS = _env_int("LOGIN_LOCKOUT_SECONDS", 900)          # 15 min
@@ -66,10 +48,30 @@ def _evict_old(bucket: _Bucket, cutoff: float) -> None:
         bucket.fails.popleft()
 
 
+def _reclaim_buckets(now: float) -> None:
+    """Bound _buckets by reclaiming idle/unlocked ones first — evicting active
+    locks would let bucket-churn flush a victim's lock. Caller holds _lock."""
+    cutoff = now - _LOGIN_FAIL_WINDOW_SECONDS
+    dead = [
+        k for k, b in _buckets.items()
+        if b.locked_until <= now and (not b.fails or b.fails[-1] < cutoff)
+    ]
+    for k in dead:
+        del _buckets[k]
+    if len(_buckets) >= _LOCKOUT_BUCKETS_MAX and _buckets:
+        unlocked = [k for k, b in _buckets.items() if b.locked_until <= now]
+        if unlocked:
+            oldest = min(
+                unlocked,
+                key=lambda k: _buckets[k].fails[-1] if _buckets[k].fails else 0.0,
+            )
+        else:
+            oldest = min(_buckets, key=lambda k: _buckets[k].locked_until)
+        del _buckets[oldest]
+
+
 def check_locked(email: str) -> None:
-    """Raise 429 if the account is currently locked out. Called BEFORE
-    the password verify so the bcrypt cost isn't paid during a lockout
-    flood (defense against amplification)."""
+    """Raise 429 if locked; runs before the verify so bcrypt cost isn't paid during a flood."""
     if _LOGIN_FAIL_LIMIT <= 0:
         return
     now = time.monotonic()
@@ -87,9 +89,7 @@ def check_locked(email: str) -> None:
 
 
 def record_failure(email: str) -> None:
-    """Increment the failure counter for this email. If the rolling
-    window has accumulated >= LOGIN_FAIL_LIMIT failures, set the lockout
-    timestamp. Called only when the login itself failed."""
+    """Record a failed login; lock once the rolling window hits LOGIN_FAIL_LIMIT."""
     if _LOGIN_FAIL_LIMIT <= 0:
         return
     now = time.monotonic()
@@ -99,27 +99,26 @@ def record_failure(email: str) -> None:
         bucket = _buckets.get(key)
         if bucket is None:
             if len(_buckets) >= _LOCKOUT_BUCKETS_MAX:
-                # Drop an arbitrary old entry to keep memory bounded.
-                _buckets.pop(next(iter(_buckets)), None)
+                # Bound memory without dropping an active lock.
+                _reclaim_buckets(now)
             bucket = _Bucket()
             _buckets[key] = bucket
         _evict_old(bucket, cutoff)
         bucket.fails.append(now)
         if len(bucket.fails) >= _LOGIN_FAIL_LIMIT:
             bucket.locked_until = now + _LOGIN_LOCKOUT_SECONDS
+            # Clear stale timestamps so the lock doesn't immediately re-trip on expiry.
+            bucket.fails.clear()
 
 
 def clear(email: str) -> None:
-    """Reset the bucket for this email — called on successful login so a
-    user who finally types their password right doesn't carry the
-    failure debt forward."""
+    """Reset the bucket on successful login."""
     key = _key(email)
     with _lock:
         _buckets.pop(key, None)
 
 
 def _reset_for_tests() -> None:
-    """Wipe all state. Tests must call this between cases so leftover
-    buckets don't leak across the suite."""
+    """Wipe all state between test cases."""
     with _lock:
         _buckets.clear()

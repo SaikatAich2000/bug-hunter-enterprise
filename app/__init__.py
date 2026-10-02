@@ -1,4 +1,1 @@
-"""Bug Hunter — multi-tenant issue tracker."""
-
-__version__ = "2.10"
-
+"""Bug Hunter — self-hosted bug, requirement and sprint tracker."""

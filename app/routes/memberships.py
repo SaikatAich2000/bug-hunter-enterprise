@@ -1,156 +1,128 @@
-"""Project membership API — who belongs to which project, and as what.
+"""Project membership API: who belongs to a project, and as lead or member.
 
-URL design: nested under /api/projects/{id}/members so the project_id
-in the URL doubles as the authorization scope. Cross-org access is
-blocked by `get_org_project_or_404`.
+Nested under /api/projects/{id}/members, so the project in the URL is the authorization
+scope; a project of another organization is a 404.
 """
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.orm import Session
 
-from app.auth import (
+from app.access import (
+    accessible_project_ids,
+    can_access_project,
     can_manage_project,
-    get_current_user,
     get_org_project_or_404,
+    get_org_user,
 )
+from app.api_docs import (
+    BAD_REQUEST_FORBIDDEN_CONFLICT_NOT_FOUND_404,
+    NOT_FOUND_FORBIDDEN_403,
+)
+from app.auth import get_current_user
 from app.database import get_db
-from app.models import (
-    PROJECT_ROLE_LEAD,
-    Activity,
-    Project,
-    ProjectMembership,
-    User,
-)
-from app.schemas import (
-    ProjectMembershipIn,
-    ProjectMembershipOut,
-    ProjectMembershipUpdate,
-)
+from app.models import PROJECT_ROLE_LEAD, Activity, Project, User, user_projects
+from app.schemas import ProjectMembershipIn, ProjectMembershipOut, ProjectMembershipUpdate
 
 router = APIRouter(prefix="/api/projects", tags=["memberships"])
 
-# S1192: extract duplicated detail string into a module constant.
-_MSG_MEMBERSHIP_NOT_FOUND = "Membership not found"
+_DETAIL_NOT_A_MEMBER = "Membership not found"
+_DETAIL_LAST_LEAD = "Cannot {verb} the last project lead. Promote another member first."
 
 
-def _audit(
-    db: Session, org_id: int, actor: User, action: str, detail: str,
-    project_id: int | None = None,
-) -> None:
+def _audit(db: Session, actor: User, project: Project, action: str, detail: str) -> None:
     db.add(Activity(
-        org_id=org_id, bug_id=None, entity_type="project_membership",
-        entity_id=project_id,
-        actor_user_id=actor.id, actor_name=actor.name,
-        action=action, detail=detail,
+        org_id=actor.org_id, bug_id=None, entity_type="project_membership", entity_id=project.id,
+        actor_user_id=actor.id, actor_name=actor.name, action=action, detail=detail,
     ))
 
 
-def _row(pm: ProjectMembership, user: User) -> dict:
+def _row(user: User, role: str) -> dict:
     return {
-        "id": pm.id,
-        "user_id": user.id,
-        "user_name": user.name,
-        "user_email": user.email,
-        "user_role": user.role,
-        "project_role": pm.role,
-        "created_at": pm.created_at,
+        "user_id": user.id, "user_name": user.name, "user_email": user.email,
+        "user_role": user.role, "project_role": role,
     }
 
 
-# ---------------------------------------------------------------------------
-# List members of a project
-# ---------------------------------------------------------------------------
-@router.get("/{project_id}/members", response_model=list[ProjectMembershipOut])
+def _managed_project(db: Session, project_id: int, actor: User) -> Project:
+    project = get_org_project_or_404(db, project_id, actor)
+    if not can_manage_project(db, actor, project):
+        raise HTTPException(
+            status_code=403,
+            detail="Only organization admins or this project's leads can manage members.",
+        )
+    return project
+
+
+def _other_leads(db: Session, project_id: int, user_id: int) -> int:
+    return db.scalar(
+        select(func.count()).select_from(user_projects).where(
+            user_projects.c.project_id == project_id,
+            user_projects.c.role == PROJECT_ROLE_LEAD,
+            user_projects.c.user_id != user_id,
+        )
+    ) or 0
+
+
+def _role_of(db: Session, project_id: int, user_id: int) -> str:
+    role = db.scalar(select(user_projects.c.role).where(
+        user_projects.c.project_id == project_id, user_projects.c.user_id == user_id,
+    ))
+    if role is None:
+        raise HTTPException(status_code=404, detail=_DETAIL_NOT_A_MEMBER)
+    return role
+
+
+@router.get("/{project_id}/members", response_model=list[ProjectMembershipOut],
+            responses=NOT_FOUND_FORBIDDEN_403)
 def list_members(
-    project_id: int,
-    actor: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    project_id: int, actor: User = Depends(get_current_user), db: Session = Depends(get_db),
 ) -> list[dict]:
     project = get_org_project_or_404(db, project_id, actor)
-
-    # Visibility: anyone with project access can see who else is on it.
-    # Org admins always. Otherwise need a membership row.
-    from app.auth import can_access_project
-    if not can_access_project(db, actor, project):
+    if not can_access_project(accessible_project_ids(db, actor), project.id):
         raise HTTPException(status_code=404, detail="Project not found")
-
-    rows = db.scalars(
-        select(ProjectMembership).where(ProjectMembership.project_id == project_id)
+    rows = db.execute(
+        select(User, user_projects.c.role)
+        .join(user_projects, user_projects.c.user_id == User.id)
+        .where(user_projects.c.project_id == project_id, User.org_id == actor.org_id)
     ).all()
-    user_ids = sorted({r.user_id for r in rows})
-    user_map = {}
-    if user_ids:
-        for u in db.scalars(select(User).where(User.id.in_(user_ids))).all():
-            user_map[u.id] = u
-
-    out = []
-    for r in rows:
-        u = user_map.get(r.user_id)
-        if u is None:
-            continue
-        out.append(_row(r, u))
-    # Sort: leads first, then alphabetical by name.
+    out = [_row(user, role) for user, role in rows]
     out.sort(key=lambda r: (r["project_role"] != PROJECT_ROLE_LEAD, r["user_name"].lower()))
     return out
 
 
-# ---------------------------------------------------------------------------
-# Add a member
-# ---------------------------------------------------------------------------
-@router.post(
-    "/{project_id}/members",
-    response_model=ProjectMembershipOut,
-    status_code=status.HTTP_201_CREATED,
-)
+@router.post("/{project_id}/members", response_model=ProjectMembershipOut,
+             status_code=status.HTTP_201_CREATED,
+             responses=BAD_REQUEST_FORBIDDEN_CONFLICT_NOT_FOUND_404)
 def add_member(
     project_id: int,
     payload: ProjectMembershipIn,
     actor: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    project = get_org_project_or_404(db, project_id, actor)
-    if not can_manage_project(db, actor, project):
-        raise HTTPException(
-            status_code=403,
-            detail="Only org admins or this project's leads can manage members.",
-        )
-
-    user = db.get(User, payload.user_id)
-    if user is None or user.org_id != actor.org_id:
+    project = _managed_project(db, project_id, actor)
+    user = get_org_user(db, payload.user_id, actor)
+    if user is None:
         raise HTTPException(status_code=400, detail="Unknown user")
     if not user.is_active:
         raise HTTPException(status_code=400, detail="That user account is disabled.")
-
-    pm = ProjectMembership(
-        project_id=project.id, user_id=user.id, role=payload.role,
-    )
-    db.add(pm)
-    try:
-        db.flush()
-    except IntegrityError as exc:
-        db.rollback()
-        raise HTTPException(
-            status_code=409,
-            detail="That user is already a member of this project.",
-        ) from exc
-
-    _audit(
-        db, actor.org_id, actor, "member_added",
-        f"Added {user.name} <{user.email}> to '{project.name}' as {payload.role}",
-        project_id=project.id,
-    )
+    already = db.scalar(select(user_projects.c.user_id).where(
+        user_projects.c.project_id == project_id, user_projects.c.user_id == user.id,
+    ))
+    if already is not None:
+        raise HTTPException(status_code=409, detail="That user is already a member of this project.")
+    db.execute(insert(user_projects).values(
+        user_id=user.id, project_id=project_id, role=payload.role,
+    ))
+    _audit(db, actor, project, "member_added",
+           f"Added {user.name} <{user.email}> to '{project.name}' as {payload.role}")
     db.commit()
-    db.refresh(pm)
-    return _row(pm, user)
+    return _row(user, payload.role)
 
 
-# ---------------------------------------------------------------------------
-# Update a member's project role
-# ---------------------------------------------------------------------------
-@router.put("/{project_id}/members/{user_id}", response_model=ProjectMembershipOut)
+@router.put("/{project_id}/members/{user_id}", response_model=ProjectMembershipOut,
+            responses=BAD_REQUEST_FORBIDDEN_CONFLICT_NOT_FOUND_404)
 def update_member(
     project_id: int,
     user_id: int,
@@ -158,97 +130,41 @@ def update_member(
     actor: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    project = get_org_project_or_404(db, project_id, actor)
-    if not can_manage_project(db, actor, project):
-        raise HTTPException(status_code=403, detail="Forbidden")
-
-    pm = db.scalar(
-        select(ProjectMembership).where(
-            ProjectMembership.project_id == project_id,
-            ProjectMembership.user_id == user_id,
-        )
-    )
-    if pm is None:
-        raise HTTPException(status_code=404, detail=_MSG_MEMBERSHIP_NOT_FOUND)
-
-    user = db.get(User, user_id)
-    if user is None or user.org_id != actor.org_id:
-        raise HTTPException(status_code=404, detail=_MSG_MEMBERSHIP_NOT_FOUND)
-
-    # If demoting the last lead, block it — the project would become
-    # unmanageable for non-admin users.
-    if pm.role == PROJECT_ROLE_LEAD and payload.role != PROJECT_ROLE_LEAD:
-        other_leads = db.scalar(
-            select(ProjectMembership.id).where(
-                ProjectMembership.project_id == project_id,
-                ProjectMembership.role == PROJECT_ROLE_LEAD,
-                ProjectMembership.user_id != user_id,
-            )
-        )
-        if other_leads is None:
-            raise HTTPException(
-                status_code=400,
-                detail="Cannot demote the last project lead. Promote another member first.",
-            )
-
-    if pm.role != payload.role:
-        old = pm.role
-        pm.role = payload.role
-        _audit(
-            db, actor.org_id, actor, "member_role_changed",
-            f"Changed {user.name}'s role on '{project.name}': {old} → {pm.role}",
-            project_id=project.id,
-        )
-    db.commit()
-    db.refresh(pm)
-    return _row(pm, user)
+    project = _managed_project(db, project_id, actor)
+    user = get_org_user(db, user_id, actor)
+    if user is None:
+        raise HTTPException(status_code=404, detail=_DETAIL_NOT_A_MEMBER)
+    old = _role_of(db, project_id, user_id)
+    if old == PROJECT_ROLE_LEAD and payload.role != PROJECT_ROLE_LEAD \
+            and _other_leads(db, project_id, user_id) == 0:
+        raise HTTPException(status_code=400, detail=_DETAIL_LAST_LEAD.format(verb="demote"))
+    if old != payload.role:
+        db.execute(update(user_projects).where(
+            user_projects.c.project_id == project_id, user_projects.c.user_id == user_id,
+        ).values(role=payload.role))
+        _audit(db, actor, project, "member_role_changed",
+               f"Changed {user.name}'s role on '{project.name}': {old} → {payload.role}")
+        db.commit()
+    return _row(user, payload.role)
 
 
-# ---------------------------------------------------------------------------
-# Remove a member
-# ---------------------------------------------------------------------------
-@router.delete("/{project_id}/members/{user_id}")
+@router.delete("/{project_id}/members/{user_id}",
+               responses=BAD_REQUEST_FORBIDDEN_CONFLICT_NOT_FOUND_404)
 def remove_member(
-    project_id: int,
-    user_id: int,
-    actor: User = Depends(get_current_user),
+    project_id: int, user_id: int, actor: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-) -> dict:
-    project = get_org_project_or_404(db, project_id, actor)
-    if not can_manage_project(db, actor, project):
-        raise HTTPException(status_code=403, detail="Forbidden")
-
-    pm = db.scalar(
-        select(ProjectMembership).where(
-            ProjectMembership.project_id == project_id,
-            ProjectMembership.user_id == user_id,
-        )
-    )
-    if pm is None:
-        raise HTTPException(status_code=404, detail=_MSG_MEMBERSHIP_NOT_FOUND)
-
-    # Block removing the last lead.
-    if pm.role == PROJECT_ROLE_LEAD:
-        other_leads = db.scalar(
-            select(ProjectMembership.id).where(
-                ProjectMembership.project_id == project_id,
-                ProjectMembership.role == PROJECT_ROLE_LEAD,
-                ProjectMembership.user_id != user_id,
-            )
-        )
-        if other_leads is None:
-            raise HTTPException(
-                status_code=400,
-                detail="Cannot remove the last project lead. Promote another member first.",
-            )
-
-    user = db.get(User, user_id)
-    label = (user.name + " <" + user.email + ">") if user else f"user #{user_id}"
-    db.delete(pm)
-    _audit(
-        db, actor.org_id, actor, "member_removed",
-        f"Removed {label} from '{project.name}'",
-        project_id=project.id,
-    )
+) -> dict[str, str]:
+    project = _managed_project(db, project_id, actor)
+    user = get_org_user(db, user_id, actor)
+    if user is None:
+        raise HTTPException(status_code=404, detail=_DETAIL_NOT_A_MEMBER)
+    role = _role_of(db, project_id, user_id)
+    if role == PROJECT_ROLE_LEAD and _other_leads(db, project_id, user_id) == 0:
+        raise HTTPException(status_code=400, detail=_DETAIL_LAST_LEAD.format(verb="remove"))
+    db.execute(delete(user_projects).where(
+        user_projects.c.project_id == project_id, user_projects.c.user_id == user_id,
+    ))
+    _audit(db, actor, project, "member_removed",
+           f"Removed {user.name} <{user.email}> from '{project.name}'")
     db.commit()
     return {"message": "Member removed"}

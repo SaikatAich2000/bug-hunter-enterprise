@@ -1,0 +1,499 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Least privilege for every job: read the code, nothing else.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  policy:
+    name: Test policy (RUN_TESTS)
+    runs-on: ubuntu-latest
+    outputs:
+      # 'true' => the test jobs are skipped (RUN_TESTS=false/0/no/off).
+      skip_tests: ${{ steps.policy.outputs.skip_tests }}
+    steps:
+      - name: Resolve RUN_TESTS
+        id: policy
+        env:
+          # Read through env, never interpolated straight into the shell.
+          RUN_TESTS_VALUE: ${{ vars.RUN_TESTS }}
+        run: |
+          value="$(printf '%s' "${RUN_TESTS_VALUE}" | tr '[:upper:]' '[:lower:]')"
+          case "$value" in
+            false|0|no|off) skip=true ;;
+            *)              skip=false ;;
+          esac
+          echo "skip_tests=${skip}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Test policy"
+            echo ""
+            printf 'RUN_TESTS=`%s` -> skip_tests=`%s`\n' "${RUN_TESTS_VALUE}" "${skip}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "RUN_TESTS='${RUN_TESTS_VALUE}' -> skip_tests=${skip}"
+
+  lint:
+    name: Lint (ruff, bandit, eslint)
+    runs-on: ubuntu-latest
+    needs: [policy]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Python lint tools
+        run: pip install --require-hashes -r requirements-dev-lock.txt
+
+      - name: Compile all Python sources
+        run: python -m compileall -q app tests scripts
+
+      - name: Ruff
+        run: ruff check app tests scripts
+
+      - name: Bandit
+        run: bandit -c pyproject.toml -r app -q
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: ESLint
+        working-directory: frontend
+        run: npm run lint
+
+  test:
+    name: Backend tests + coverage
+    runs-on: ubuntu-latest
+    needs: [policy]
+    # ~2,200 tests, split one file per pytest process and run 4-wide
+    # (xargs -P 4). Two problems are solved at once, both learned from the
+    # 84-minute run that was cancelled at 76% with no assertion failure:
+    #   1. Wall-clock: four concurrent pytest processes on the runner's 4 vCPUs
+    #      take the suite from ~70+ min to roughly 20 min, and xargs
+    #      load-balances, so one slow file never leaves three workers idle.
+    #   2. Degradation: a single long-lived pytest process gets slower the
+    #      longer it runs -- it re-imports the whole app package once per test
+    #      (~2,200 times) and the tail of that run stretched from a 2s baseline
+    #      to 200s, 600s and even 1,069s for individual tests. One process per
+    #      file keeps every file near its own baseline, which is what the
+    #      previous 100-minute ceiling was really papering over.
+    timeout-minutes: 60
+    # Skipped when RUN_TESTS is false/0/no/off (the policy job resolves it), so
+    # an image-only run can go straight to build-and-push. Re-enable by setting
+    # the RUN_TESTS repository variable to true (or deleting it).
+    if: ${{ needs.policy.outputs.skip_tests != 'true' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      # Reproducible install: the pinned lock mirrors requirements.txt.
+      - name: Install dependencies
+        run: pip install --require-hashes -r requirements-dev-lock.txt
+
+      # app/config.py deliberately has NO APP_VERSION fallback (the release rule
+      # is that .env is the only place the product version lives, enforced by
+      # tests/test_release_hygiene.py::test_config_has_no_app_version_fallback)
+      # - and .env is gitignored, so a CI checkout has no version at all.
+      # FastAPI asserts on an empty version at import time (app/main.py), which
+      # fails every test file that touches app.main, so the job resolves it here
+      # from the same repository variable the SonarQube scan uses (the CI mirror
+      # of APP_VERSION in .env).
+      #
+      # Unlike the scan, an unset variable is deliberately NOT fatal. The scan
+      # must fail loudly because a wrong projectVersion corrupts the Sonar
+      # issue-trend graph, but the test job only needs *a* version for FastAPI's
+      # OpenAPI metadata, so it falls back to a clearly non-release sentinel
+      # rather than blocking the whole pipeline on CI configuration.
+      - name: Resolve APP_VERSION
+        env:
+          REPO_APP_VERSION: ${{ vars.APP_VERSION }}
+        run: |
+          version="${REPO_APP_VERSION:-}"
+          if [ -z "$version" ]; then
+            echo "::warning::Repository variable APP_VERSION is not set - add it under Settings > Secrets and variables > Actions > Variables (mirror APP_VERSION from .env). Running the backend suite against the sentinel '0.0.0-unknown'."
+            version="0.0.0-unknown"
+          fi
+          echo "APP_VERSION=${version}" >> "$GITHUB_ENV"
+          echo "Backend suite APP_VERSION=${version}"
+
+      - name: Run tests with coverage
+        env:
+          # Arms the CI forensics harness in tests/conftest.py ("CI black box").
+          # stdout stays quiet by design: a stuck-test heartbeat (fires only
+          # once a single test has outlived the interval), one line per failed
+          # or slow test, a one-line session summary per process, and a full
+          # faulthandler thread dump when the runner sends SIGTERM/SIGABRT.
+          # Per-test detail goes to ci-forensics/<file>.log (artifact), not the
+          # job log. CI_TEST_FORENSICS_LOG is set per process below.
+          CI_TEST_FORENSICS: "1"
+          # Only report a test as slow at 30s+ (harness floor is also 30s).
+          CI_TEST_FORENSICS_SLOW: "30"
+        run: |
+          set -uo pipefail
+          # GitHub executes a `run:` block as `bash -e {0}`, so errexit is
+          # inherited. This script manages its own statuses deliberately
+          # (`|| status=$?`, `|| failed=$?`, one explicit `exit "$failed"` at the
+          # end). `set -e` fights that design: a status that is captured for
+          # later inspection is still a failing status at the moment it happens,
+          # so any un-guarded helper aborts the whole step. That is exactly what
+          # made an all-green run exit 2 -- `ls ci-forensics/*.out` exits 2 when
+          # the glob matches nothing, which is the normal case when every file
+          # passes. Opt out explicitly and keep full control of the exit code.
+          set +e
+          mkdir -p ci-forensics junit-parts
+          # Fresh fan-out. On a reused workspace (re-run, self-hosted runner) a
+          # stale .out/.log/.xml from an earlier attempt would inflate the failure
+          # count below and make a local re-run disagree with CI.
+          rm -f ci-forensics/*.out ci-forensics/*.log junit-parts/*.xml
+          # One pytest process per test file. Each process writes its own
+          # coverage data file and JUnit XML, merged/combined after the fan-out.
+          # --cov-fail-under=0: a single file can never reach the project-wide
+          # 80% floor, so the gate is applied once on the combined data below.
+          #
+          # Progress: stdout per file is captured (it is the failure artifact),
+          # and each worker echoes a compact one-line verdict as its file
+          # finishes -- "[ 12/94] ok   tests/test_x.py  145 passed in 38.4s".
+          # The 4-wide fan-out keeps the log an ordered progress trail without
+          # either going silent or reprinting the ~3,000 lines of per-test
+          # forensics this job used to emit. The N/total counter comes from `nl`
+          # below, so no shared counter file or lock is needed.
+          total="$(ls tests/test_*.py 2>/dev/null | wc -l)"
+          export total
+          # `set +e` above removes the accidental safety net that used to fail the
+          # step when the glob matched nothing. Fail loudly instead of reporting a
+          # vacuous "0 of 0 test files failed" success.
+          if [ "$total" -eq 0 ]; then
+            echo "::error::No test files matched tests/test_*.py - is the working directory correct?"
+            exit 1
+          fi
+          run_test_file() {
+            file="$1"
+            idx="$2"
+            tag="$(printf '%s' "$file" | tr '/.' '__')"
+            status=0
+            CI_TEST_FORENSICS_LOG="ci-forensics/${tag}.log" \
+            COVERAGE_FILE=".coverage.${tag}" \
+              pytest "$file" -m "not ui" -q -p no:cacheprovider \
+                     --cov=app --cov-report= --cov-fail-under=0 \
+                     --junitxml="junit-parts/${tag}.xml" \
+                     >"ci-forensics/${tag}.out" 2>&1 || status=$?
+            # pytest's own final summary line ("145 passed in 38.4s" /
+            # "14 deselected in 0.09s" / "no tests ran in 0.00s"). It must be
+            # anchored to the start of the line: the forensics one-liners are
+            # prefixed with a timestamp and also read "... tests=8 failed=0 ...",
+            # so the previous unanchored pattern matched those and replaced the
+            # real pass count with a noisy harness line.
+            summary="$(grep -E '^(no tests ran|[0-9]+ [a-z]).*[0-9.]+s$' \
+              "ci-forensics/${tag}.out" | tail -n 1)"
+            # Exit 5 is "no tests ran" (e.g. a file whose tests are all `ui`):
+            # not a failure. Anything else keeps its output for the artifact.
+            if [ "$status" -eq 0 ] || [ "$status" -eq 5 ]; then
+              rm -f "ci-forensics/${tag}.out"
+              printf '[%s/%s] ok   %-50s %s\n' "$idx" "$total" "$file" "${summary:-ok}"
+              return 0
+            fi
+            printf '[%s/%s] FAIL %-50s (pytest exit %s)\n' "$idx" "$total" "$file" "$status"
+            echo "::group::FAILED ${file} (pytest exit ${status})"
+            # Bounded on purpose. The complete output is kept in the
+            # ci-forensics artifact, so the live log shows the failure list plus
+            # the tail of the run instead of every traceback -- a broken import
+            # used to push thousands of lines into the job log.
+            grep -E '^(FAILED|ERROR) ' "ci-forensics/${tag}.out" | head -n 40 || true
+            echo "---- tail of ci-forensics/${tag}.out ----"
+            tail -n 120 "ci-forensics/${tag}.out"
+            echo "::endgroup::"
+            return "$status"
+          }
+          export -f run_test_file
+          failed=0
+          # `nl` numbers the files so each worker can report "N/total" progress.
+          ls tests/test_*.py | nl -ba -w1 -s' ' \
+            | xargs -P 4 -n 2 bash -c 'run_test_file "$2" "$1"' _ || failed=$?
+          # Merge every process' coverage data into the single coverage.xml
+          # the SonarQube gate reads, then apply the project-wide 80% floor
+          # once, here, on the combined data (per-file runs are far below it by
+          # construction, hence --cov-fail-under=0 above).
+          # Per-file data files from modules that execute nothing under source
+          # ["app"] (frontend source-guard tests that only read files, plus the
+          # ui-only files that collect no tests) are byte-identical, so coverage
+          # reports them as duplicates: "Combined 95 files, skipped 10". Expected
+          # and lossless -- an empty data file contributes no information.
+          combine_msg="$(coverage combine 2>&1)"
+          combine_status=$?
+          echo "${combine_msg:-coverage combine: no per-file data found}"
+          if [ "$combine_status" -ne 0 ]; then
+            echo "::warning::coverage combine failed (exit ${combine_status})"
+          fi
+          coverage xml -o coverage.xml --fail-under=0 \
+            || echo "::warning::coverage xml failed"
+          if coverage report > ci-forensics/coverage-report.txt 2>&1; then
+            tail -n 1 ci-forensics/coverage-report.txt
+          else
+            echo "::error::Coverage below the fail_under=80 floor:"
+            tail -n 2 ci-forensics/coverage-report.txt
+            failed=1
+          fi
+          # Per-file session summaries, but only for files that had a slow test.
+          grep -h "session-summary" ci-forensics/*.log 2>/dev/null \
+            | grep -E "slow\(>=[0-9]+s\)=[1-9]" || echo "no slow tests in any file"
+          # A .out only survives for a file that failed, so this is that count.
+          # Counted with `find`, not `ls <glob>`: when every file passes the glob
+          # matches nothing, `ls` exits 2, and under the inherited `bash -e` that
+          # aborted the step right here -- reporting "exit code 2" for a run in
+          # which all 105 files passed (and never printing this line).
+          failed_files="$(find ci-forensics -maxdepth 1 -name '*.out' | wc -l)"
+          echo "Backend suite: ${failed_files} of ${total} test file(s) failed"
+          if [ "$failed" -ne 0 ]; then
+            if [ "$failed_files" -ne 0 ]; then
+              echo "::error::Backend suite failed: ${failed_files} of ${total} test file(s) failed (exit ${failed})"
+            else
+              echo "::error::Backend suite failed: every test file passed but the coverage gate did (exit ${failed})"
+            fi
+          fi
+          exit "$failed"
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-report
+          path: |
+            coverage.xml
+            junit-parts/*.xml
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload CI forensics logs
+        # NOT gated on always(): on a hard cancellation GitHub skips even
+        # always() steps. if: ${{ !cancelled() }} means this step IS SKIPPED
+        # when the job is cancelled -- same as before -- but it WILL upload
+        # whenever the run survives long enough to finish (e.g. real test
+        # failures). Either way the actionable lines are in the live job log.
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-forensics
+          path: |
+            ci-forensics/*.log
+            ci-forensics/*.out
+          if-no-files-found: warn
+          retention-days: 7
+
+  frontend-build:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    needs: [policy]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Frontend behavioral tests
+        # Same RUN_TESTS policy as the backend suite; the build below still runs.
+        if: ${{ needs.policy.outputs.skip_tests != 'true' }}
+        working-directory: frontend
+        run: npm test
+
+      - name: Frontend coverage report (for SonarQube)
+        # SonarQube grades new-code coverage across BOTH languages; without this
+        # lcov file every JS file counts as 0% covered.
+        if: ${{ needs.policy.outputs.skip_tests != 'true' }}
+        working-directory: frontend
+        run: npm run test:coverage
+
+      - name: Rewrite lcov paths to be repo-root relative
+        # Vitest emits SF:src/... (relative to frontend/), but SonarQube resolves
+        # SF paths against the project base directory (the repo root). Without
+        # this rewrite no JS path matches frontend/src/**, the entire LCOV report
+        # is dropped, and every in-scope frontend file counts as 0% covered —
+        # which dragged "Coverage on new code" down to 18.8% (gate requires 80%).
+        if: ${{ needs.policy.outputs.skip_tests != 'true' }}
+        run: sed -i 's#^SF:src/#SF:frontend/src/#' frontend/coverage/lcov.info
+
+      - name: Upload frontend coverage
+        if: ${{ always() && needs.policy.outputs.skip_tests != 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: frontend-coverage
+          path: frontend/coverage/lcov.info
+          retention-days: 7
+
+      - name: Build (also verifies zero build-breaking changes reach dev)
+        working-directory: frontend
+        run: npm run build
+
+      - name: Audit production dependencies
+        working-directory: frontend
+        run: npm audit --omit=dev --audit-level=high
+
+  dependency-audit:
+    name: Python dependency vulnerability scan
+    runs-on: ubuntu-latest
+    # Blocking: unresolved high/critical vulnerabilities must fail the pipeline.
+    # A time-bounded exception is documented by pinning a fixed version in
+    # requirements.txt with a "# CVE fix pending <date>" comment, never by
+    # silently skipping this job.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: pip-audit (blocking)
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements-lock.txt --strict
+
+  sonar-scan:
+    name: SonarQube scan
+    runs-on: ubuntu-latest
+    needs: [policy, lint, test, frontend-build]
+    # Opt-in: set the repository variable SONAR_ENABLED=true once the
+    # SONAR_TOKEN / SONAR_HOST_URL secrets exist (a repo without a SonarQube
+    # server would otherwise fail every run). Consumes the coverage artifacts
+    # the test + frontend jobs upload, so it is also skipped when RUN_TESTS
+    # turns the test jobs off. Both test jobs still have to have passed.
+    if: >-
+      ${{ always() &&
+        vars.SONAR_ENABLED == 'true' &&
+        needs.policy.outputs.skip_tests != 'true' &&
+        needs.lint.result == 'success' &&
+        needs.test.result == 'success' &&
+        needs.frontend-build.result == 'success'
+      }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Download backend coverage report
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: coverage-report
+
+      # The backend suite runs one pytest process per test file, so there is no
+      # single root junit.xml any more -- the per-file parts are what SonarQube
+      # reads (see sonar.python.xunit.reportPaths in sonar-project.properties).
+      - name: Show backend JUnit parts
+        run: ls -1 junit-parts | head -20
+
+      - name: Download frontend coverage report
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: frontend-coverage
+          path: frontend/coverage
+
+      # sonar.projectVersion is not hardcoded anywhere in the repo; it is read
+      # from the APP_VERSION repository variable (the CI mirror of APP_VERSION in
+      # .env) and passed to the scanner. Failing here is deliberate: a scan
+      # submitted under the wrong version silently breaks the issue-trend graph.
+      - name: Resolve APP_VERSION
+        id: app_version
+        env:
+          REPO_APP_VERSION: ${{ vars.APP_VERSION }}
+        run: |
+          if [ -z "${REPO_APP_VERSION:-}" ]; then
+            echo "::error::Repository variable APP_VERSION is not set - add it in Settings > Secrets and variables > Actions > Variables (mirror APP_VERSION from .env)."
+            exit 1
+          fi
+          echo "version=${REPO_APP_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Using APP_VERSION=${REPO_APP_VERSION} as sonar.projectVersion"
+
+      - name: SonarQube Scan (waits for the quality gate)
+        # v5 of this action is deprecated and carries a security advisory;
+        # v6 is the supported scanner action for this SonarQube version.
+        uses: SonarSource/sonarqube-scan-action@fd88b7d7ccbaefd23d8f36f73b59db7a3d246602 # v6.0.0
+        with:
+          args: >-
+            -Dsonar.qualitygate.wait=true
+            -Dsonar.projectVersion=${{ steps.app_version.outputs.version }}
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+  build-and-push:
+    name: Build and push image
+    runs-on: ubuntu-latest
+    needs: [policy, lint, test, frontend-build, dependency-audit, sonar-scan]
+    # Opt-in: set the repository variable IMAGE_PUSH_ENABLED=true once the
+    # ACR_LOGIN_SERVER / ACR_USERNAME / ACR_PASSWORD secrets exist. Push is
+    # limited to main (a push to main, or a manual run on main) and every
+    # quality job must have passed. The SonarQube gate must pass when
+    # SONAR_ENABLED=true and is otherwise skipped. The single documented
+    # exception is RUN_TESTS=false: the backend test job and the SonarQube gate
+    # are then skipped on purpose (image-only path), while lint, the frontend
+    # build and the dependency audit still have to succeed. Any other skip,
+    # failure or cancellation blocks the push.
+    if: >-
+      ${{ always() &&
+        vars.IMAGE_PUSH_ENABLED == 'true' &&
+        (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+        github.ref == 'refs/heads/main' &&
+        needs.lint.result == 'success' &&
+        needs.frontend-build.result == 'success' &&
+        needs.dependency-audit.result == 'success' &&
+        (
+          (needs.policy.outputs.skip_tests == 'true'
+            && needs.test.result == 'skipped'
+            && needs.sonar-scan.result == 'skipped')
+          ||
+          (needs.policy.outputs.skip_tests != 'true'
+            && needs.test.result == 'success'
+            && (needs.sonar-scan.result == 'success'
+                || (vars.SONAR_ENABLED != 'true' && needs.sonar-scan.result == 'skipped')))
+        )
+      }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Log in to Azure Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ${{ secrets.ACR_LOGIN_SERVER }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.ACR_LOGIN_SERVER }}/bug-hunter:latest
+            ${{ secrets.ACR_LOGIN_SERVER }}/bug-hunter:${{ github.sha }}

@@ -1,15 +1,11 @@
-"""Report catalog — the list of report types the engine knows how to run.
+"""Report catalog: the list of report types the engine knows how to run.
 
 Kept separate from engine.py so the catalog can be served to the frontend
 (/api/reports/types) without dragging in SQLAlchemy or the runner.
 """
 from __future__ import annotations
 
-# Each entry describes ONE report type. Ordering matters: this is the
-# order the dropdown / Sleuth lists them. Item Detail Export is first
-# because it's the most-used (the "SQL query" view that produces an
-# Excel sheet of every matching item — what most managers actually want
-# when they ask "give me a report").
+# Ordering here is the order the dropdown / Sleuth lists them.
 REPORT_TYPES: list[dict] = [
     {
         "key": "item_detail",
@@ -20,7 +16,7 @@ REPORT_TYPES: list[dict] = [
             "filters — every column, like running a SQL query. Best for "
             "sharing raw data with anyone who asks for one"
         ),
-        "result_shape": "detail",   # one row per item
+        "result_shape": "detail",
         "default_window": "all_time",
     },
     {

@@ -1,35 +1,17 @@
-"""Authentication + tenant-aware authorization primitives.
+"""Authentication primitives: bcrypt hashing, signed session cookies
+(HttpOnly + SameSite=Lax), reset and invitation tokens, and role-check dependencies.
 
-Responsibilities:
-  - Hash + verify passwords (bcrypt).
-  - Sign + verify session cookies (itsdangerous).
-  - Generate + verify password-reset tokens and invitation tokens.
-  - FastAPI dependencies that resolve the current user from the session
-    cookie. The user object carries the org_id we use to scope every
-    other query in the system.
-  - Permission helpers — both org-level role gates and per-project
-    membership gates.
-
-Tenant isolation is enforced *by the route handlers*, not by SQLAlchemy
-events. Every query that touches user/project/bug/activity data must
-filter by the current user's org_id. Project-scoped reads must also pass
-through `accessible_project_ids()` so non-admins can't see projects
-they aren't a member of.
-
-Token payload format:
-  `user_id:session_version[:jti]`
-
-Session-version invalidation (global, blunt): bumped on password change /
-admin reset / forced logout — every previously-issued cookie for that
-user fails validation immediately.
-
-Per-session revocation (precise, Keycloak-style): admins delete the
-matching `sessions` row; just that one device is booted.
+Token payload is `user_id:session_version[:jti]` — bumping session_version
+logs out every device; revoking a jti row logs out one device. The session's
+user carries the organization (``user.org_id``) that scopes every other query;
+see app/access.py for the tenant rules.
 """
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import logging
+import os
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -41,48 +23,70 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.agile.integrity import set_actor
 from app.config import get_settings
 from app.database import get_db
 from app.models import (
-    PROJECT_ROLE_LEAD,
     ROLE_ADMIN,
     ROLE_MANAGER,
-    ROLE_MEMBER,
     PasswordResetToken,
-    Project,
-    ProjectMembership,
-    Session as SessionRow,
     User,
+)
+from app.models import (
+    Session as SessionRow,
 )
 
 logger = logging.getLogger("bug_hunter.auth")
 
 COOKIE_NAME = "bh_session"
 
-# Process-local fallback so dev works without setting SESSION_SECRET.
-# In production, set SESSION_SECRET so it survives restarts AND is
-# shared across multi-worker uvicorn deployments.
+
+def trusted_forwarded_ip(xff: str, hops: int) -> Optional[str]:
+    """Pick the client IP from X-Forwarded-For: with N trusted proxies, only the
+    Nth-from-the-right entry is trustworthy (left-most is client-controlled)."""
+    parts = [p.strip() for p in (xff or "").split(",") if p.strip()]
+    if not parts:
+        return None
+    candidate = parts[-min(hops, len(parts))]
+    try:
+        ipaddress.ip_address(candidate)
+    except ValueError:
+        return None
+    return candidate
+
+# Dev-only fallback; production must set SESSION_SECRET (survives restarts, shared across workers).
 _FALLBACK_SECRET = secrets.token_hex(32)
 
 
-# ---------------------------------------------------------------------------
-# Password hashing
-# ---------------------------------------------------------------------------
+# bcrypt cost used when hashing passwords: BCRYPT_ROUNDS (default 12, never below 10;
+# capped at 15). The test suite overrides BCRYPT_TEST_ROUNDS to 4 so CI does not burn most of
+# its wall-clock in password hashing (each rounds-12 hash costs ~0.3-0.6s and
+# the suite hashes/verify hundreds of times). The override can only lower the cost
+# (it is capped at the configured value), so production strength is never raised or
+# weakened through anything but BCRYPT_ROUNDS itself.
+_MAX_BCRYPT_ROUNDS = 15
+
+
+def _bcrypt_rounds() -> int:
+    """Cost factor for new hashes; honour a test-only override, capped at the configured cost."""
+    configured = min(get_settings().BCRYPT_ROUNDS, _MAX_BCRYPT_ROUNDS)
+    try:
+        return max(1, min(int(os.getenv("BCRYPT_TEST_ROUNDS", "") or configured), configured))
+    except ValueError:
+        return configured
+
+
 def hash_password(plain: str) -> str:
-    """Hash a plaintext password with bcrypt. Cost factor is configurable
-    via env (BCRYPT_ROUNDS) because the deployment target is a 0.1-vCPU
-    box where 12 rounds is painful on every login. 10 rounds is still
-    well within NIST 800-63B guidance for a non-banking workload."""
+    """Hash a plaintext password with bcrypt."""
     if not plain:
         raise ValueError("Password cannot be empty")
-    # bcrypt has a 72-byte input limit. Pre-hash with sha256 so long
-    # passwords are handled deterministically.
+    # bcrypt caps input at 72 bytes -> sha256 pre-hash; must match verify_password forever.
     pre = hashlib.sha256(plain.encode("utf-8")).digest()
-    rounds = max(4, min(15, get_settings().BCRYPT_ROUNDS))
-    return bcrypt.hashpw(pre, bcrypt.gensalt(rounds=rounds)).decode("utf-8")
+    return bcrypt.hashpw(pre, bcrypt.gensalt(rounds=_bcrypt_rounds())).decode("utf-8")
 
 
 def verify_password(plain: str, hashed: Optional[str]) -> bool:
+    """Constant-time check of a plaintext password against a stored hash."""
     if not hashed or not plain:
         return False
     pre = hashlib.sha256(plain.encode("utf-8")).digest()
@@ -92,15 +96,17 @@ def verify_password(plain: str, hashed: Optional[str]) -> bool:
         return False
 
 
-# ---------------------------------------------------------------------------
-# Session cookie
-# ---------------------------------------------------------------------------
+def session_secret() -> str:
+    """The key every signed token (session cookie, 2FA pending token) derives from."""
+    return get_settings().SESSION_SECRET or _FALLBACK_SECRET
+
+
 def _signer() -> TimestampSigner:
-    s = get_settings().SESSION_SECRET or _FALLBACK_SECRET
-    return TimestampSigner(s, salt="bh-session-v4")
+    return TimestampSigner(session_secret(), salt="bh-session-v2")
 
 
 def make_session_token(user_id: int, session_version: int = 0, jti: str | None = None) -> str:
+    """Signed token of user id, session version, and optional per-session jti."""
     if jti:
         payload = f"{user_id}:{session_version}:{jti}"
     else:
@@ -109,6 +115,8 @@ def make_session_token(user_id: int, session_version: int = 0, jti: str | None =
 
 
 def parse_session_token(token: str) -> Optional[tuple[int, int, Optional[str]]]:
+    """Verify a session cookie; return (user_id, session_version, jti) or None.
+    jti is None for legacy pre-sessions-table tokens."""
     if not token:
         return None
     try:
@@ -125,6 +133,7 @@ def parse_session_token(token: str) -> Optional[tuple[int, int, Optional[str]]]:
             return int(parts[0]), int(parts[1]), parts[2] or None
         if len(parts) == 2:
             return int(parts[0]), int(parts[1]), None
+        # Accept legacy single-int cookies so a deploy doesn't log everyone out.
         if len(parts) == 1:
             return int(parts[0]), 0, None
         return None
@@ -133,7 +142,13 @@ def parse_session_token(token: str) -> Optional[tuple[int, int, Optional[str]]]:
 
 
 def new_jti() -> str:
+    """Random opaque session ID (192 bits)."""
     return secrets.token_urlsafe(24)
+
+
+def _cookie_secure(settings) -> bool:
+    """Secure flag: COOKIE_SECURE, or derived from an https APP_BASE_URL."""
+    return bool(settings.COOKIE_SECURE) or settings.APP_BASE_URL.lower().startswith("https://")
 
 
 def set_session_cookie(response: Response, user: User, jti: str | None = None) -> None:
@@ -143,59 +158,71 @@ def set_session_cookie(response: Response, user: User, jti: str | None = None) -
         value=make_session_token(user.id, user.session_version or 0, jti=jti),
         max_age=settings.SESSION_TTL_SECONDS,
         httponly=True,
-        secure=settings.COOKIE_SECURE,
+        secure=_cookie_secure(settings),
         samesite="lax",
         path="/",
     )
 
 
 def clear_session_cookie(response: Response) -> None:
-    response.delete_cookie(key=COOKIE_NAME, path="/")
+    # Mirror the set attributes; some browsers key the delete on samesite/secure.
+    settings = get_settings()
+    response.delete_cookie(
+        key=COOKIE_NAME,
+        path="/",
+        httponly=True,
+        secure=_cookie_secure(settings),
+        samesite="lax",
+    )
 
 
-# ---------------------------------------------------------------------------
-# Tokens (password reset + invitations)
-# ---------------------------------------------------------------------------
 PASSWORD_RESET_TTL = timedelta(hours=2)
 INVITATION_TTL = timedelta(days=7)
 
 
-def generate_random_token() -> tuple[str, str]:
-    """Return (plaintext_token, sha256_hex_hash). Email the plaintext, store the hash."""
+def generate_token() -> tuple[str, str]:
+    """Return (plaintext_token, sha256_hex). Email the plaintext, store the hash."""
     raw = secrets.token_urlsafe(32)
-    h = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-    return raw, h
+    return raw, hash_token(raw)
 
 
 def hash_token(raw: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-# Aliases kept for code that still uses the older names.
-generate_reset_token = generate_random_token
-hash_reset_token = hash_token
-
-
 def invalidate_outstanding_reset_tokens(db: Session, user_id: int) -> int:
+    """Mark the user's unused reset tokens as used (atomic guarded UPDATE) so
+    old email links can't be replayed. Returns the count for audit logging."""
     now = datetime.now(timezone.utc)
-    rows = (
+    return (
         db.query(PasswordResetToken)
-        .filter(PasswordResetToken.user_id == user_id, PasswordResetToken.used_at.is_(None))
-        .all()
+        .filter(
+            PasswordResetToken.user_id == user_id,
+            PasswordResetToken.used_at.is_(None),
+        )
+        .update({PasswordResetToken.used_at: now}, synchronize_session=False)
     )
-    for r in rows:
-        r.used_at = now
-    return len(rows)
 
 
-# ---------------------------------------------------------------------------
-# FastAPI dependencies
-# ---------------------------------------------------------------------------
+def purge_consumed_reset_tokens(db: Session) -> int:
+    """Delete expired/used reset tokens (only pruning path for this table)."""
+    now = datetime.now(timezone.utc)
+    return (
+        db.query(PasswordResetToken)
+        .filter(
+            (PasswordResetToken.used_at.isnot(None))
+            | (PasswordResetToken.expires_at < now)
+        )
+        .delete(synchronize_session=False)
+    )
+
+
+# Throttle last_seen_at writes; per-request updates would be a hot write.
 _LAST_SEEN_THROTTLE_SECONDS = 60
 
 
 def _delete_expired_session(db: Session, sess: SessionRow, jti: str) -> None:
-    """Best-effort: drop an expired session row on a request-path read."""
+    """Drop an expired session row; errors are logged, not raised."""
     try:
         db.delete(sess)
         db.commit()
@@ -205,7 +232,7 @@ def _delete_expired_session(db: Session, sess: SessionRow, jti: str) -> None:
 
 
 def _maybe_bump_last_seen(db: Session, sess: SessionRow, now: datetime, jti: str) -> None:
-    """Throttled write of sess.last_seen_at - skipped if recent."""
+    """Throttled write of sess.last_seen_at, skipped if recent."""
     last_seen = sess.last_seen_at
     if last_seen.tzinfo is None:
         last_seen = last_seen.replace(tzinfo=timezone.utc)
@@ -220,15 +247,8 @@ def _maybe_bump_last_seen(db: Session, sess: SessionRow, now: datetime, jti: str
 
 
 def _validate_session_row(db: Session, jti: str, user: User) -> bool:
-    """Return True iff the session row for jti is valid for this user.
-
-    Also: deletes expired rows in-line and refreshes last_seen_at when
-    enough time has passed. Returns False to signal the caller to reject
-    the request. Multi-tenant note: the session row is bound to a single
-    user via user_id, and the user object already carries org_id — so
-    cross-org session reuse is impossible as long as the user_id match
-    holds.
-    """
+    """True iff the jti's session row is valid for this user; also prunes
+    expired rows and refreshes last_seen_at."""
     sess = db.scalar(select(SessionRow).where(SessionRow.jti == jti))
     if sess is None or sess.user_id != user.id:
         return False
@@ -252,13 +272,18 @@ def _user_from_request(request: Request, db: Session) -> Optional[User]:
     user = db.get(User, user_id)
     if user is None or not user.is_active:
         return None
-    # Token's session_version must match the user's current - bump on
-    # password change / reset / forced logout.
+    # session_version bump (password change/forced logout) invalidates old cookies.
     if (user.session_version or 0) != session_version:
         return None
-    # Per-session revocation: if the cookie carries a jti, look it up.
-    # Legacy tokens (no jti) pre-date the sessions table - accept them.
-    if jti is not None and not _validate_session_row(db, jti, user):
+    # jti-less tokens pre-date the sessions table.
+    if jti is None:
+        if get_settings().SESSION_REQUIRE_JTI:
+            # Refuse cookies that can't be revoked per-device.
+            logger.info("Rejected jti-less session for user_id=%s", user_id)
+            return None
+        logger.debug("Accepting jti-less session for user_id=%s", user_id)
+        return user
+    if not _validate_session_row(db, jti, user):
         return None
     return user
 
@@ -267,25 +292,19 @@ def get_current_user(
     request: Request,
     db: Session = Depends(get_db),
 ) -> User:
+    """Require any active, logged-in user. 401 otherwise."""
     user = _user_from_request(request, db)
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",
         )
+    # The route receives this same session, so work-item history written by
+    # its flushes is attributed to this user (app/agile/integrity.py).
+    set_actor(db, user.id)
     return user
 
 
-def get_current_user_optional(
-    request: Request,
-    db: Session = Depends(get_db),
-) -> Optional[User]:
-    return _user_from_request(request, db)
-
-
-# ---------------------------------------------------------------------------
-# Role gates
-# ---------------------------------------------------------------------------
 def require_admin(user: User = Depends(get_current_user)) -> User:
     if user.role != ROLE_ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required")
@@ -298,185 +317,55 @@ def require_manager_or_admin(user: User = Depends(get_current_user)) -> User:
     return user
 
 
-def is_admin(user: User) -> bool:
-    return user.role == ROLE_ADMIN
-
-
-def is_manager_or_admin(user: User) -> bool:
-    return user.role in (ROLE_ADMIN, ROLE_MANAGER)
-
-
-# ---------------------------------------------------------------------------
-# Project access helpers — the heart of tenant + project isolation.
-# ---------------------------------------------------------------------------
-def accessible_project_ids(db: Session, user: User) -> list[int]:
-    """Project IDs this user can see.
-
-    - Admin sees every project in their org.
-    - Everyone else sees only projects they have a ProjectMembership for.
-      A user has a row per project they belong to; the role on that row
-      decides whether they can manage the project (lead) or just work
-      on its bugs (member).
-
-    Cross-org access is impossible because both queries filter on
-    `Project.org_id == user.org_id`.
-    """
-    if user.role == ROLE_ADMIN:
-        rows = db.scalars(select(Project.id).where(Project.org_id == user.org_id)).all()
-        return list(rows)
-    rows = db.scalars(
-        select(Project.id)
-        .join(ProjectMembership, ProjectMembership.project_id == Project.id)
-        .where(
-            Project.org_id == user.org_id,
-            ProjectMembership.user_id == user.id,
-        )
-    ).all()
-    return list(rows)
-
-
-def can_access_project(db: Session, user: User, project: Project) -> bool:
-    """True if the user can SEE this project (cross-org is always False)."""
-    if project.org_id != user.org_id:
-        return False
-    if user.role == ROLE_ADMIN:
-        return True
-    pm = db.scalar(
-        select(ProjectMembership).where(
-            ProjectMembership.project_id == project.id,
-            ProjectMembership.user_id == user.id,
-        )
-    )
-    return pm is not None
-
-
-def can_manage_project(db: Session, user: User, project: Project) -> bool:
-    """True if the user can edit project settings & manage its members.
-    Org admins always can; project leads of THIS project also can."""
-    if project.org_id != user.org_id:
-        return False
-    if user.role == ROLE_ADMIN:
-        return True
-    pm = db.scalar(
-        select(ProjectMembership).where(
-            ProjectMembership.project_id == project.id,
-            ProjectMembership.user_id == user.id,
-        )
-    )
-    return pm is not None and pm.role == PROJECT_ROLE_LEAD
-
-
-def can_delete_project(_db: Session, user: User, project: Project) -> bool:
-    """Project deletion is intentionally narrower than `manage` — only
-    org admins can blow a project away. Leads can manage members and
-    edit metadata but not nuke the thing.
-
-    The `_db` parameter is unused today but preserved so the signature
-    stays uniform with other permission helpers (caller passes a Session
-    positionally and the helper stays a stable swap-in for richer checks)."""
-    return project.org_id == user.org_id and user.role == ROLE_ADMIN
-
-
-def can_create_project(user: User) -> bool:
-    """Project creation is admin-only. Managers can be assigned as
-    project leads (where they manage members and bugs) but they can't
-    spin up new projects on their own."""
-    return user.role == ROLE_ADMIN
-
-
-def can_manage_users(user: User) -> bool:
-    """Admin-only: directly create users, edit roles, deactivate, delete."""
-    return user.role == ROLE_ADMIN
-
-
-def can_invite(user: User) -> bool:
-    """Admins and managers can send invitations. Members cannot."""
-    return user.role in (ROLE_ADMIN, ROLE_MANAGER)
-
-
-def can_view_audit(user: User) -> bool:
-    """Audit trail visible to admins and managers — both have
-    project-management responsibilities and benefit from the history."""
-    return user.role in (ROLE_ADMIN, ROLE_MANAGER)
-
-
-def can_manage_sessions(user: User) -> bool:
-    """Only admins can list / revoke sessions inside their org."""
-    return user.role == ROLE_ADMIN
-
-
-# ---------------------------------------------------------------------------
-# Bug-level permission helpers (called from routes/bugs.py)
-# ---------------------------------------------------------------------------
 def can_edit_bug(
-    db: Session, user: User, project: Project, item_type: str = "Bug",
+    user: User,
+    bug_reporter_id: Optional[int],
+    assignee_ids: list[int],
+    item_type: str = "Bug",
 ) -> bool:
-    """Edit policy by item flavour (v2.4):
-
-      - Bug         : any project-accessible user (legacy permissive default)
-      - Requirement : admin or manager role only (still needs project access)
-      - Task        : admin or manager role only (still needs project access)
-
-    Members can keep editing bugs the same as before so the existing
-    bug-triage workflow doesn't regress. Tasks and requirements are
-    typically planning artefacts owned by the manager tier — letting
-    members edit them turned out to be a footgun in v2.3 user testing.
-    """
-    if not can_access_project(db, user, project):
-        return False
-    if item_type in ("Requirement", "Task"):
+    """Anyone may edit Bugs; Tasks/Requirements are admin/manager only."""
+    del bug_reporter_id, assignee_ids
+    if item_type in ("Task", "Requirement"):
         return user.role in (ROLE_ADMIN, ROLE_MANAGER)
     return True
 
 
-def can_delete_bug(
-    _db: Session, user: User, project: Project, _item_type: str = "Bug",
-) -> bool:
-    """Delete policy: admin only across every type (v2.4 tightening).
-
-    Project leads used to be able to delete bugs in their project;
-    this was simplified after the audit-history-preservation work
-    (v2.4) made delete a less destructive operation but still one
-    that should be admin-gated for accountability.
-
-    `_db` and `_item_type` are kept in the signature so callers can stay
-    symmetric with `can_edit_bug(db, user, project, item_type)` and so a
-    future per-type delete policy can be introduced without changing
-    every call-site.
-    """
-    if project.org_id != user.org_id:
-        return False
+def can_delete_bug(user: User, item_type: str = "Bug") -> bool:
+    """Work-item deletion is admin-only for every type."""
+    del item_type
     return user.role == ROLE_ADMIN
 
 
-# ---------------------------------------------------------------------------
-# Event-level permission helpers (v2.4)
-# ---------------------------------------------------------------------------
-def can_create_event(user: User) -> bool:
-    """Event creation is admin/manager. Members consume events but
-    don't define them."""
-    return user.role in (ROLE_ADMIN, ROLE_MANAGER)
+def can_edit_comment(user: User) -> bool:
+    """Admin-only: comments are evidence; only admins curate them."""
+    return user.role == ROLE_ADMIN
+
+
+def can_delete_comment(user: User) -> bool:
+    """Deleting a comment is admin-only (see can_edit_comment)."""
+    return user.role == ROLE_ADMIN
+
+
+def can_delete_attachment(user: User) -> bool:
+    """Attachment deletion is admin-only; uploaders can't remove their own files."""
+    return user.role == ROLE_ADMIN
 
 
 def can_edit_event(user: User) -> bool:
-    """Admins and managers can edit any event in their org. Members
-    are read-only."""
+    """Events are admin/manager only; users have no edit rights."""
     return user.role in (ROLE_ADMIN, ROLE_MANAGER)
 
 
 def can_delete_event(user: User) -> bool:
-    """Event deletion is admin-only — parallels bug deletion."""
+    """Event delete is admin-only (managers can edit but not delete)."""
     return user.role == ROLE_ADMIN
 
 
-# ---------------------------------------------------------------------------
-# Resolve-or-404 helpers used by routes to enforce isolation cleanly.
-# ---------------------------------------------------------------------------
-def get_org_project_or_404(db: Session, project_id: int, user: User) -> Project:
-    """Look up a project by ID, but 404 if it doesn't belong to the
-    caller's org — same response as truly-missing so we don't leak
-    existence across tenants."""
-    p = db.get(Project, project_id)
-    if p is None or p.org_id != user.org_id:
-        raise HTTPException(status_code=404, detail="Project not found")
-    return p
+def can_manage_projects(user: User) -> bool:
+    """Create/edit projects: admin or manager (delete is admin-only)."""
+    return user.role in (ROLE_ADMIN, ROLE_MANAGER)
+
+
+def can_invite(user: User) -> bool:
+    """Send and revoke invitations, publish saved views to the organization."""
+    return user.role in (ROLE_ADMIN, ROLE_MANAGER)

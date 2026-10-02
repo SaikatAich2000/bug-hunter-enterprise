@@ -8,26 +8,73 @@ omit = [
 ]
 
 [tool.coverage.report]
+# Fail the run if total coverage falls below this floor. 80% is the project-wide
+# bar (pyproject + the SonarQube gate in scripts/sonar_gate.py use the same
+# number). Backend line coverage is currently well above it (~92%); the frontend
+# suite is scored separately by Vitest and the SonarQube JS analysis.
+fail_under = 80
 exclude_lines = [
     "pragma: no cover",
     "raise NotImplementedError",
     "if __name__ == .__main__.:",
+    # TYPE_CHECKING blocks hold import-only type aliases that never run.
+    "if TYPE_CHECKING:",
 ]
 
 [tool.coverage.xml]
 output = "coverage.xml"
 
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+exclude = ["migrations", ".venv"]
+
+[tool.ruff.lint]
+# E/F: pyflakes+pycodestyle core; B: bugbear (common real-bug patterns);
+# I: import sorting. Kept intentionally small — this is CI signal, not style police.
+select = ["E", "F", "B", "I"]
+ignore = [
+    "E501",  # line length is a formatting nit, not a bug signal
+    "E701",  # one-line guard clauses ("if not x: return") are this codebase's style
+    "B008",  # FastAPI's Depends()-as-default-argument is the idiomatic pattern here
+    "B905",  # pre-existing zip() call sites; strict= is a hardening nice-to-have, not a bug fix
+]
+
+[tool.ruff.lint.per-file-ignores]
+# These standalone Sleuth test modules MUST set DATABASE_URL / SESSION_SECRET /
+# BOOTSTRAP_* in os.environ BEFORE importing any app module, so their app
+# imports are deliberately below module-level setup. E402 is correct there, not
+# a defect. Run them directly (`python tests/test_sleuth_parser.py`) or via pytest.
+"tests/test_sleuth_parser.py" = ["E402"]
+"tests/test_sleuth_safety.py" = ["E402"]
+"tests/test_sleuth_actions.py" = ["E402"]
+"tests/test_sleuth_bulk.py" = ["E402"]
+"tests/test_sleuth_classifier.py" = ["E402"]
+"tests/test_sleuth_comprehensive.py" = ["E402"]
+# Browser suites import Playwright only after pytest.importorskip.
+"tests/test_e2e_browser.py" = ["E402"]
+# Imports the main suite's fixtures and overrides some of them (server, open_page).
+"tests/test_e2e_enterprise.py" = ["E402", "F811"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-# Python 3.14 + pytest-cov: gzip-buffered coverage files get finalized
-# after their underlying file is closed, raising ValueError inside
-# __del__. Pytest catches these via sys.unraisablehook and turns them
-# into PytestUnraisableExceptionWarning. They're harmless — coverage
-# data lands correctly — but they flood the output. Silence the noise.
+# Registered markers — run `-m "not ui"` to skip the slow browser E2E suite.
+markers = [
+    "ui: Playwright browser end-to-end tests (slow; needs `python -m playwright install`)",
+]
+# On Python 3.14, pytest-cov can raise a harmless PytestUnraisableExceptionWarning
+# when gzip-buffered coverage files finalize after close; silence the noise.
 filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::PendingDeprecationWarning",
     "ignore::ResourceWarning",
     "ignore::pytest.PytestUnraisableExceptionWarning",
 ]
+
+[tool.bandit]
+exclude_dirs = ["tests", ".venv"]
+# B101 (assert): only used in non-security-sensitive internal invariants here.
+# B105 (hardcoded_password_string): false positives on error-message/detail
+# constants that merely contain the word "password"/"token", not a credential.
+skips = ["B101", "B105"]

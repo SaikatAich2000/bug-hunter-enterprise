@@ -1,4 +1,4 @@
-"""Audit-trail endpoint — every action across the caller's org only."""
+"""Audit-trail endpoint of the caller's organization; managers and admins only."""
 from __future__ import annotations
 
 import csv
@@ -6,20 +6,25 @@ import io
 import re
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from sqlalchemy import cast, or_, select
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, Query, Response
+from sqlalchemy import and_, cast, or_, select
+from sqlalchemy.orm import Session, aliased
 from sqlalchemy.types import String
 
-from app.auth import can_view_audit, get_current_user
+from app.access import accessible_project_ids
+from app.auth import require_manager_or_admin
 from app.database import get_db
-from app.models import Activity, Bug, User
+from app.models import ROLE_ADMIN, Activity, Board, Bug, Event, Project, Sprint, User
 from app.schemas import ActivityOut
 
 router = APIRouter(prefix="/api/audit", tags=["audit"])
 
+# int4 max; longer digit strings would overflow entity_id/bug_id on Postgres (500).
+_MAX_PK_INT = 2**31 - 1
+
 
 def _like_escape(needle: str) -> str:
+    """Escape LIKE wildcards so literal '%' and '_' in user input match plainly."""
     return (
         needle.replace("\\", "\\\\")
               .replace("%", "\\%")
@@ -27,32 +32,53 @@ def _like_escape(needle: str) -> str:
     )
 
 
-def _build_audit_query(
-    actor: User,
-    entity_type: Optional[str],
-    actor_user_id: Optional[int],
-    q: Optional[str],
-):
-    """Build the org-scoped audit SELECT shared by the JSON list and CSV
-    export. Both endpoints use the same filters so consistency matters.
+def _scope_to_org_and_projects(stmt, user, accessible):
+    """Scope rows to the caller's organization; managers also only see their projects'.
+    Agile entities do not have an Activity.bug_id, so resolve each supported
+    entity type back to its project before applying the access filter.
+    Aliased subqueries keep this composable with the search path's OUTER JOIN on bugs."""
+    stmt = stmt.where(Activity.org_id == user.org_id)
+    if user.role == ROLE_ADMIN:
+        return stmt
+    sbug = aliased(Bug)
+    sevent = aliased(Event)
+    sboard = aliased(Board)
+    ssprint = aliased(Sprint)
+    return stmt.where(or_(
+        Activity.bug_id.in_(select(sbug.id).where(sbug.project_id.in_(accessible))),
+        and_(
+            Activity.entity_type == "project",
+            Activity.entity_id.in_(select(Project.id).where(Project.id.in_(accessible))),
+        ),
+        and_(
+            Activity.entity_type == "board",
+            Activity.entity_id.in_(select(sboard.id).where(sboard.project_id.in_(accessible))),
+        ),
+        and_(
+            Activity.entity_type == "sprint",
+            Activity.entity_id.in_(select(ssprint.id).where(ssprint.project_id.in_(accessible))),
+        ),
+        and_(
+            Activity.entity_type == "event",
+            Activity.entity_id.in_(
+                select(sevent.id).where(sevent.project_id.in_(accessible))
+            ),
+        ),
+    ))
 
-    The LEFT OUTER JOIN on bugs gives us the live bug title even when
-    the audit row didn't bake it into `detail` — so searching for a
-    title finds rows written before v2.4's detail-string changes too.
-    The join is outer because most audit rows aren't bug-related, and
-    even those that are may have been detached (bug_id NULL) when the
-    bug was deleted. Detached rows still carry the original title in
-    `detail`, so they remain findable through that field."""
-    stmt = (
-        select(Activity)
-        .outerjoin(Bug, Bug.id == Activity.bug_id)
-        .where(Activity.org_id == actor.org_id)
-    )
+
+def _filtered_audit(db: Session, user: User, entity_type: Optional[str],
+                    actor_user_id: Optional[int], q: Optional[str]):
+    """The caller's audit rows, newest first, narrowed by entity type, actor, or free-text `q`.
+    The OUTER JOIN on bugs is added only when `q` is present to keep plain browsing cheap."""
+    stmt = select(Activity)
+    stmt = _scope_to_org_and_projects(stmt, user, accessible_project_ids(db, user))
     if entity_type:
         stmt = stmt.where(Activity.entity_type == entity_type)
     if actor_user_id is not None:
         stmt = stmt.where(Activity.actor_user_id == actor_user_id)
     if q:
+        stmt = stmt.outerjoin(Bug, Bug.id == Activity.bug_id)
         raw = q.strip()
         like = f"%{_like_escape(raw.lower())}%"
         clauses = [
@@ -60,25 +86,20 @@ def _build_audit_query(
             Activity.detail.ilike(like, escape="\\"),
             Activity.actor_name.ilike(like, escape="\\"),
             Activity.entity_type.ilike(like, escape="\\"),
-            # Search the live bug title — handy when the bug has been
-            # renamed since the audit row was written, or for rows
-            # that pre-date v2.4's detail-string changes.
+            # Live bug title, so search still works after a rename.
             Bug.title.ilike(like, escape="\\"),
+            Bug.item_type.ilike(like, escape="\\"),
         ]
-        # Numeric IDs — strip "#", "bug", "issue", "ticket" prefixes so
-        # "#42", "bug 42" and "ticket #42" all behave like a search for
-        # entity_id = 42. We also OR a textual `cast(entity_id) LIKE`
-        # clause so partial-id searches ("4" → 4, 40, 41, …, 422) work.
+        # Digit run so "#42", "bug 42", and "42" all resolve to id 42.
         digits_match = re.search(r"\d+", raw)
         if digits_match:
-            try:
-                entity_id_val = int(digits_match.group(0))
+            digits = digits_match.group(0)
+            # Skip exact-int compare above int4 max.
+            if int(digits) <= _MAX_PK_INT:
+                entity_id_val = int(digits)
                 clauses.append(Activity.entity_id == entity_id_val)
-                # Also catch rows still attached to the bug via bug_id.
                 clauses.append(Activity.bug_id == entity_id_val)
-            except ValueError:
-                pass
-            digit_like = f"%{_like_escape(digits_match.group(0))}%"
+            digit_like = f"%{_like_escape(digits)}%"
             clauses.append(cast(Activity.entity_id, String).ilike(digit_like, escape="\\"))
         stmt = stmt.where(or_(*clauses))
     return stmt.order_by(Activity.created_at.desc(), Activity.id.desc())
@@ -88,75 +109,44 @@ def _build_audit_query(
 def list_audit(
     entity_type: Optional[str] = None,
     actor_user_id: Optional[int] = None,
-    q: Optional[str] = None,
-    # v2.6: raise the cap so operators reviewing very old activity can
-    # actually see it. 1000 was too aggressive on long-running deploys.
-    # Ceiling bumped to 10 000 (still a firm cap to keep response size
-    # sane); the SPA now asks for 5000 by default and offers a "Load
-    # more" affordance via the offset param for the rare case the
-    # user needs to dig further. Pagination stays within the actor's
-    # org — _build_audit_query already filters by Activity.org_id.
+    q: Optional[str] = Query(default=None, max_length=200),
     limit: int = Query(default=5000, le=10000),
     offset: int = Query(default=0, ge=0),
-    actor: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    user: User = Depends(require_manager_or_admin),
 ) -> list[Activity]:
-    """Returns audit events filtered by entity, actor and free-text search.
+    stmt = _filtered_audit(db, user, entity_type, actor_user_id, q)
+    return list(db.scalars(stmt.limit(limit).offset(offset)).all())
 
-    The search query (`q`) is broad on purpose so operators can paste in
-    anything: bug numbers (`#42` / `42` / `bug 42`), user names, item
-    titles (current or historical), actions, entity types — they should
-    all hit. We OR every plausible column together rather than parsing
-    the query into a structured form. Still org-scoped so cross-tenant
-    data never leaks."""
-    if not can_view_audit(actor):
-        raise HTTPException(status_code=403, detail="Forbidden")
-    stmt = (
-        _build_audit_query(actor, entity_type, actor_user_id, q)
-        .offset(offset)
-        .limit(limit)
-    )
-    return list(db.scalars(stmt).all())
+
+def _csv_cell(value: object) -> str:
+    """Text for one cell; a leading = + - @ or tab is defused so a spreadsheet never runs it as a formula."""
+    text = "" if value is None else str(value).replace("\r", " ").replace("\n", " ")
+    return "'" + text if text[:1] in ("=", "+", "-", "@", "\t") else text
 
 
 @router.get("/export.csv")
 def export_audit_csv(
     entity_type: Optional[str] = None,
     actor_user_id: Optional[int] = None,
-    q: Optional[str] = None,
-    limit: int = Query(default=10000, le=100000),
-    actor: User = Depends(get_current_user),
+    q: Optional[str] = Query(default=None, max_length=200),
+    limit: int = Query(default=10000, ge=1, le=100000),
     db: Session = Depends(get_db),
+    user: User = Depends(require_manager_or_admin),
 ) -> Response:
-    """Dump filtered audit rows as CSV. Same filters as the JSON
-    endpoint; bigger default cap (10k vs 200) so operators can export a
-    full compliance window in one shot. Org-scoped — never returns rows
-    from another tenant."""
-    if not can_view_audit(actor):
-        raise HTTPException(status_code=403, detail="Forbidden")
-    stmt = _build_audit_query(actor, entity_type, actor_user_id, q).limit(limit)
-    rows = list(db.scalars(stmt).all())
-
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerow([
-        "id", "created_at", "actor_user_id", "actor_name",
-        "action", "entity_type", "entity_id", "bug_id", "detail",
-    ])
+    """The audit trail as CSV (same filters and scope as the list), for compliance reviews."""
+    rows = db.scalars(_filtered_audit(db, user, entity_type, actor_user_id, q).limit(limit)).all()
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(["id", "created_at", "actor_user_id", "actor_name", "action",
+                     "entity_type", "entity_id", "bug_id", "detail"])
     for r in rows:
         writer.writerow([
-            r.id,
-            r.created_at.isoformat() if r.created_at else "",
-            r.actor_user_id or "",
-            r.actor_name or "",
-            r.action,
-            r.entity_type or "",
-            r.entity_id or "",
-            r.bug_id or "",
-            (r.detail or "").replace("\n", " ").replace("\r", " "),
+            r.id, r.created_at.isoformat() if r.created_at else "", r.actor_user_id or "",
+            _csv_cell(r.actor_name), _csv_cell(r.action), _csv_cell(r.entity_type), r.entity_id or "",
+            r.bug_id or "", _csv_cell(r.detail),
         ])
     return Response(
-        content=buf.getvalue(),
-        media_type="text/csv",
+        content=out.getvalue(), media_type="text/csv",
         headers={"Content-Disposition": 'attachment; filename="audit.csv"'},
     )

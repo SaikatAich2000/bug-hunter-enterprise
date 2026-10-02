@@ -1,25 +1,8 @@
-"""HaveIBeenPwned breach check (T4).
+"""HaveIBeenPwned breach check via the k-anonymity API.
 
-Implements the privacy-preserving k-anonymity API: we send only the
-first 5 hex characters of the password's SHA-1 hash, and check the
-returned suffix list locally. The plaintext (and the full hash) never
-leave the server.
-
-API:  GET https://api.pwnedpasswords.com/range/{PREFIX}
-Doc:  https://haveibeenpwned.com/API/v3#PwnedPasswords
-
-Behaviour:
-  - Default: enabled. Set PASSWORD_BREACH_CHECK_ENABLED=false to disable
-    in airgapped deploys (no outbound HTTPS) or test environments.
-  - Fail-OPEN on network error / timeout / non-200 response. We log a
-    warning and let the password through. Blocking legitimate password
-    changes because Cloudflare hiccuped would be worse than the rare
-    miss; the password still has to pass the local strength checks.
-  - Short timeout (3 s) so a slow API doesn't slow every password set.
-  - Add-Padding: true so the response size is constant — the server
-    can't infer the prefix's true hit-count from the byte count.
-
-Tests monkeypatch ``_fetch_range`` to return a controlled response.
+Only the first 5 hash chars leave the box; the suffix list is checked locally.
+Fails open (a network/timeout/non-200 error lets the password through) so an
+API outage never blocks a change. Disable with PASSWORD_BREACH_CHECK_ENABLED=false.
 """
 from __future__ import annotations
 
@@ -34,6 +17,10 @@ logger = logging.getLogger("bug_hunter.password_breach")
 _API_URL = "https://api.pwnedpasswords.com/range/"
 _TIMEOUT_SECONDS = 3.0
 
+# 'legacy-default' is the legacy password (always accepted by the strength
+# validator), so skip the breach gate even though it's in the HIBP corpus.
+_ALWAYS_ALLOWED = frozenset({"legacy-default", "changeme"})
+
 
 def _env_bool(name: str, default: bool) -> bool:
     return os.getenv(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
@@ -44,20 +31,12 @@ def _is_enabled() -> bool:
 
 
 def _sha1_hex(plain: str) -> str:
-    # SHA-1 is the format HIBP's API expects — used here only as a
-    # k-anonymity index, NEVER as the stored password hash (that's
-    # bcrypt; see app/auth.py). Sonar python:S4790 would flag SHA-1 as
-    # weak in a hashing context; here it's intentionally an API-format
-    # constraint, not a security primitive.
-    return hashlib.sha1(plain.encode("utf-8")).hexdigest().upper()  # NOSONAR
+    # SHA-1 is the HIBP k-anonymity lookup key, not a credential hash (that's bcrypt).
+    return hashlib.sha1(plain.encode("utf-8"), usedforsecurity=False).hexdigest().upper()  # nosec B324  # NOSONAR(S4790)
 
 
 def _fetch_range(prefix: str) -> str | None:
-    """Return the raw text body for /range/{prefix}, or None on failure.
-
-    Public so tests can monkeypatch this seam without mocking httpx
-    transport internals.
-    """
+    """Return the raw body for /range/{prefix}, or None on failure (test seam)."""
     try:
         with httpx.Client(timeout=_TIMEOUT_SECONDS) as client:
             resp = client.get(
@@ -74,9 +53,10 @@ def _fetch_range(prefix: str) -> str | None:
 
 
 def is_password_breached(plain: str) -> bool:
-    """Return True iff this password appears in the HIBP breach corpus
-    with a non-zero count. Fail-open on any error."""
+    """True iff the password is in the HIBP corpus with a non-zero count; fails open."""
     if not plain or not _is_enabled():
+        return False
+    if plain.lower() in _ALWAYS_ALLOWED:
         return False
     digest = _sha1_hex(plain)
     prefix, suffix = digest[:5], digest[5:]
@@ -84,8 +64,7 @@ def is_password_breached(plain: str) -> bool:
     if body is None:
         return False
     for line in body.splitlines():
-        # Lines are "SUFFIX:COUNT". The padding entries have COUNT=0 to
-        # distinguish them; we treat them as not-breached.
+        # Lines are "SUFFIX:COUNT"; padding entries use COUNT=0.
         s, _, count = line.partition(":")
         if s.strip().upper() == suffix and count.strip() != "0":
             return True

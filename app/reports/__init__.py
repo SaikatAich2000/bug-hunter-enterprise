@@ -1,21 +1,6 @@
-"""Bug Hunter reporting engine.
+"""Reporting engine: catalog (types), engine (Filters + run_report), xlsx (workbook writer).
 
-Single source of truth for every report the system can produce. The same
-engine powers:
-
-  - The REST API at /api/reports/*  (driven by the Reports sidebar view).
-  - The Sleuth chatbot's "report" intent (natural-language → same reports).
-
-Why one engine in two callers? So a manager who clicks "Throughput,
-last 7 days" in the UI gets exactly the same numbers as a manager who
-asks Sleuth "who resolved how many bugs last week". No drift, one set
-of tests.
-
-What lives here:
-  catalog.py  — the registry of report types + their default filters.
-  engine.py   — Filters dataclass + run_report() dispatcher + every
-                per-report query implementation.
-  xlsx.py     — multi-sheet workbook writer shared by both callers.
+Shared by the REST API and the Sleuth chatbot so both return the same numbers.
 """
 from __future__ import annotations
 

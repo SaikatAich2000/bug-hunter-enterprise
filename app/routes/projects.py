@@ -1,22 +1,27 @@
-"""Projects API — org-scoped, with project-membership visibility rules."""
-from __future__ import annotations
+"""Projects API. Every project belongs to the caller's organization; others are invisible.
 
-import re
+Permissions:
+  - Read   : projects the caller is a member of (every project of the organization for admins).
+  - Create : admin or manager (require_manager_or_admin).
+  - Update : admin or manager.
+  - Delete : admin only.
+"""
+from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.auth import (
+from app.access import (
     accessible_project_ids,
+    add_user_project,
     can_access_project,
-    can_create_project,
-    can_delete_project,
     can_manage_project,
-    get_current_user,
-    get_org_project_or_404,
 )
+from app.agile import boards as boards_svc
+from app.api_docs import CONFLICT_409, NOT_FOUND_404, NOT_FOUND_CONFLICT_409
+from app.auth import get_current_user, require_admin, require_manager_or_admin
 from app.database import get_db
 from app.models import (
     PROJECT_ROLE_LEAD,
@@ -24,261 +29,182 @@ from app.models import (
     Activity,
     Bug,
     Project,
-    ProjectMembership,
     User,
+    user_projects,
 )
-from app.schemas import ProjectIn, ProjectOut
+from app.schemas import ProjectCreateIn, ProjectIn, ProjectOut
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
-# S1192: extract duplicated detail string into a module constant.
+
 _DETAIL_PROJECT_NOT_FOUND = "Project not found"
 
-
-def _audit(db: Session, org_id: int, actor: User, action: str, entity_id: int, detail: str) -> None:
+def _audit(db: Session, actor: User, action: str, entity_id: int, detail: str) -> None:
     db.add(Activity(
-        org_id=org_id, bug_id=None, entity_type="project", entity_id=entity_id,
+        org_id=actor.org_id, bug_id=None, entity_type="project", entity_id=entity_id,
         actor_user_id=actor.id, actor_name=actor.name,
         action=action, detail=detail,
     ))
 
 
-_KEY_BAD = re.compile(r"[^A-Z0-9]+")
+def _name_taken(db: Session, org_id: int, name: str, exclude_id: int | None = None) -> bool:
+    stmt = select(Project.id).where(Project.org_id == org_id, Project.name == name)
+    if exclude_id is not None:
+        stmt = stmt.where(Project.id != exclude_id)
+    return db.scalar(stmt) is not None
 
 
-def _derive_key(name: str) -> str:
-    """Pick a reasonable default project key from the project name.
-    e.g. "Marketing Site" → "MS"; "Web" → "WEB"; "1" → "P1".
-    Caller appends a numeric suffix on collision."""
-    words = [w for w in re.split(r"\s+", (name or "").strip()) if w]
-    if not words:
-        return "P"
-    if len(words) == 1:
-        s = words[0].upper()
-        s = _KEY_BAD.sub("", s)
-        if not s:
-            return "P"
-        return s[:6] if s[0].isalpha() else f"P{s[:5]}"
-    initials = "".join(w[0] for w in words[:4]).upper()
-    initials = _KEY_BAD.sub("", initials)
-    if not initials:
-        return "P"
-    if not initials[0].isalpha():
-        initials = "P" + initials
-    return initials[:6]
+def _key_taken(db: Session, org_id: int, key: str, exclude_id: int | None = None) -> bool:
+    stmt = select(Project.id).where(Project.org_id == org_id, Project.key == key)
+    if exclude_id is not None:
+        stmt = stmt.where(Project.id != exclude_id)
+    return db.scalar(stmt) is not None
 
 
-def _unique_key(db: Session, org_id: int, base: str) -> str:
-    cand = base
-    n = 2
-    while db.scalar(select(Project.id).where(Project.org_id == org_id, Project.key == cand)):
-        cand = f"{base}{n}"
-        n += 1
-        if n > 999:
-            raise HTTPException(status_code=500, detail="Could not generate a unique project key")
-    return cand
-
-
-def _to_out(p: Project, can_manage: bool, member_count: int) -> dict:
+def _project_out(db: Session, user: User, project: Project, member_count: int | None = None,
+                 can_manage: bool | None = None) -> dict:
+    if can_manage is None:
+        can_manage = can_manage_project(db, user, project)
+    if member_count is None:
+        member_count = db.scalar(
+            select(func.count()).select_from(user_projects)
+            .where(user_projects.c.project_id == project.id)
+        ) or 0
     return {
-        "id": p.id,
-        "name": p.name,
-        "key": p.key or "",
-        "description": p.description,
-        "color": p.color,
-        "created_at": p.created_at,
-        "updated_at": p.updated_at,
+        "id": project.id, "name": project.name, "key": project.key,
+        "description": project.description, "color": project.color,
+        "created_at": project.created_at, "updated_at": project.updated_at,
         "can_manage": can_manage,
-        "member_count": member_count,
+        "member_count": int(member_count),
     }
 
 
-# ---------------------------------------------------------------------------
-# List
-# ---------------------------------------------------------------------------
 @router.get("", response_model=list[ProjectOut])
 def list_projects(
-    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ) -> list[dict]:
-    ids = accessible_project_ids(db, user)
-    if not ids:
+    accessible = accessible_project_ids(db, user)
+    if not accessible:
         return []
     rows = list(db.scalars(
-        select(Project).where(Project.id.in_(ids)).order_by(func.lower(Project.name))
+        select(Project).where(Project.id.in_(accessible))
+        .order_by(func.lower(Project.name)).limit(500)
     ).all())
-
-    # Bulk member counts for the visible projects.
-    counts: dict[int, int] = {}
-    if rows:
-        for pid, cnt in db.execute(
-            select(ProjectMembership.project_id, func.count(ProjectMembership.id))
-            .where(ProjectMembership.project_id.in_([p.id for p in rows]))
-            .group_by(ProjectMembership.project_id)
-        ).all():
-            counts[pid] = int(cnt)
-
-    out = []
-    for p in rows:
-        out.append(_to_out(p, can_manage_project(db, user, p), counts.get(p.id, 0)))
-    return out
+    counts = dict(db.execute(
+        select(user_projects.c.project_id, func.count())
+        .where(user_projects.c.project_id.in_([p.id for p in rows]))
+        .group_by(user_projects.c.project_id)
+    ).all())
+    led = set(db.scalars(
+        select(user_projects.c.project_id)
+        .where(user_projects.c.user_id == user.id, user_projects.c.role == PROJECT_ROLE_LEAD)
+    ).all())
+    return [
+        _project_out(db, user, p, counts.get(p.id, 0), can_manage=user.role == ROLE_ADMIN or p.id in led)
+        for p in rows
+    ]
 
 
-# ---------------------------------------------------------------------------
-# Create
-# ---------------------------------------------------------------------------
-@router.post("", response_model=ProjectOut, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=ProjectOut, status_code=status.HTTP_201_CREATED, responses=CONFLICT_409)
 def create_project(
-    payload: ProjectIn,
-    actor: User = Depends(get_current_user),
+    payload: ProjectCreateIn,
     db: Session = Depends(get_db),
+    actor: User = Depends(require_manager_or_admin),
 ) -> dict:
-    if not can_create_project(actor):
-        raise HTTPException(
-            status_code=403,
-            detail="Only admins and managers can create projects.",
-        )
-
-    # Key handling: if the user explicitly named a key, it must be exactly
-    # that — otherwise auto-suffixing would silently break their intent
-    # (e.g. they typed "WEB", we'd hand them back "WEB2"). Only auto-pick
-    # when no key was supplied.
-    if payload.key:
-        key = payload.key
-        if db.scalar(select(Project.id).where(
-            Project.org_id == actor.org_id, Project.key == key,
-        )):
-            raise HTTPException(
-                status_code=409,
-                detail=f"Project key '{key}' already in use in your organization.",
-            )
-    else:
-        key = _unique_key(db, actor.org_id, _derive_key(payload.name))
-
-    p = Project(
-        org_id=actor.org_id,
-        name=payload.name,
-        key=key,
-        description=payload.description,
-        color=payload.color,
-    )
+    fields = payload.model_dump(exclude={"agile_enabled", "key"})
+    if _name_taken(db, actor.org_id, fields["name"]):
+        raise HTTPException(status_code=409, detail="Project name already exists")
+    if payload.key and _key_taken(db, actor.org_id, payload.key):
+        raise HTTPException(status_code=409, detail="Project key already exists")
+    p = Project(org_id=actor.org_id, key=payload.key or "", **fields)
     db.add(p)
     try:
         db.flush()
     except IntegrityError as exc:
         db.rollback()
-        raise HTTPException(
-            status_code=409,
-            detail="Project name or key already exists in your organization.",
-        ) from exc
-
-    # Auto-add the creator as a project lead. Admins technically already
-    # have access without this row, but giving them an explicit lead row
-    # keeps the member list visible and consistent.
-    db.add(ProjectMembership(
-        project_id=p.id, user_id=actor.id, role=PROJECT_ROLE_LEAD,
-    ))
-
-    _audit(db, actor.org_id, actor, "project_created", p.id,
-           f"Created project '{p.name}' ({p.key})")
+        raise HTTPException(status_code=409, detail="Project name or key already exists") from exc
+    # Optional Agile activation in the same transaction: a failure rolls the
+    # whole creation back, so a project is never left half-configured (no board
+    # while agile_enabled says otherwise).
+    if payload.agile_enabled:
+        try:
+            boards_svc.activate_agile_for_project(db, p, actor, {})
+        except boards_svc.AgileActivationError as exc:
+            db.rollback()
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    # auto-enroll the creating manager so they keep visibility of their new project
+    if actor.role != ROLE_ADMIN:
+        add_user_project(db, actor.id, p.id, PROJECT_ROLE_LEAD)
+    _audit(db, actor, "project_created", p.id, f"Created project '{p.name}' ({p.key})")
+    if payload.agile_enabled:
+        _audit(db, actor, "agile_enabled", p.id, f"Enabled Agile for project '{p.name}'")
     db.commit()
     db.refresh(p)
-    return _to_out(p, can_manage=True, member_count=1)
+    return _project_out(db, actor, p)
 
 
-# ---------------------------------------------------------------------------
-# Get one
-# ---------------------------------------------------------------------------
-@router.get("/{project_id}", response_model=ProjectOut)
+@router.get("/{project_id}", response_model=ProjectOut, responses=NOT_FOUND_404)
 def get_project(
     project_id: int,
-    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ) -> dict:
-    p = get_org_project_or_404(db, project_id, user)
-    if not can_access_project(db, user, p):
+    p = db.get(Project, project_id)
+    # 404 not 403 — scoping must not leak existence
+    if p is None or not can_access_project(accessible_project_ids(db, user), project_id):
         raise HTTPException(status_code=404, detail=_DETAIL_PROJECT_NOT_FOUND)
-    cnt = db.scalar(
-        select(func.count(ProjectMembership.id))
-        .where(ProjectMembership.project_id == p.id)
-    ) or 0
-    return _to_out(p, can_manage_project(db, user, p), int(cnt))
+    return _project_out(db, user, p)
 
 
-# ---------------------------------------------------------------------------
-# Update
-# ---------------------------------------------------------------------------
-@router.put("/{project_id}", response_model=ProjectOut)
+@router.put("/{project_id}", response_model=ProjectOut, responses=NOT_FOUND_CONFLICT_409)
 def update_project(
     project_id: int,
     payload: ProjectIn,
-    actor: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    actor: User = Depends(require_manager_or_admin),
 ) -> dict:
-    p = get_org_project_or_404(db, project_id, actor)
-    if not can_manage_project(db, actor, p):
-        raise HTTPException(
-            status_code=403,
-            detail="Only admins or this project's leads can edit it.",
-        )
-
-    fields = payload.model_dump()
-    # Key handling: only update if explicitly provided.
-    new_key = fields.pop("key", None)
+    p = db.get(Project, project_id)
+    # 404 not 403 — scoping must not leak existence
+    if p is None or not can_access_project(accessible_project_ids(db, actor), project_id):
+        raise HTTPException(status_code=404, detail=_DETAIL_PROJECT_NOT_FOUND)
+    # exclude_unset so omitted fields aren't reset to schema defaults
+    fields = payload.model_dump(exclude_unset=True)
+    if fields.get("key") is None:
+        fields.pop("key", None)
+    if "name" in fields and _name_taken(db, p.org_id, fields["name"], exclude_id=p.id):
+        raise HTTPException(status_code=409, detail="Project name already exists")
+    if "key" in fields and _key_taken(db, p.org_id, fields["key"], exclude_id=p.id):
+        raise HTTPException(status_code=409, detail="Project key already exists")
     changes = []
-    for k, v in fields.items():
-        old = getattr(p, k)
-        if old != v:
-            changes.append(f"{k}: {old!r} → {v!r}")
-            setattr(p, k, v)
-    if new_key and new_key != p.key:
-        # Validator already uppercased / shape-checked.
-        if db.scalar(select(Project.id).where(
-            Project.org_id == p.org_id, Project.key == new_key, Project.id != p.id,
-        )):
-            raise HTTPException(
-                status_code=409,
-                detail="Project key already in use in this organization.",
-            )
-        changes.append(f"key: {p.key!r} → {new_key!r}")
-        p.key = new_key
-
+    for key, value in fields.items():
+        old = getattr(p, key)
+        if old != value:
+            changes.append(f"{key}: {old!r} → {value!r}")
+            setattr(p, key, value)
     try:
         db.flush()
     except IntegrityError as exc:
         db.rollback()
-        raise HTTPException(
-            status_code=409,
-            detail="Project name or key already exists in your organization.",
-        ) from exc
-
+        raise HTTPException(status_code=409, detail="Project name or key already exists") from exc
     if changes:
-        _audit(db, actor.org_id, actor, "project_updated", p.id,
+        _audit(db, actor, "project_updated", p.id,
                f"Updated project '{p.name}': " + "; ".join(changes))
     db.commit()
     db.refresh(p)
-    cnt = db.scalar(
-        select(func.count(ProjectMembership.id))
-        .where(ProjectMembership.project_id == p.id)
-    ) or 0
-    return _to_out(p, can_manage_project(db, actor, p), int(cnt))
+    return _project_out(db, actor, p)
 
 
-# ---------------------------------------------------------------------------
-# Delete
-# ---------------------------------------------------------------------------
-@router.delete("/{project_id}")
+@router.delete("/{project_id}", responses=NOT_FOUND_CONFLICT_409)
 def delete_project(
     project_id: int,
-    actor: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-) -> dict:
-    p = get_org_project_or_404(db, project_id, actor)
-    if not can_delete_project(db, actor, p):
-        raise HTTPException(
-            status_code=403,
-            detail="Only org admins can delete projects.",
-        )
+    actor: User = Depends(require_admin),
+) -> dict[str, str]:
+    # FOR UPDATE closes the count-then-delete race with a concurrent bug insert
+    p = db.get(Project, project_id, with_for_update=True)
+    if p is None or p.org_id != actor.org_id:
+        raise HTTPException(status_code=404, detail=_DETAIL_PROJECT_NOT_FOUND)
 
     bug_count = db.scalar(
         select(func.count(Bug.id)).where(Bug.project_id == project_id)
@@ -290,7 +216,6 @@ def delete_project(
         )
     name = p.name
     db.delete(p)
-    _audit(db, actor.org_id, actor, "project_deleted", project_id,
-           f"Deleted project '{name}'")
+    _audit(db, actor, "project_deleted", project_id, f"Deleted project '{name}'")
     db.commit()
     return {"message": "Project deleted"}

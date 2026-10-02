@@ -1,22 +1,5 @@
-"""XLSX writer for reports.
-
-Produces a multi-sheet workbook from a ReportResult:
-
-  Sheet 1: Summary / aggregate table (matches what's shown on screen).
-  Sheet 2: Items (drill-down detail) — only present when the report has
-           detail rows (every aggregated report does; "item_detail" /
-           "pending_snapshot" / "aging" put their data in sheet 1
-           directly).
-  Sheet 3: Filters Applied — audit trail of what filters generated this
-           file, plus the date and run-time summary numbers. Crucial for
-           a manager who gets forwarded the file weeks later and wants
-           to know what it represents.
-
-Reused by:
-  - app/routes/reports.py — streams the bytes as a download response.
-  - app/chatbot/excel.py  — re-stages the bytes under a download token
-                            for Sleuth's chat-bubble file block.
-"""
+"""XLSX writer for reports: main report sheet, optional Items drill-down, Filters
+Applied sheet. Used by routes/reports.py and chatbot/excel.py."""
 from __future__ import annotations
 
 import io
@@ -31,7 +14,8 @@ try:
 except ImportError:   # pragma: no cover — broken installs only
     OPENPYXL_AVAILABLE = False
 
-from app.reports.engine import ReportResult, ReportColumn
+from app.config import get_settings
+from app.reports.engine import ReportColumn, ReportResult
 
 
 class XlsxBuildError(Exception):
@@ -45,20 +29,18 @@ _BANNER_FG = "FFFFFF"
 _ZEBRA_FILL = "F2F4F8"
 
 
-# G2 (inherited from the legacy CSV export): Excel / LibreOffice / Numbers
-# interpret a cell whose value starts with one of these characters as a
-# FORMULA, not text. A bug title like `=cmd|'/c calc.exe'!A1` would
-# therefore execute when the workbook is opened — the same attack surface
-# the CSV export defended against. We neutralise by prefixing such cells
-# with a single quote (OWASP-recommended). The quote is consumed by Excel
-# on display so the user still sees the original text.
-_FORMULA_TRIGGERS = ("=", "+", "-", "@", "\t", "\r")
+# Formula-injection guard: a leading char here makes Excel treat the cell as
+# a formula (e.g. `=cmd|'/c calc'!A1`). OWASP fix: prefix with a quote.
+_FORMULA_TRIGGERS = ("=", "+", "-", "@", "\t", "\r", "\n")
 
 
 def _defang_formula_text(s: str) -> str:
-    """Prefix a string with `'` when it leads with a formula trigger so
-    spreadsheet apps render it as text. Idempotent on already-safe text."""
-    if s and s[0] in _FORMULA_TRIGGERS:
+    """Prefix with a quote if s starts with a formula trigger (checks both
+    the raw and whitespace-stripped first char — Excel trims leading spaces)."""
+    if not s:
+        return s
+    stripped = s.lstrip()
+    if s[0] in _FORMULA_TRIGGERS or (stripped and stripped[0] in _FORMULA_TRIGGERS):
         return "'" + s
     return s
 
@@ -72,10 +54,9 @@ def _ensure_openpyxl() -> None:
 
 
 def _coerce(value: Any) -> Any:
-    """Coerce a row value into something openpyxl will accept without
-    raising. None → '', dicts/lists → repr, datetimes → ISO string. All
-    strings flow through _defang_formula_text so a malicious bug title
-    can't execute as an Excel formula when the workbook is opened."""
+    """Convert a row value to something openpyxl accepts. None becomes '',
+    datetimes become ISO strings, and all strings are passed through
+    _defang_formula_text to block formula injection."""
     if value is None:
         return ""
     if isinstance(value, bool):
@@ -101,8 +82,8 @@ def _write_table(
     """Write a banner + header + rows. Returns the next free row index."""
     ncols = max(1, len(columns))
 
-    # Banner row.
-    banner_cell = ws.cell(row=start_row, column=1, value=banner)
+    # Defang banner/headers too, even though they're server-controlled today.
+    banner_cell = ws.cell(row=start_row, column=1, value=_defang_formula_text(banner))
     banner_cell.font = Font(bold=True, color=_BANNER_FG, size=12)
     banner_cell.fill = PatternFill("solid", fgColor=_BANNER_FILL)
     banner_cell.alignment = Alignment(horizontal="left", vertical="center")
@@ -117,7 +98,7 @@ def _write_table(
     header_fill = PatternFill("solid", fgColor=_HEADER_FILL)
     header_font = Font(bold=True, color=_HEADER_FG)
     for idx, col in enumerate(columns, start=1):
-        cell = ws.cell(row=header_row, column=idx, value=col.label)
+        cell = ws.cell(row=header_row, column=idx, value=_defang_formula_text(col.label))
         cell.fill = header_fill
         cell.font = header_font
         cell.alignment = Alignment(horizontal="left", vertical="center")
@@ -187,7 +168,8 @@ def _write_filters_block(ws, result: ReportResult, start_row: int) -> int:
     f = result.filters or {}
     for key, label in _FILTER_LABELS:
         ws.cell(row=row, column=1, value=label)
-        ws.cell(row=row, column=2, value=_format_filter_display(f.get(key)))
+        # text_search/label are user free-text — defang like data cells.
+        ws.cell(row=row, column=2, value=_coerce(_format_filter_display(f.get(key))))
         row += 1
     return row
 
@@ -208,7 +190,7 @@ def _write_summary_block(ws, result: ReportResult, start_row: int) -> int:
 
 def _write_filters_sheet(ws, result: ReportResult) -> None:
     ws.title = "Filters Applied"
-    ws.cell(row=1, column=1, value=f"Bug Hunter — {result.report_label}").font = Font(bold=True, size=12)
+    ws.cell(row=1, column=1, value=f"{get_settings().APP_NAME} — {result.report_label}").font = Font(bold=True, size=12)
     ws.cell(row=2, column=1, value=f"Generated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}")
     ws.cell(row=3, column=1, value=f"Total rows: {result.total}")
     ws.column_dimensions["A"].width = 24

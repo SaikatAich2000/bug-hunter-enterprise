@@ -1,33 +1,7 @@
-"""Sleuth Layer 2 — statistical intent classifier.
+"""Sleuth Layer 2 — statistical intent classifier (pure-Python TF-IDF + cosine).
 
-The rule-based parser in nlu.py handles the queries it can recognise
-verbatim. This module catches paraphrases the rules miss. It runs in
-pure Python with no external model files, no GPU, and a tiny memory
-footprint — the entire trained state is the corpus dict below plus a
-handful of tiny floats.
-
-How it works:
-- A small hand-curated corpus maps example phrasings to intent labels.
-- We compute IDF weights once at import time over the corpus.
-- For each incoming message, we tokenise + normalise + compute a TF-IDF
-  vector and find the highest cosine-similarity intent.
-- A confidence threshold gates whether we trust the prediction. Below
-  threshold → return None and let the caller fall through to LLM (if
-  installed) or return "unknown".
-
-Why this works:
-- Bug-tracker vocabulary is finite. "show me the open ones" / "list all
-  open" / "what's still open" all share enough overlapping tokens that
-  IDF cosine similarity ranks them next to each other.
-- It's deterministic, debuggable, and runs in microseconds on a single
-  CPU core. Adding new examples to the corpus is the way to "train" it.
-
-Why not a neural model:
-- Loading a real classifier (DistilBERT, MiniLM) takes 100-500MB RAM
-  for marginal benefit on this constrained vocabulary. On a 2 GB box
-  every megabyte spent on the model is a megabyte not available for
-  the database connection pool, the request workers, or the OS file
-  cache. A 5 KB corpus is a much better trade.
+Catches paraphrases the rule engine in nlu.py misses. Below the confidence
+threshold it returns None, leaving dispatch to the LLM or "unknown".
 """
 from __future__ import annotations
 
@@ -36,13 +10,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 
-
-# ---------------------------------------------------------------------------
-# Training corpus
-# ---------------------------------------------------------------------------
-# Each tuple is (intent_label, list_of_example_phrasings). The labels are
-# the same strings nlu.parse() emits as `pq.intent`, so executor.execute()
-# can dispatch on them uniformly.
+# (intent_label, example_phrasings); labels match nlu.parse() intents.
 _CORPUS: list[tuple[str, list[str]]] = [
     ("greeting", [
         "hi", "hello", "hey there", "good morning", "yo", "howdy",
@@ -93,7 +61,6 @@ _CORPUS: list[tuple[str, list[str]]] = [
         "bug 5", "show bug 12", "details of #42", "tell me about bug 7",
         "info on issue 3", "what is bug 99", "look up bug #1",
     ]),
-    # ----- ACTION INTENTS -----
     ("action_assign", [
         "assign bug 5 to alice", "give bug 5 to bob", "assign #12 to carol",
         "delegate bug 3 to alice", "hand bug 7 over to bob",
@@ -130,15 +97,11 @@ _CORPUS: list[tuple[str, list[str]]] = [
         "create a project called mercury",
         "add a new project named sentinel",
         "register a project: customer portal",
-        "set up a project for the mobile app",
+        "set up a project for the web portal",
     ]),
 ]
 
 
-# ---------------------------------------------------------------------------
-# Tokenisation — kept simple: lowercase, alphanumeric, drop very short tokens
-# unless they look like a bug id.
-# ---------------------------------------------------------------------------
 _TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
 _STOPWORDS = {
     "a", "an", "the", "is", "are", "be", "to", "of", "for", "and", "or",
@@ -150,9 +113,8 @@ _STOPWORDS = {
 
 
 def _tokenize(text: str) -> list[str]:
-    """Lowercase + alnum-extract + stop-word drop. The bug-id placeholder
-    `<NUM>` is substituted in for any pure-digit token so the classifier
-    treats `bug 5` and `bug 12` identically."""
+    """Lowercase alphanumeric tokens minus stop-words; digits become ``<num>``
+    so "bug 5" and "bug 12" vectorize the same."""
     if not text:
         return []
     tokens: list[str] = []
@@ -166,9 +128,7 @@ def _tokenize(text: str) -> list[str]:
     return tokens
 
 
-# ---------------------------------------------------------------------------
-# Train: compute IDF over the corpus once at import time.
-# ---------------------------------------------------------------------------
+# IDF weights computed once at import time.
 @dataclass
 class _TrainedModel:
     docs: list[tuple[str, Counter[str]]]   # [(intent, term_counts), ...]
@@ -190,13 +150,12 @@ def _train(corpus: list[tuple[str, list[str]]]) -> _TrainedModel:
     for _intent, tc in docs:
         for term in tc:
             df[term] += 1
-    # Smoothed IDF — log((1 + N) / (1 + df)) + 1, like sklearn's default.
+    # Smoothed IDF: log((1+N)/(1+df)) + 1, matching sklearn's default.
     idf: dict[str, float] = {
         t: math.log((1 + n) / (1 + d)) + 1.0
         for t, d in df.items()
     }
-    # Pre-compute each doc's vector norm so cosine doesn't have to redo
-    # it per query.
+    # Cache doc norms so cosine is a single dot product per query.
     doc_norms: list[float] = []
     for _intent, tc in docs:
         s = 0.0
@@ -211,9 +170,6 @@ def _train(corpus: list[tuple[str, list[str]]]) -> _TrainedModel:
 _MODEL = _train(_CORPUS)
 
 
-# ---------------------------------------------------------------------------
-# Predict
-# ---------------------------------------------------------------------------
 @dataclass
 class Prediction:
     intent: str
@@ -249,20 +205,17 @@ def _cosine(qc: Counter[str], q_norm: float,
 
 
 def predict(message: str, threshold: float = 0.35) -> Prediction | None:
-    """Return the most likely intent label for `message`, or None if the
-    classifier isn't confident enough.
-
-    The threshold is calibrated so paraphrases of corpus examples cross
-    it but free-form noise ("xyzzy frobnicate qux") doesn't. Bumping it
-    higher trades coverage for precision — see _classifier_test.py for
-    the calibration data."""
+    """Return the most likely intent for ``message``, or None below the
+    confidence threshold (calibrated: paraphrases pass, noise doesn't)."""
     tokens = _tokenize(message)
     if not tokens:
         return None
+    # A <num>-only message ("is it 5?") has no signal but can spuriously match
+    # corpus docs that also contain <num>.
+    if all(t == "<num>" for t in tokens):
+        return None
     qc, q_norm = _vec(tokens, _MODEL.idf)
 
-    # Per-intent best score: a single message can match any one example
-    # in any intent's example list, and we pick the overall max.
     best_intent = ""
     best_score = -1.0
     runner_intent = ""
@@ -271,7 +224,7 @@ def predict(message: str, threshold: float = 0.35) -> Prediction | None:
         score = _cosine(qc, q_norm, dc, d_norm, _MODEL.idf)
         if score > best_score:
             if best_intent != intent:
-                # Different intent winning — old best becomes runner-up.
+                # New top intent from a different class — demote old best.
                 runner_intent = best_intent
                 runner_score = best_score
             best_intent = intent
@@ -290,10 +243,7 @@ def predict(message: str, threshold: float = 0.35) -> Prediction | None:
     )
 
 
-# ---------------------------------------------------------------------------
-# Convenience: explain why we picked something. Useful for debugging
-# misclassifications without firing up a Python REPL.
-# ---------------------------------------------------------------------------
+# Debug helper: per-doc scores for a message.
 def explain(message: str, top_k: int = 5) -> list[tuple[str, float]]:
     tokens = _tokenize(message)
     if not tokens:

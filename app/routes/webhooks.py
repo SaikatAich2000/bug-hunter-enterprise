@@ -1,14 +1,15 @@
-"""Webhooks CRUD — outbound HTTP integrations for an organization.
+"""Webhooks API: outbound HTTP integrations for the caller's organization (admins only).
 
-Endpoints (admin-only — webhooks fire org-wide, so creators must have
-org-admin rights to avoid privilege escalation via 3rd-party listeners).
+Webhooks fire organization-wide, so only admins manage them. The signing secret is shown
+once, when a hook is created or its secret rotated, and never again.
 
-  GET    /api/webhooks                     — list this org's hooks
-  POST   /api/webhooks                     — create one
-  GET    /api/webhooks/{id}                — detail
-  PUT    /api/webhooks/{id}                — edit name/url/events/is_active
-  DELETE /api/webhooks/{id}                — remove
-  POST   /api/webhooks/{id}/test           — fire a synthetic ping event
+  GET    /api/webhooks                     list
+  POST   /api/webhooks                     create (returns the secret)
+  GET    /api/webhooks/{id}                detail
+  PUT    /api/webhooks/{id}                edit name, url, events, is_active
+  POST   /api/webhooks/{id}/rotate-secret  new signing secret (returned once)
+  DELETE /api/webhooks/{id}                remove
+  POST   /api/webhooks/{id}/test           queue a synthetic webhook.ping
 """
 from __future__ import annotations
 
@@ -21,65 +22,17 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.auth import get_current_user, require_admin
-from app.config import get_settings
+from app.api_docs import BAD_REQUEST_NOT_FOUND_404, NOT_FOUND_404
+from app.auth import require_admin
 from app.database import get_db
-from app.models import Activity, Webhook, User
-from app.webhooks_delivery import deliver_event
+from app.models import Activity, User, Webhook
+from app.secrets_box import seal
+from app.webhooks_delivery import MAX_CONSECUTIVE_FAILURES, WebhookTargetError, check_hostname, deliver_event
 
 router = APIRouter(prefix="/api/webhooks", tags=["webhooks"])
 
-_URL_RE = re.compile(r"^https?://[\w\-.:/%?&=#~+,;@!$'()*]+$", re.IGNORECASE)
-
-# Hostname suffixes that resolve inside private infrastructure even
-# though they aren't IP literals. ".internal" covers GCP metadata
-# (metadata.google.internal); ".local" is mDNS.
-_BLOCKED_HOST_SUFFIXES = (".localhost", ".local", ".internal")
-_BLOCKED_HOSTS = frozenset({"localhost", "metadata.google.internal"})
-
-_SSRF_ERROR = (
-    "Webhook URLs must point at a public host (no localhost / private ranges)."
-)
-
-
-def _reject_non_public_host(url: str) -> None:
-    """Raise ValueError unless the URL's host is plausibly public.
-
-    IP literals (v4, v6, and integer/short forms that ipaddress accepts)
-    are rejected when loopback / private / link-local / reserved /
-    multicast / unspecified. Known-internal hostnames are rejected by
-    name. DNS names we cannot classify are allowed — resolve-time
-    rebinding is out of scope for this layer (delivery has no redirect
-    following and a short timeout, which bounds the blast radius).
-    """
-    import ipaddress
-    from urllib.parse import urlparse
-
-    try:
-        host = urlparse(url).hostname or ""
-    except ValueError as exc:  # malformed IPv6 brackets etc.
-        raise ValueError(_SSRF_ERROR) from exc
-    host = host.strip().lower().rstrip(".")
-    if not host:
-        raise ValueError(_SSRF_ERROR)
-    if host in _BLOCKED_HOSTS or host.endswith(_BLOCKED_HOST_SUFFIXES):
-        raise ValueError(_SSRF_ERROR)
-    # Plain integers ("2130706433") parse as IPv4 — catch decimal forms.
-    candidate = host
-    if candidate.isdigit():
-        try:
-            candidate = str(ipaddress.ip_address(int(candidate)))
-        except ValueError:
-            return
-    try:
-        ip = ipaddress.ip_address(candidate)
-    except ValueError:
-        return  # DNS hostname — allowed
-    if (
-        ip.is_loopback or ip.is_private or ip.is_link_local
-        or ip.is_reserved or ip.is_multicast or ip.is_unspecified
-    ):
-        raise ValueError(_SSRF_ERROR)
+_URL_RE = re.compile(r"^https?://[\w\-.:/%?&=#~+,;@!$'()*\[\]]+$", re.IGNORECASE)
+_EVENT_RE = re.compile(r"^(\*|[a-z_]+(\.[a-z_*]+)*)$")
 
 
 class WebhookOut(BaseModel):
@@ -93,168 +46,167 @@ class WebhookOut(BaseModel):
     last_error: Optional[str] = None
     last_delivered_at: Optional[str] = None
     created_at: str
+    # Only set in the response that creates the hook or rotates its secret.
+    secret: Optional[str] = None
 
     @classmethod
-    def from_row(cls, w: Webhook) -> "WebhookOut":
+    def from_row(cls, hook: Webhook, secret: str | None = None) -> "WebhookOut":
         return cls(
-            id=w.id, name=w.name, url=w.url, events=w.events,
-            is_active=bool(w.is_active),
-            consecutive_failures=int(w.consecutive_failures or 0),
-            last_status_code=w.last_status_code,
-            last_error=w.last_error,
-            last_delivered_at=w.last_delivered_at.isoformat() if w.last_delivered_at else None,
-            created_at=w.created_at.isoformat(),
+            id=hook.id, name=hook.name, url=hook.url, events=hook.events,
+            is_active=bool(hook.is_active),
+            consecutive_failures=int(hook.consecutive_failures or 0),
+            last_status_code=hook.last_status_code, last_error=hook.last_error,
+            last_delivered_at=hook.last_delivered_at.isoformat() if hook.last_delivered_at else None,
+            created_at=hook.created_at.isoformat(), secret=secret,
         )
 
 
+def _check_url(v: str) -> str:
+    v = v.strip()
+    if len(v) > 500:
+        raise ValueError("URL too long")
+    if not _URL_RE.match(v):
+        raise ValueError("URL must start with http:// or https://")
+    try:
+        check_hostname(v)
+    except WebhookTargetError as exc:
+        raise ValueError(str(exc)) from exc
+    return v
+
+
+def _check_events(v: str) -> str:
+    names = [e.strip() for e in v.split(",") if e.strip()]
+    if not names or any(not _EVENT_RE.match(n) for n in names):
+        raise ValueError('events must be "*" or comma-separated names such as bug.created or bug.*')
+    return ",".join(names)
+
+
 class WebhookIn(BaseModel):
-    name: str = Field(..., min_length=1, max_length=80)
-    url: str = Field(..., min_length=1)
-    events: str = Field("*", min_length=1, max_length=500)
+    name: str = Field(min_length=1, max_length=80)
+    url: str = Field(min_length=1)
+    events: str = Field(default="*", min_length=1, max_length=500)
     is_active: bool = True
 
     @field_validator("url")
     @classmethod
-    def _validate_url(cls, v: str) -> str:
-        v = v.strip()
-        settings = get_settings()
-        if len(v) > settings.WEBHOOK_MAX_URL_LENGTH:
-            raise ValueError("URL too long")
-        if not _URL_RE.match(v):
-            raise ValueError("URL must be http:// or https://")
-        # Block SSRF vectors. We disallow private IPs in the hostname so
-        # a malicious admin can't probe internal services. Parse-based
-        # (not substring) so userinfo tricks (http://x@127.0.0.1/),
-        # IPv6 loopback ([::1]), decimal IPs (2130706433) and the full
-        # 172.16/12 range are all caught.
-        _reject_non_public_host(v)
-        return v
+    def _url(cls, v: str) -> str:
+        return _check_url(v)
+
+    @field_validator("events")
+    @classmethod
+    def _events(cls, v: str) -> str:
+        return _check_events(v)
 
 
 class WebhookUpdateIn(BaseModel):
-    name: Optional[str] = Field(None, min_length=1, max_length=80)
+    name: Optional[str] = Field(default=None, min_length=1, max_length=80)
     url: Optional[str] = None
-    events: Optional[str] = Field(None, min_length=1, max_length=500)
+    events: Optional[str] = Field(default=None, min_length=1, max_length=500)
     is_active: Optional[bool] = None
 
     @field_validator("url")
     @classmethod
-    def _validate_url(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
-            return v
-        return WebhookIn._validate_url(v)
+    def _url(cls, v: Optional[str]) -> Optional[str]:
+        return None if v is None else _check_url(v)
+
+    @field_validator("events")
+    @classmethod
+    def _events(cls, v: Optional[str]) -> Optional[str]:
+        return None if v is None else _check_events(v)
 
 
-@router.get("", response_model=list[WebhookOut])
-def list_webhooks(
-    user: User = Depends(require_admin),
-    db: Session = Depends(get_db),
-) -> list[WebhookOut]:
-    rows = list(db.scalars(
-        select(Webhook).where(Webhook.org_id == user.org_id).order_by(Webhook.created_at.desc())
-    ).all())
-    return [WebhookOut.from_row(w) for w in rows]
-
-
-@router.post("", response_model=WebhookOut, status_code=201)
-def create_webhook(
-    payload: WebhookIn,
-    user: User = Depends(require_admin),
-    db: Session = Depends(get_db),
-) -> WebhookOut:
-    w = Webhook(
-        org_id=user.org_id,
-        name=payload.name.strip(),
-        url=payload.url.strip(),
-        events=payload.events.strip(),
-        is_active=payload.is_active,
-        secret=secrets.token_urlsafe(24),
-        created_by_user_id=user.id,
-    )
-    db.add(w)
-    db.flush()
-    db.add(Activity(
-        org_id=user.org_id, bug_id=None, entity_type="webhook", entity_id=w.id,
-        actor_user_id=user.id, actor_name=user.name,
-        action="webhook_created",
-        detail=f"Created webhook '{w.name}' → {w.url}",
-    ))
-    db.commit()
-    db.refresh(w)
-    return WebhookOut.from_row(w)
-
-
-def _get_webhook_or_404(db: Session, hook_id: int, user: User) -> Webhook:
-    w = db.get(Webhook, hook_id)
-    if w is None or w.org_id != user.org_id:
-        raise HTTPException(status_code=404, detail="Webhook not found")
-    return w
-
-
-@router.get("/{hook_id}", response_model=WebhookOut)
-def get_webhook(
-    hook_id: int,
-    user: User = Depends(require_admin),
-    db: Session = Depends(get_db),
-) -> WebhookOut:
-    return WebhookOut.from_row(_get_webhook_or_404(db, hook_id, user))
-
-
-@router.put("/{hook_id}", response_model=WebhookOut)
-def update_webhook(
-    hook_id: int,
-    payload: WebhookUpdateIn,
-    user: User = Depends(require_admin),
-    db: Session = Depends(get_db),
-) -> WebhookOut:
-    w = _get_webhook_or_404(db, hook_id, user)
-    fields = payload.model_dump(exclude_unset=True)
-    if "is_active" in fields and fields["is_active"] and (w.consecutive_failures or 0) >= 10:
-        # Operator re-enabling — reset failure counter so the hook gets
-        # a clean run before auto-suspending again.
-        w.consecutive_failures = 0
-        w.last_error = None
-    for k, v in fields.items():
-        setattr(w, k, v.strip() if isinstance(v, str) else v)
-    db.add(Activity(
-        org_id=user.org_id, bug_id=None, entity_type="webhook", entity_id=w.id,
-        actor_user_id=user.id, actor_name=user.name,
-        action="webhook_updated",
-        detail=f"Updated webhook '{w.name}'",
-    ))
-    db.commit()
-    db.refresh(w)
-    return WebhookOut.from_row(w)
-
-
-@router.delete("/{hook_id}", status_code=204)
-def delete_webhook(
-    hook_id: int,
-    user: User = Depends(require_admin),
-    db: Session = Depends(get_db),
-):
-    w = _get_webhook_or_404(db, hook_id, user)
-    name = w.name
-    db.delete(w)
+def _audit(db: Session, user: User, hook_id: int, action: str, detail: str) -> None:
     db.add(Activity(
         org_id=user.org_id, bug_id=None, entity_type="webhook", entity_id=hook_id,
-        actor_user_id=user.id, actor_name=user.name,
-        action="webhook_deleted",
-        detail=f"Deleted webhook '{name}'",
+        actor_user_id=user.id, actor_name=user.name, action=action, detail=detail,
     ))
+
+
+def _hook_or_404(db: Session, hook_id: int, user: User) -> Webhook:
+    hook = db.get(Webhook, hook_id)
+    if hook is None or hook.org_id != user.org_id:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    return hook
+
+
+@router.get("")
+def list_webhooks(user: User = Depends(require_admin), db: Session = Depends(get_db)) -> list[WebhookOut]:
+    rows = db.scalars(
+        select(Webhook).where(Webhook.org_id == user.org_id)
+        .order_by(Webhook.created_at.desc(), Webhook.id.desc())
+    ).all()
+    return [WebhookOut.from_row(h) for h in rows]
+
+
+@router.post("", status_code=201)
+def create_webhook(
+    payload: WebhookIn, user: User = Depends(require_admin), db: Session = Depends(get_db),
+) -> WebhookOut:
+    secret = secrets.token_urlsafe(24)
+    hook = Webhook(
+        org_id=user.org_id, name=payload.name.strip(), url=payload.url, events=payload.events,
+        is_active=payload.is_active, secret=seal(secret), created_by_user_id=user.id,
+    )
+    db.add(hook)
+    db.flush()
+    _audit(db, user, hook.id, "webhook_created", f"Created webhook '{hook.name}' → {hook.url}")
+    db.commit()
+    db.refresh(hook)
+    return WebhookOut.from_row(hook, secret=secret)
+
+
+@router.get("/{hook_id}", responses=NOT_FOUND_404)
+def get_webhook(hook_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)) -> WebhookOut:
+    return WebhookOut.from_row(_hook_or_404(db, hook_id, user))
+
+
+@router.put("/{hook_id}", responses=NOT_FOUND_404)
+def update_webhook(
+    hook_id: int, payload: WebhookUpdateIn, user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> WebhookOut:
+    hook = _hook_or_404(db, hook_id, user)
+    fields = payload.model_dump(exclude_unset=True)
+    if fields.get("is_active") and hook.consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+        # An operator re-enabling a suspended hook gets a clean run before it can suspend again.
+        hook.consecutive_failures, hook.last_error = 0, None
+    for key, value in fields.items():
+        if value is not None:
+            setattr(hook, key, value.strip() if isinstance(value, str) else value)
+    _audit(db, user, hook.id, "webhook_updated", f"Updated webhook '{hook.name}'")
+    db.commit()
+    db.refresh(hook)
+    return WebhookOut.from_row(hook)
+
+
+@router.post("/{hook_id}/rotate-secret", responses=NOT_FOUND_404)
+def rotate_secret(hook_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)) -> WebhookOut:
+    hook = _hook_or_404(db, hook_id, user)
+    secret = secrets.token_urlsafe(24)
+    hook.secret = seal(secret)
+    _audit(db, user, hook.id, "webhook_secret_rotated", f"Rotated the signing secret of '{hook.name}'")
+    db.commit()
+    db.refresh(hook)
+    return WebhookOut.from_row(hook, secret=secret)
+
+
+@router.delete("/{hook_id}", status_code=204, responses=NOT_FOUND_404)
+def delete_webhook(hook_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)) -> None:
+    hook = _hook_or_404(db, hook_id, user)
+    name = hook.name
+    db.delete(hook)
+    _audit(db, user, hook_id, "webhook_deleted", f"Deleted webhook '{name}'")
     db.commit()
 
 
-@router.post("/{hook_id}/test", status_code=202)
+@router.post("/{hook_id}/test", status_code=202, responses=BAD_REQUEST_NOT_FOUND_404)
 def test_webhook(
-    hook_id: int,
-    background: BackgroundTasks,
-    user: User = Depends(require_admin),
+    hook_id: int, background: BackgroundTasks, user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> dict[str, str]:
-    w = _get_webhook_or_404(db, hook_id, user)
+    hook = _hook_or_404(db, hook_id, user)
     background.add_task(
-        deliver_event, w.org_id, "webhook.ping",
-        {"hook_id": w.id, "name": w.name, "sent_by": user.email},
+        deliver_event, hook.org_id, "webhook.ping",
+        {"hook_id": hook.id, "name": hook.name, "sent_by": user.email}, hook.id,
     )
     return {"message": "Test ping queued"}

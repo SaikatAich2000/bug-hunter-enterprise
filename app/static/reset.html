@@ -3,39 +3,22 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Bug Hunter — Reset password</title>
-  <link rel="icon" type="image/png" href="/static/favicon.png?v=__ASSET_VERSION__" />
-  <link rel="stylesheet" href="/static/styles.css?v=__ASSET_VERSION__" />
+  <meta name="color-scheme" content="dark light" />
+  <meta name="theme-color" content="#171a21" />
+  <meta name="application-name" content="__APP_NAME__" />
+  <meta name="application-version" content="__APP_VERSION__" />
+  <meta name="application-asset-version" content="__ASSET_VERSION__" />
+  <title>__APP_NAME__ — Reset password</title>
+  <link rel="icon" type="image/png" href="/static/icon.png?v=__ASSET_VERSION__" />
+  <!-- No inline theme script (CSP blocks it) — reset/main.jsx sets data-theme before render. -->
+  <script type="module" crossorigin src="/static/assets/reset-CZswJeSJ.js"></script>
+  <link rel="modulepreload" crossorigin href="/static/assets/rich-editor-CxTC-7Dt.js">
+  <link rel="modulepreload" crossorigin href="/static/assets/styles-CX8XhUw8.js">
+  <link rel="modulepreload" crossorigin href="/static/assets/PasswordInput-DHRuUjG9.js">
+  <link rel="modulepreload" crossorigin href="/static/assets/constants-4hghCaqH.js">
+  <link rel="stylesheet" crossorigin href="/static/assets/styles-Q7EM0BXo.css">
 </head>
 <body class="auth-body">
-  <main class="auth-shell">
-    <div class="auth-card">
-      <div class="auth-brand">
-        <h1>Reset your password</h1>
-        <p class="auth-tagline">Pick a new password to finish the reset</p>
-      </div>
-
-      <form id="resetForm" class="auth-form" novalidate>
-        <div id="resetAlert" class="auth-alert" hidden></div>
-        <label class="field">
-          <span>New password <em>*</em></span>
-          <input name="new_password" type="password" required minlength="8" maxlength="200"
-                 autocomplete="new-password" autofocus />
-          <small class="hint">At least 8 characters</small>
-        </label>
-        <label class="field">
-          <span>Confirm new password <em>*</em></span>
-          <input name="confirm_password" type="password" required minlength="8" maxlength="200"
-                 autocomplete="new-password" />
-        </label>
-        <button type="submit" class="btn primary auth-submit" id="resetSubmit">Set new password</button>
-        <div class="auth-links">
-          <a href="/login.html">← Back to sign in</a>
-        </div>
-      </form>
-    </div>
-  </main>
-
-  <script src="/static/reset.js?v=__ASSET_VERSION__" defer></script>
+  <div id="root"></div>
 </body>
 </html>

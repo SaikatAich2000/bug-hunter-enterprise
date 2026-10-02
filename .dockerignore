@@ -7,12 +7,60 @@ __pycache__
 
 # Local DBs / envs / build artefacts
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 .env
+.env.*
+!.env.example
 .venv
 venv
 env
+
+# Coverage / test reports (never needed at runtime)
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+junit.xml
+test-results/
+playwright-report/
+.playwright-mcp/
+
+# Node dependencies (the frontend build stage runs `npm ci` in-image)
+node_modules
+frontend/node_modules
+frontend/dist
+frontend/.eslintcache
+frontend/.vite
+
+# Logs and captured command output
+*.log
+*.exit
+
+# CI / agent scratch (not runtime inputs)
+.github
+.ai
+.claude
+.vscode
+.idea
+
+# Secrets are provisioned on the host and bind-mounted read-only at runtime
+# (see docker-compose.yml) — never ship them in the build context or image
+# layers, even if a future Dockerfile switches to a broad COPY.
+secrets/
+*firebase-admin*.json
+*service-account*.json
+*.pem
+*.key
+*.p12
+*.pfx
+private-key.txt
+
+# Archive artefacts (release bundles are built outside the build context)
+*.zip
+*.tar.gz
 
 # Tests aren't needed at runtime
 tests
@@ -20,9 +68,7 @@ tests
 # Sleuth's optional local LLM model file is mounted as a volume at
 # runtime, not baked into the image. (Model files are typically
 # 300+ MB — keeping them out of the image saves a lot of bandwidth.)
-models/*.gguf
-models/*.bin
-models/*.safetensors
+models/
 
 # Docs / VCS
 .git
@@ -33,3 +79,7 @@ README.md
 # OS noise
 .DS_Store
 Thumbs.db
+
+# API fuzzing / property-testing caches (Schemathesis, Hypothesis)
+.schemathesis/
+.hypothesis/

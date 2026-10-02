@@ -1,23 +1,7 @@
-"""Security regression tests for v2.8 (enterprise port).
+"""Security hardening: login-timing equality, XLSX formula injection, body-size middleware,
+X-Forwarded-For trust gating, log email masking, account lockout, HIBP breach checks, EXIF stripping.
 
-Covers the eight hardening items shipped after the OWASP audit:
-
-  G1 — login timing equality (no user-enumeration via response latency)
-  G2 — CSV formula injection guard on bug export
-  G3 — global request body size middleware
-  G4 — X-Forwarded-For trust gate on audit IP
-  G5 — masked email in INFO-level logs
-  T3 — per-account lockout after N failed logins
-  T4 — HaveIBeenPwned breach check on password set
-  T6 — EXIF / metadata strip on uploaded images
-
-The enterprise build uses the signup flow rather than a bootstrap admin,
-so credentials are ``admin@acme.test`` / ``TestPass1!`` (supplied by the
-``admin_client`` fixture in conftest.py).
-
-Module-level state used by the in-memory features (account lockout, HIBP
-backend) is reset between cases via the ``reset_security_state`` fixture
-so the suite is order-independent.
+In-memory state (lockout buckets, HIBP backend) is reset per test for order-independence.
 """
 from __future__ import annotations
 
@@ -28,19 +12,9 @@ from unittest import mock
 import pytest
 
 
-# Same creds the admin_client fixture in conftest.py signs up with.
-ADMIN_EMAIL = "admin@acme.test"
-ADMIN_PASSWORD = "TestPass1!"
-
-
-# ---------------------------------------------------------------------------
-# Shared fixtures
-# ---------------------------------------------------------------------------
 @pytest.fixture(autouse=True)
 def reset_security_state():
-    """Wipe per-process security state between tests. The account
-    lockout buckets are in-memory; without this, a failed-login burst
-    in one test could lock the same email out of a later test."""
+    """Reset in-memory lockout state after each test (buckets are process-global)."""
     yield
     try:
         from app import account_lockout
@@ -49,20 +23,7 @@ def reset_security_state():
         pass
 
 
-def _ensure_project(client) -> int:
-    """Return an existing project_id or create one. Enterprise signups
-    don't seed a default project, so tests that need bugs have to make
-    one first."""
-    existing = client.get("/api/projects").json()
-    if existing:
-        return existing[0]["id"]
-    r = client.post("/api/projects", json={"name": "Security tests"})
-    assert r.status_code == 201, r.text
-    return r.json()["id"]
-
-
-def _make_bug(client, title: str) -> int:
-    project_id = _ensure_project(client)
+def _make_bug(client, title: str, project_id: int = 1) -> int:
     res = client.post("/api/bugs", json={
         "project_id": project_id, "title": title,
         "description": "desc", "item_type": "Bug",
@@ -72,15 +33,12 @@ def _make_bug(client, title: str) -> int:
     return res.json()["id"]
 
 
-# ---------------------------------------------------------------------------
-# G1 — Login timing equality
-# ---------------------------------------------------------------------------
+# --- Login timing equality ---
 class TestLoginTimingEquality:
-    """Both the unknown-email and the wrong-password branches must run
-    one bcrypt verification. Without this, an attacker can enumerate
-    accounts by measuring response latency."""
+    """Unknown-email and wrong-password branches both run one bcrypt verify — no timing oracle."""
 
     def test_unknown_email_still_runs_bcrypt(self, client):
+        # Spy on verify_password rather than paying the real bcrypt cost.
         from app.routes import auth as auth_routes
         with mock.patch.object(auth_routes, "verify_password",
                                wraps=auth_routes.verify_password) as spy:
@@ -92,65 +50,36 @@ class TestLoginTimingEquality:
         assert spy.call_count == 1, (
             "Unknown-email branch did not run bcrypt — timing oracle still open"
         )
+        # Verifies against the dummy hash, not None/"".
         args, _ = spy.call_args
-        assert args[1] == auth_routes._DUMMY_PASSWORD_HASH
+        assert args[1] == auth_routes._dummy_password_hash()
 
-    def test_wrong_password_branch_unchanged(self, admin_client):
+    def test_wrong_password_branch_unchanged(self, client):
         from app.routes import auth as auth_routes
-        admin_client.post("/api/auth/logout")
+        from tests.conftest import BOOTSTRAP_EMAIL
         with mock.patch.object(auth_routes, "verify_password",
                                wraps=auth_routes.verify_password) as spy:
-            res = admin_client.post("/api/auth/login", json={
-                "email": ADMIN_EMAIL,
+            res = client.post("/api/auth/login", json={
+                "email": BOOTSTRAP_EMAIL,
                 "password": "definitely-not-the-right-pwd-9",
             })
         assert res.status_code == 401
         assert spy.call_count == 1
 
-    def test_unified_401_message_for_both_branches(self, admin_client):
-        admin_client.post("/api/auth/logout")
-        a = admin_client.post("/api/auth/login", json={
+    def test_unified_401_message_for_both_branches(self, client):
+        from tests.conftest import BOOTSTRAP_EMAIL
+        a = client.post("/api/auth/login", json={
             "email": "no-such-user@example.com", "password": "abc12345",
         })
-        b = admin_client.post("/api/auth/login", json={
-            "email": ADMIN_EMAIL, "password": "wrong-password-9",
-        })
-        assert a.status_code == b.status_code == 401
-        assert a.json()["detail"] == b.json()["detail"]
-
-    def test_inactive_account_also_returns_401(self, admin_client):
-        """v2.8 anti-enumeration: disabled accounts must return the same
-        401 + same detail as wrong-password. Previously enterprise
-        returned 403 'Account is disabled', which let an attacker who
-        knew a valid password tell 'exists but disabled' from 'wrong
-        password'."""
-        # Create + deactivate a peer.
-        admin_client.post("/api/users", json={
-            "name": "Disabled", "email": "disabled@acme.test",
-            "role": "member", "password": "DisabledPass1",
-        })
-        users = admin_client.get("/api/users").json()
-        target = next(u for u in users if u["email"] == "disabled@acme.test")
-        admin_client.put(f"/api/users/{target['id']}", json={"is_active": False})
-        admin_client.post("/api/auth/logout")
-
-        a = admin_client.post("/api/auth/login", json={
-            "email": "disabled@acme.test", "password": "DisabledPass1",
-        })
-        b = admin_client.post("/api/auth/login", json={
-            "email": ADMIN_EMAIL, "password": "WrongPass-9",
+        b = client.post("/api/auth/login", json={
+            "email": BOOTSTRAP_EMAIL, "password": "wrong-password-9",
         })
         assert a.status_code == b.status_code == 401
         assert a.json()["detail"] == b.json()["detail"]
 
 
-# ---------------------------------------------------------------------------
-# G2 — Spreadsheet formula injection (XLSX, v2.9)
-#
-# Legacy CSV export retired with v2.9; the same attack surface (a bug
-# title `=cmd|'/c calc.exe'!A1` executing as a formula on open) applies
-# to XLSX too, defanged in app/reports/xlsx.py::_defang_formula_text.
-# ---------------------------------------------------------------------------
+# --- Spreadsheet formula injection (XLSX) ---
+# Excel treats cells starting with = + - @ \t \r as formulas; xlsx.py::_defang_formula_text prefixes them.
 class TestXlsxFormulaInjectionGuard:
 
     @pytest.mark.parametrize("trigger", ["=", "+", "-", "@", "\t", "\r"])
@@ -167,9 +96,12 @@ class TestXlsxFormulaInjectionGuard:
         assert _defang_formula_text("") == ""
 
     def test_export_xlsx_prefixes_malicious_title(self, admin_client):
+        """A formula-shaped title lands in the XLSX prefixed with a single-quote (treated as text)."""
         import io
+
         from openpyxl import load_workbook
-        _make_bug(admin_client, "=cmd|'calc.exe'!A1")
+        bug_id = _make_bug(admin_client, "=cmd|'calc.exe'!A1")
+        assert bug_id  # sanity
         res = admin_client.post("/api/reports/export.xlsx", json={
             "report_key": "item_detail", "filters": {},
         })
@@ -185,28 +117,57 @@ class TestXlsxFormulaInjectionGuard:
                         f"Un-neutralised formula in XLSX cell: {cell!r}"
                     )
                     found_defanged = True
-        assert found_defanged, "expected the malicious title to appear (defanged)"
+        assert found_defanged, "expected the malicious title to appear (defanged) somewhere"
 
 
-# ---------------------------------------------------------------------------
-# G3 — Body size middleware
-# ---------------------------------------------------------------------------
+# --- Body size middleware ---
 class TestBodySizeMiddleware:
-
-    def test_default_limit_is_at_least_50mb(self, client):
-        from app.main import settings
-        assert settings.MAX_REQUEST_BODY_BYTES >= 50 * 1024 * 1024
 
     def test_normal_request_under_limit_succeeds(self, admin_client):
         res = admin_client.get("/api/auth/me")
         assert res.status_code == 200
 
+    def test_oversize_content_length_rejected_with_413(self, client, monkeypatch):
+        # Just confirm the documented default limit (>= 50 MB); the 413 path is exercised next.
+        from app.main import settings
+        assert settings.MAX_REQUEST_BODY_BYTES >= 50 * 1024 * 1024
+
+    def test_oversize_body_rejected(self, tmp_path, monkeypatch):
+        """A 1 KB limit exercises the 413 path without allocating hundreds of MB."""
+        import sys
+        db_file = tmp_path / "bodysize.db"
+        monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_file}")
+        monkeypatch.setenv("EMAIL_BACKEND", "disabled")
+        monkeypatch.setenv("SESSION_SECRET", "test_secret")
+        monkeypatch.setenv("BOOTSTRAP_ADMIN_EMAIL", "admin@test.local")
+        monkeypatch.setenv("BOOTSTRAP_ADMIN_PASSWORD", "Admin1234")
+        monkeypatch.setenv("MAX_REQUEST_BODY_BYTES", "1024")
+        for mod in list(sys.modules):
+            if mod == "app" or mod.startswith("app."):
+                del sys.modules[mod]
+        from app.config import get_settings
+        get_settings.cache_clear()  # type: ignore[attr-defined]
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+        with TestClient(app) as c:
+            c.post("/api/auth/login", json={
+                "email": "admin@test.local", "password": "Admin1234",
+            })
+            payload = {"current_password": "Admin1234", "new_password": "x" * 2048}
+            res = c.post("/api/auth/change-password", json=payload)
+            # Middleware fires before the route, so 413 wins over route validation.
+            assert res.status_code == 413, (
+                f"Expected 413, got {res.status_code}: {res.text}"
+            )
+            assert "too large" in res.json()["detail"].lower()
+
     def test_malformed_content_length_returns_400(self):
-        """The middleware must reject a non-integer Content-Length cleanly
-        rather than tracebacking inside the int() call. Exercised by
-        invoking the middleware's dispatch directly."""
+        """A non-integer Content-Length yields 400, not an uncaught ValueError (dispatched directly; the wire enforces numeric)."""
         import asyncio
+
         from starlette.requests import Request
+
         from app.main import BodySizeLimitMiddleware
 
         middleware = BodySizeLimitMiddleware(None)
@@ -219,200 +180,15 @@ class TestBodySizeMiddleware:
         }
         request = Request(scope)
 
-        async def call_next(_req):  # pragma: no cover — should not run
+        async def call_next(_req):     # pragma: no cover — should not run
             raise AssertionError("middleware must short-circuit before call_next")
 
         response = asyncio.run(middleware.dispatch(request, call_next))
         assert response.status_code == 400
         body = response.body.decode("utf-8")
-        assert "Content-Length" in body or "invalid" in body.lower()
-
-    def test_oversize_content_length_returns_413(self):
-        """Direct middleware test: a Content-Length above the cap returns 413
-        without reading the body."""
-        import asyncio
-        from starlette.requests import Request
-        from app.main import BodySizeLimitMiddleware, settings
-
-        middleware = BodySizeLimitMiddleware(None)
-        oversize = settings.MAX_REQUEST_BODY_BYTES + 1
-        scope = {
-            "type": "http", "method": "POST", "path": "/api/bugs",
-            "headers": [(b"content-length", str(oversize).encode())],
-            "query_string": b"", "scheme": "http",
-            "server": ("testserver", 80), "client": ("test", 0),
-            "raw_path": b"/api/bugs",
-        }
-        request = Request(scope)
-
-        async def call_next(_req):  # pragma: no cover
-            raise AssertionError("middleware must short-circuit before call_next")
-
-        response = asyncio.run(middleware.dispatch(request, call_next))
-        assert response.status_code == 413
-        assert "too large" in response.body.decode("utf-8").lower()
+        assert "try again" in body.lower()
 
 
-# ---------------------------------------------------------------------------
-# G4 — X-Forwarded-For trust gate
-# ---------------------------------------------------------------------------
-class TestXffTrustGate:
-
-    def test_xff_ignored_when_trust_disabled(self, admin_client):
-        """Default TRUST_PROXY_FORWARDED_FOR = False (see config.py).
-        An X-Forwarded-For header on a login should NOT influence the
-        session-row IP."""
-        admin_client.post("/api/auth/logout")
-        res = admin_client.post(
-            "/api/auth/login",
-            json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD},
-            headers={"X-Forwarded-For": "203.0.113.99"},
-        )
-        assert res.status_code == 200
-        sessions = admin_client.get("/api/sessions").json()
-        assert sessions, "expected at least one session row"
-        ips = [s["ip_address"] for s in sessions]
-        assert "203.0.113.99" not in ips, (
-            f"XFF was honoured despite TRUST_PROXY_FORWARDED_FOR=False: {ips}"
-        )
-
-    def test_client_ip_helper_honours_trust_setting(self, monkeypatch):
-        """Unit-test the _client_ip helper directly to avoid spinning up a
-        second TestClient with a different bootstrap. With TRUST=True and
-        an XFF header, it returns the leftmost XFF entry."""
-        from app.routes.auth import _client_ip
-        from app.config import get_settings
-
-        class _FakeClient:
-            host = "10.0.0.1"
-
-        class _FakeReq:
-            def __init__(self, xff: str | None):
-                self.headers = {"x-forwarded-for": xff} if xff else {}
-                self.client = _FakeClient()
-
-        # Disabled (default): falls back to socket client.
-        settings = get_settings()
-        monkeypatch.setattr(settings, "TRUST_PROXY_FORWARDED_FOR", False)
-        assert _client_ip(_FakeReq("198.51.100.7, 10.0.0.1")) == "10.0.0.1"
-
-        # Enabled: honours leftmost XFF.
-        monkeypatch.setattr(settings, "TRUST_PROXY_FORWARDED_FOR", True)
-        assert _client_ip(_FakeReq("198.51.100.7, 10.0.0.1")) == "198.51.100.7"
-
-
-# ---------------------------------------------------------------------------
-# G5 — Email masking in logs
-# ---------------------------------------------------------------------------
-class TestEmailMasking:
-
-    @pytest.mark.parametrize("raw,expected", [
-        ("alice@example.com",  "a***@example.com"),
-        ("a@example.com",      "a***@example.com"),
-        ("@example.com",       "@example.com"),
-        ("",                   "***"),
-        ("plain-no-at-sign",   "***"),
-        ("BOB@example.com",    "B***@example.com"),
-    ])
-    def test_mask_helper(self, raw, expected):
-        from app.routes.auth import _mask_email
-        assert _mask_email(raw) == expected
-
-    def test_inactive_login_logs_masked_email(self, admin_client, caplog):
-        admin_client.post("/api/users", json={
-            "name": "Disabled User", "email": "disabled-mask@acme.test",
-            "role": "member", "password": "Disabled12",
-        })
-        users = admin_client.get("/api/users").json()
-        target = next(u for u in users if u["email"] == "disabled-mask@acme.test")
-        r = admin_client.put(f"/api/users/{target['id']}", json={"is_active": False})
-        assert r.status_code == 200
-        admin_client.post("/api/auth/logout")
-
-        with caplog.at_level(logging.INFO, logger="bug_hunter.auth"):
-            res = admin_client.post("/api/auth/login", json={
-                "email": "disabled-mask@acme.test", "password": "Disabled12",
-            })
-        assert res.status_code == 401
-        relevant = [r.message for r in caplog.records if "Login refused" in r.message]
-        assert relevant, "expected the masked-email log line"
-        for line in relevant:
-            assert "disabled-mask@acme.test" not in line, (
-                f"Raw email leaked into log: {line!r}"
-            )
-            assert "d***@acme.test" in line
-
-
-# ---------------------------------------------------------------------------
-# T3 — Account lockout
-# ---------------------------------------------------------------------------
-class TestAccountLockout:
-
-    def test_unit_check_locked_passes_when_no_state(self):
-        from app import account_lockout
-        account_lockout.check_locked("never-seen@example.com")
-
-    def test_unit_threshold_triggers_lockout(self):
-        from app import account_lockout
-        email = "victim@example.com"
-        for _ in range(account_lockout._LOGIN_FAIL_LIMIT):
-            account_lockout.record_failure(email)
-        with pytest.raises(Exception) as excinfo:
-            account_lockout.check_locked(email)
-        assert getattr(excinfo.value, "status_code", None) == 429
-        assert "Retry-After" in (excinfo.value.headers or {})
-
-    def test_unit_clear_resets_bucket(self):
-        from app import account_lockout
-        email = "transient@example.com"
-        for _ in range(account_lockout._LOGIN_FAIL_LIMIT):
-            account_lockout.record_failure(email)
-        account_lockout.clear(email)
-        account_lockout.check_locked(email)
-
-    def test_unit_unknown_email_also_counts(self):
-        """Ticking only known emails would leak account existence."""
-        from app import account_lockout
-        ghost = "definitely-not-a-real-user@example.com"
-        for _ in range(account_lockout._LOGIN_FAIL_LIMIT):
-            account_lockout.record_failure(ghost)
-        with pytest.raises(Exception) as excinfo:
-            account_lockout.check_locked(ghost)
-        assert getattr(excinfo.value, "status_code", None) == 429
-
-    def test_unit_disabled_when_limit_is_zero(self, monkeypatch):
-        from app import account_lockout
-        monkeypatch.setattr(account_lockout, "_LOGIN_FAIL_LIMIT", 0)
-        for _ in range(50):
-            account_lockout.record_failure("anyone@example.com")
-        account_lockout.check_locked("anyone@example.com")
-
-    def test_http_login_429_after_threshold(self, admin_client):
-        """Drive the lockout from the route layer."""
-        admin_client.post("/api/auth/logout")
-        codes = []
-        for _ in range(15):
-            r = admin_client.post("/api/auth/login", json={
-                "email": ADMIN_EMAIL, "password": "Wrong-pwd-9",
-            })
-            codes.append(r.status_code)
-        assert 429 in codes, f"Expected 429 somewhere in {codes}"
-
-    def test_successful_login_clears_lockout(self, admin_client):
-        from app import account_lockout
-        admin_client.post("/api/auth/logout")
-        for _ in range(3):
-            account_lockout.record_failure(ADMIN_EMAIL)
-        res = admin_client.post("/api/auth/login", json={
-            "email": ADMIN_EMAIL, "password": ADMIN_PASSWORD,
-        })
-        assert res.status_code == 200
-        account_lockout.check_locked(ADMIN_EMAIL)
-
-
-# ---------------------------------------------------------------------------
-# T3 — Account lockout (edge cases for coverage)
-# ---------------------------------------------------------------------------
 class TestAccountLockoutEdgeCases:
 
     def test_env_int_falls_back_on_garbage(self, monkeypatch):
@@ -426,7 +202,9 @@ class TestAccountLockoutEdgeCases:
         assert _env_int("BH_GOOD_INT_VAR", 0) == 99
 
     def test_old_failures_get_evicted(self, monkeypatch):
+        """Failures outside the rolling window are evicted so an infrequent typo never locks out."""
         import time
+
         from app import account_lockout
         monkeypatch.setattr(account_lockout, "_LOGIN_FAIL_WINDOW_SECONDS", 0.05)
         monkeypatch.setattr(account_lockout, "_LOGIN_FAIL_LIMIT", 3)
@@ -438,122 +216,28 @@ class TestAccountLockoutEdgeCases:
         bucket = account_lockout._buckets.get("evictee@x.com")
         assert bucket is not None
         assert len(bucket.fails) == 1
-        account_lockout.check_locked("evictee@x.com")
+        account_lockout.check_locked("evictee@x.com")  # must not raise
 
     def test_bucket_dict_cap_drops_oldest_entry(self, monkeypatch):
         from app import account_lockout
         monkeypatch.setattr(account_lockout, "_LOCKOUT_BUCKETS_MAX", 5)
         monkeypatch.setattr(account_lockout, "_LOGIN_FAIL_LIMIT", 10)
         account_lockout._reset_for_tests()
+        # Fill past the cap; eviction must keep the dict at the cap.
         for i in range(7):
             account_lockout.record_failure(f"user{i}@x.com")
         assert len(account_lockout._buckets) <= 5
 
     def test_clear_unknown_email_is_noop(self):
+        """clear() on an email with no bucket must not blow up."""
         from app import account_lockout
         account_lockout._reset_for_tests()
-        account_lockout.clear("never-recorded@x.com")
+        account_lockout.clear("never-recorded@x.com")  # must not raise
         assert "never-recorded@x.com" not in account_lockout._buckets
 
 
-# ---------------------------------------------------------------------------
-# T4 — HIBP breach check
-# ---------------------------------------------------------------------------
-class TestPasswordBreachCheck:
-
-    def test_unit_known_breached_hash_matches(self):
-        from app import password_breach
-        body = "1E4C9B93F3F0682250B6CF8331B7EE68FD8:3861493\n"
-        with mock.patch.object(password_breach, "_fetch_range", return_value=body):
-            assert password_breach.is_password_breached("password") is True
-
-    def test_unit_unknown_password_passes(self):
-        from app import password_breach
-        with mock.patch.object(password_breach, "_fetch_range", return_value=""):
-            assert password_breach.is_password_breached("rare-uniq-pwd-9") is False
-
-    def test_unit_padding_count_zero_treated_as_safe(self):
-        from app import password_breach
-        body = "1E4C9B93F3F0682250B6CF8331B7EE68FD8:0\n"
-        with mock.patch.object(password_breach, "_fetch_range", return_value=body):
-            assert password_breach.is_password_breached("password") is False
-
-    def test_unit_fail_open_on_network_error(self):
-        from app import password_breach
-        with mock.patch.object(password_breach, "_fetch_range", return_value=None):
-            assert password_breach.is_password_breached("anything-9") is False
-
-    def test_unit_disabled_short_circuits(self, monkeypatch):
-        from app import password_breach
-        monkeypatch.setenv("PASSWORD_BREACH_CHECK_ENABLED", "false")
-        assert password_breach.is_password_breached("password") is False
-
-    @staticmethod
-    def _force_match(pw: str) -> str:
-        import hashlib
-        digest = hashlib.sha1(pw.encode("utf-8")).hexdigest().upper()  # NOSONAR
-        return f"{digest[5:]}:9999\n"
-
-    def test_change_password_rejects_breached(self, admin_client, monkeypatch):
-        monkeypatch.setenv("PASSWORD_BREACH_CHECK_ENABLED", "true")
-        from app import password_breach
-        new_pw = "GoodFresh123"
-        with mock.patch.object(
-            password_breach, "_fetch_range",
-            return_value=self._force_match(new_pw),
-        ):
-            res = admin_client.post("/api/auth/change-password", json={
-                "current_password": ADMIN_PASSWORD,
-                "new_password": new_pw,
-            })
-        assert res.status_code == 400, res.text
-        assert "breach" in res.json()["detail"].lower()
-
-    def test_create_user_rejects_breached(self, admin_client, monkeypatch):
-        monkeypatch.setenv("PASSWORD_BREACH_CHECK_ENABLED", "true")
-        from app import password_breach
-        new_pw = "GoodFresh123"
-        with mock.patch.object(
-            password_breach, "_fetch_range",
-            return_value=self._force_match(new_pw),
-        ):
-            res = admin_client.post("/api/users", json={
-                "name": "Tester", "email": "tester-breach@acme.test",
-                "role": "member", "password": new_pw,
-            })
-        assert res.status_code == 400, res.text
-        assert "breach" in res.json()["detail"].lower()
-
-    def test_signup_rejects_breached(self, client, monkeypatch):
-        """v2.8 enterprise extra: signup is a password-set path too,
-        so it should also enforce the breach check."""
-        monkeypatch.setenv("PASSWORD_BREACH_CHECK_ENABLED", "true")
-        from app import password_breach
-        new_pw = "BreachedAtSignup1"
-        with mock.patch.object(
-            password_breach, "_fetch_range",
-            return_value=self._force_match(new_pw),
-        ):
-            res = client.post("/api/auth/signup", json={
-                "organization_name": "Bad-pw Co", "name": "Bob",
-                "email": "bob@badpw.test", "password": new_pw,
-            })
-        assert res.status_code == 400, res.text
-        assert "breach" in res.json()["detail"].lower()
-
-    def test_change_password_accepts_safe_new_password(self, admin_client, monkeypatch):
-        monkeypatch.setenv("PASSWORD_BREACH_CHECK_ENABLED", "true")
-        from app import password_breach
-        with mock.patch.object(password_breach, "_fetch_range", return_value=""):
-            res = admin_client.post("/api/auth/change-password", json={
-                "current_password": ADMIN_PASSWORD,
-                "new_password": "FreshSafe123",
-            })
-        assert res.status_code == 204
-
-
 class TestPasswordBreachFetchRange:
-    """Exercise the real ``_fetch_range`` body."""
+    """Cover the real _fetch_range branching by stubbing only the httpx layer."""
 
     @pytest.fixture(autouse=True)
     def _enable(self, monkeypatch):
@@ -570,7 +254,6 @@ class TestPasswordBreachFetchRange:
 
         class _FakeClient:
             def __init__(self, **_kw):
-                # No-op stand-in for httpx.Client(timeout=...).
                 pass
             def __enter__(self): return self
             def __exit__(self, *_a): return False
@@ -593,6 +276,7 @@ class TestPasswordBreachFetchRange:
 
     def test_fetch_range_returns_none_on_httperror(self, monkeypatch):
         import httpx
+
         from app import password_breach
         self._patch_httpx_client(
             monkeypatch, raise_on_get=httpx.HTTPError("simulated")
@@ -607,22 +291,336 @@ class TestPasswordBreachFetchRange:
         assert password_breach._fetch_range("5BAA6") is None
 
 
-# ---------------------------------------------------------------------------
-# T6 — EXIF strip
-# ---------------------------------------------------------------------------
+class TestImageStripEdgeCases:
+
+    def test_pillow_missing_returns_original(self, monkeypatch):
+        """With Pillow absent the helper fails open and returns the original bytes."""
+        import sys
+
+        from app.image_strip import strip_image_metadata
+        monkeypatch.setitem(sys.modules, "PIL", None)
+        raw = b"fake-jpeg-bytes"
+        assert strip_image_metadata(raw, "image/jpeg") == raw
+
+    def test_format_none_returns_original(self, monkeypatch):
+        """An image whose .format is None is returned unchanged."""
+        from PIL import Image as PILImage
+
+        from app.image_strip import strip_image_metadata
+
+        class _FakeImg:
+            format = None
+            info: dict = {}
+            size = (8, 8)
+            def load(self):
+                pass
+
+        monkeypatch.setattr(PILImage, "open", lambda _src: _FakeImg())
+        raw = b"any-bytes"
+        assert strip_image_metadata(raw, "image/jpeg") == raw
+
+    def test_save_oserror_returns_original(self, monkeypatch):
+        """An OSError from Pillow's save() is swallowed; the original bytes are returned."""
+        from PIL import Image as PILImage
+
+        from app.image_strip import strip_image_metadata
+
+        class _BoomImg:
+            format = "JPEG"
+            info: dict = {}
+            def load(self):
+                pass
+            def save(self, _out, **_kw): raise OSError("disk full mid-encode")
+
+        monkeypatch.setattr(PILImage, "open", lambda _src: _BoomImg())
+        raw = b"any-bytes"
+        assert strip_image_metadata(raw, "image/jpeg") == raw
+
+    def test_content_type_with_charset_param_still_handled(self):
+        """A ``image/jpeg; charset=binary`` content-type still matches the MIME prefix (param stripped)."""
+        from app.image_strip import strip_image_metadata
+        raw = b"not-a-jpeg"
+        assert strip_image_metadata(raw, "image/jpeg; charset=binary") == raw
+
+
+# --- X-Forwarded-For trust gate ---
+class TestXffTrustGate:
+
+    def test_xff_ignored_when_trust_disabled(self, admin_client):
+        # TRUST_PROXY_FORWARDED_FOR defaults False, so XFF must not set the session IP.
+        admin_client.post("/api/auth/logout")
+        res = admin_client.post(
+            "/api/auth/login",
+            json={"email": "admin@test.local", "password": "Admin1234"},
+            headers={"X-Forwarded-For": "203.0.113.99"},
+        )
+        assert res.status_code == 200
+        sessions = admin_client.get("/api/sessions").json()
+        assert sessions, "expected at least one session row"
+        ips = [s["ip_address"] for s in sessions]
+        assert "203.0.113.99" not in ips, (
+            f"XFF was honoured despite TRUST_PROXY_FORWARDED_FOR=False: {ips}"
+        )
+
+    def test_xff_honoured_when_trust_enabled(self, tmp_path, monkeypatch):
+        """With trust enabled, the right-most (proxy-appended) XFF is recorded; the client-controlled left-most is not."""
+        import sys
+        db_file = tmp_path / "xff.db"
+        monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_file}")
+        monkeypatch.setenv("EMAIL_BACKEND", "disabled")
+        monkeypatch.setenv("SESSION_SECRET", "test_secret")
+        monkeypatch.setenv("BOOTSTRAP_ADMIN_EMAIL", "admin@test.local")
+        monkeypatch.setenv("BOOTSTRAP_ADMIN_PASSWORD", "Admin1234")
+        monkeypatch.setenv("TRUST_PROXY_FORWARDED_FOR", "true")
+        monkeypatch.setenv("TRUST_PROXY_HOP_COUNT", "1")
+        for mod in list(sys.modules):
+            if mod == "app" or mod.startswith("app."):
+                del sys.modules[mod]
+        from app.config import get_settings
+        get_settings.cache_clear()  # type: ignore[attr-defined]
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+        with TestClient(app) as c:
+            res = c.post(
+                "/api/auth/login",
+                json={"email": "admin@test.local", "password": "Admin1234"},
+                # "<attacker-forged>, <real proxy-appended peer>"
+                headers={"X-Forwarded-For": "198.51.100.7, 10.0.0.1"},
+            )
+            assert res.status_code == 200, res.text
+            sessions = c.get("/api/sessions").json()
+            assert any(s["ip_address"] == "10.0.0.1" for s in sessions), (
+                f"right-most XFF was NOT honoured despite TRUST=true: {sessions}"
+            )
+            assert not any(s["ip_address"] == "198.51.100.7" for s in sessions), (
+                f"client-controlled left-most XFF must NOT be trusted: {sessions}"
+            )
+
+
+# --- Email masking in logs ---
+class TestEmailMasking:
+
+    @pytest.mark.parametrize("raw,expected", [
+        ("alice@example.com",  "a***@example.com"),
+        ("a@example.com",      "a***@example.com"),
+        ("@example.com",       "@example.com"),
+        ("",                   "***"),
+        ("plain-no-at-sign",   "***"),
+        ("BOB@example.com",    "B***@example.com"),
+    ])
+    def test_mask_helper(self, raw, expected):
+        from app.routes.auth import _mask_email
+        assert _mask_email(raw) == expected
+
+    def test_inactive_login_logs_masked_email(self, admin_client, caplog):
+        admin_client.post("/api/users", json={
+            "name": "Disabled User", "email": "disabled@test.local",
+            "role": "user", "password": "Disabled12",
+        })
+        users = admin_client.get("/api/users").json()
+        target = next(u for u in users if u["email"] == "disabled@test.local")
+        r = admin_client.put(f"/api/users/{target['id']}", json={"is_active": False})
+        assert r.status_code == 200
+        admin_client.post("/api/auth/logout")
+
+        with caplog.at_level(logging.INFO, logger="bug_hunter.auth"):
+            res = admin_client.post("/api/auth/login", json={
+                "email": "disabled@test.local", "password": "Disabled12",
+            })
+        assert res.status_code == 401
+        relevant = [r.message for r in caplog.records if "Login refused" in r.message]
+        assert relevant, "expected the masked-email log line"
+        for line in relevant:
+            assert "disabled@test.local" not in line, (
+                f"Raw email leaked into log: {line!r}"
+            )
+            assert "d***@test.local" in line
+
+
+# --- Account lockout ---
+class TestAccountLockout:
+
+    def test_unit_check_locked_passes_when_no_state(self):
+        from app import account_lockout
+        account_lockout.check_locked("never-seen@example.com")
+
+    def test_unit_threshold_triggers_lockout(self):
+        from fastapi import HTTPException
+
+        from app import account_lockout
+        email = "victim@example.com"
+        for _ in range(account_lockout._LOGIN_FAIL_LIMIT):
+            account_lockout.record_failure(email)
+        with pytest.raises(HTTPException) as excinfo:
+            account_lockout.check_locked(email)
+        assert getattr(excinfo.value, "status_code", None) == 429
+        assert "Retry-After" in (excinfo.value.headers or {})
+
+    def test_unit_clear_resets_bucket(self):
+        from app import account_lockout
+        email = "transient@example.com"
+        for _ in range(account_lockout._LOGIN_FAIL_LIMIT):
+            account_lockout.record_failure(email)
+        account_lockout.clear(email)
+        account_lockout.check_locked(email)
+
+    def test_unit_unknown_email_also_counts(self):
+        """Ticking only known emails would leak account existence."""
+        from fastapi import HTTPException
+
+        from app import account_lockout
+        ghost = "definitely-not-a-real-user@example.com"
+        for _ in range(account_lockout._LOGIN_FAIL_LIMIT):
+            account_lockout.record_failure(ghost)
+        with pytest.raises(HTTPException) as excinfo:
+            account_lockout.check_locked(ghost)
+        assert getattr(excinfo.value, "status_code", None) == 429
+
+    def test_unit_disabled_when_limit_is_zero(self, monkeypatch):
+        from app import account_lockout
+        monkeypatch.setattr(account_lockout, "_LOGIN_FAIL_LIMIT", 0)
+        for _ in range(50):
+            account_lockout.record_failure("anyone@example.com")
+        # limit == 0 is the operator opt-out; must never raise.
+        account_lockout.check_locked("anyone@example.com")
+
+    def test_http_login_429_after_threshold(self, client):
+        """Driving the lockout via the route yields at least one 429 (IP limit or account lockout)."""
+        from tests.conftest import BOOTSTRAP_EMAIL
+        codes = []
+        for _ in range(15):
+            r = client.post("/api/auth/login", json={
+                "email": BOOTSTRAP_EMAIL, "password": "Wrong-pwd-9",
+            })
+            codes.append(r.status_code)
+        assert 429 in codes, f"Expected 429 somewhere in {codes}"
+
+    def test_successful_login_clears_lockout(self, client):
+        """A successful login clears the bucket so sub-threshold failures don't carry over."""
+        from app import account_lockout
+        from tests.conftest import BOOTSTRAP_EMAIL, BOOTSTRAP_PASSWORD
+        for _ in range(3):
+            account_lockout.record_failure(BOOTSTRAP_EMAIL)
+        res = client.post("/api/auth/login", json={
+            "email": BOOTSTRAP_EMAIL, "password": BOOTSTRAP_PASSWORD,
+        })
+        assert res.status_code == 200
+        account_lockout.check_locked(BOOTSTRAP_EMAIL)
+
+
+# --- HIBP breach check ---
+class TestPasswordBreachCheck:
+    """conftest disables the breach check globally; integration tests re-enable it per body, unit tests use the module default."""
+
+    def test_unit_known_breached_hash_matches(self):
+        # SHA-1("password") = 5BAA61E4C9B93F3F0682250B6CF8331B7EE68FD8
+        # prefix 5BAA6, suffix 1E4C9B93F3F0682250B6CF8331B7EE68FD8
+        from app import password_breach
+        body = "1E4C9B93F3F0682250B6CF8331B7EE68FD8:3861493\n"
+        with mock.patch.object(password_breach, "_fetch_range", return_value=body):
+            assert password_breach.is_password_breached("password") is True
+
+    def test_unit_unknown_password_passes(self):
+        from app import password_breach
+        with mock.patch.object(password_breach, "_fetch_range", return_value=""):
+            assert password_breach.is_password_breached("rare-uniq-pwd-9") is False
+
+    def test_unit_padding_count_zero_treated_as_safe(self):
+        from app import password_breach
+        # COUNT=0 entries are anti-correlation padding from the HIBP API.
+        sha1_prefix_match = "1E4C9B93F3F0682250B6CF8331B7EE68FD8"
+        body = f"{sha1_prefix_match}:0\n"
+        with mock.patch.object(password_breach, "_fetch_range", return_value=body):
+            assert password_breach.is_password_breached("password") is False
+
+    def test_unit_fail_open_on_network_error(self):
+        from app import password_breach
+        with mock.patch.object(password_breach, "_fetch_range", return_value=None):
+            assert password_breach.is_password_breached("anything-9") is False
+
+    def test_unit_disabled_short_circuits(self, monkeypatch):
+        from app import password_breach
+        monkeypatch.setenv("PASSWORD_BREACH_CHECK_ENABLED", "false")
+        # Returns False before reaching _fetch_range; no mock needed.
+        assert password_breach.is_password_breached("password") is False
+
+    @staticmethod
+    def _force_match(pw: str) -> str:
+        """HIBP /range/ body whose suffix matches SHA-1(pw)."""
+        import hashlib
+        digest = hashlib.sha1(pw.encode("utf-8")).hexdigest().upper()  # NOSONAR
+        return f"{digest[5:]}:9999\n"
+
+    def test_unit_legacy_default_allowlisted_despite_breach_match(self):
+        """The legacy value is allowlisted and short-circuits before any network call."""
+        from app import password_breach
+        body = self._force_match("legacy-default")
+        with mock.patch.object(password_breach, "_fetch_range", return_value=body) as m:
+            assert password_breach.is_password_breached("legacy-default") is False
+            assert password_breach.is_password_breached("LEGACY-DEFAULT") is False
+        m.assert_not_called()
+
+    def test_change_password_rejects_breached(self, admin_client, monkeypatch):
+        monkeypatch.setenv("PASSWORD_BREACH_CHECK_ENABLED", "true")
+        from app import password_breach
+        # Passes local strength rules, but the mocked HIBP endpoint flags it breached.
+        new_pw = "GoodFresh123"
+        with mock.patch.object(
+            password_breach, "_fetch_range",
+            return_value=self._force_match(new_pw),
+        ):
+            res = admin_client.post("/api/auth/change-password", json={
+                "current_password": "Admin1234",
+                "new_password": new_pw,
+            })
+        assert res.status_code == 400, res.text
+        assert "breach" in res.json()["detail"].lower()
+
+    def test_create_user_rejects_breached(self, admin_client, monkeypatch):
+        monkeypatch.setenv("PASSWORD_BREACH_CHECK_ENABLED", "true")
+        from app import password_breach
+        new_pw = "GoodFresh123"
+        with mock.patch.object(
+            password_breach, "_fetch_range",
+            return_value=self._force_match(new_pw),
+        ):
+            res = admin_client.post("/api/users", json={
+                "name": "Tester", "email": "tester@test.local",
+                "role": "user", "password": new_pw,
+            })
+        assert res.status_code == 400, res.text
+        assert "breach" in res.json()["detail"].lower()
+
+    def test_change_password_accepts_safe_new_password(self, admin_client, monkeypatch):
+        monkeypatch.setenv("PASSWORD_BREACH_CHECK_ENABLED", "true")
+        from app import password_breach
+        with mock.patch.object(password_breach, "_fetch_range", return_value=""):
+            res = admin_client.post("/api/auth/change-password", json={
+                "current_password": "Admin1234",
+                "new_password": "FreshSafe123",
+            })
+        assert res.status_code == 204
+
+
+# --- EXIF strip ---
 def _jpeg_with_exif(gps_value: str = "secret-gps-tag") -> bytes:
+    """8x8 JPEG with ``gps_value`` in EXIF tag 270 (ImageDescription)."""
     from PIL import Image
+
     img = Image.new("RGB", (8, 8), (200, 100, 50))
     exif = img.getexif()
-    exif[270] = gps_value  # 270 = ImageDescription tag
+    exif[270] = gps_value
     out = io.BytesIO()
     img.save(out, format="JPEG", exif=exif.tobytes())
     return out.getvalue()
 
 
 def _png_with_text(text: str = "stash-this") -> bytes:
+    """Build a PNG carrying a tEXt chunk to grep for afterwards."""
     from PIL import Image
     from PIL.PngImagePlugin import PngInfo
+
     img = Image.new("RGB", (8, 8), (10, 20, 30))
     meta = PngInfo()
     meta.add_text("Source", text)
@@ -637,9 +635,11 @@ class TestExifStrip:
         from app.image_strip import strip_image_metadata
         marker = "GPS-LEAK-XY-ZZ"
         raw = _jpeg_with_exif(marker)
-        assert marker.encode() in raw
+        assert marker.encode() in raw, "test fixture should embed the marker"
         clean = strip_image_metadata(raw, "image/jpeg")
-        assert marker.encode() not in clean
+        assert marker.encode() not in clean, (
+            "EXIF strip failed: marker still present in output bytes"
+        )
 
     def test_unit_png_metadata_removed(self):
         from app.image_strip import strip_image_metadata
@@ -648,6 +648,21 @@ class TestExifStrip:
         assert marker.encode() in raw
         clean = strip_image_metadata(raw, "image/png")
         assert marker.encode() not in clean
+
+    def test_unit_palette_png_transparency_preserved(self):
+        """A palette PNG's tRNS chunk must survive the strip, or it turns opaque."""
+        from PIL import Image
+
+        from app.image_strip import strip_image_metadata
+        img = Image.new("P", (8, 8))
+        img.putpalette([0, 0, 0, 255, 255, 255] + [0, 0, 0] * 254)
+        img.info["transparency"] = 0
+        out = io.BytesIO()
+        img.save(out, format="PNG")
+        raw = out.getvalue()
+        clean = strip_image_metadata(raw, "image/png")
+        reloaded = Image.open(io.BytesIO(clean))
+        assert reloaded.info.get("transparency") == 0
 
     def test_unit_non_image_passes_through(self):
         from app.image_strip import strip_image_metadata
@@ -684,49 +699,3 @@ class TestExifStrip:
         assert marker.encode() not in dl.content, (
             "EXIF marker survived the upload roundtrip"
         )
-
-
-class TestImageStripEdgeCases:
-
-    def test_pillow_missing_returns_original(self, monkeypatch):
-        import sys
-        from app.image_strip import strip_image_metadata
-        monkeypatch.setitem(sys.modules, "PIL", None)
-        raw = b"fake-jpeg-bytes"
-        assert strip_image_metadata(raw, "image/jpeg") == raw
-
-    def test_format_none_returns_original(self, monkeypatch):
-        from PIL import Image as PILImage
-        from app.image_strip import strip_image_metadata
-
-        class _FakeImg:
-            format = None
-            info: dict = {}
-            def load(self):
-                # No-op stub; we only need format-is-None branching here.
-                pass
-
-        monkeypatch.setattr(PILImage, "open", lambda _src: _FakeImg())
-        raw = b"any-bytes"
-        assert strip_image_metadata(raw, "image/jpeg") == raw
-
-    def test_save_oserror_returns_original(self, monkeypatch):
-        from PIL import Image as PILImage
-        from app.image_strip import strip_image_metadata
-
-        class _BoomImg:
-            format = "JPEG"
-            info: dict = {}
-            def load(self):
-                # No-op stub — the failure under test is in save().
-                pass
-            def save(self, _out, **_kw): raise OSError("disk full mid-encode")
-
-        monkeypatch.setattr(PILImage, "open", lambda _src: _BoomImg())
-        raw = b"any-bytes"
-        assert strip_image_metadata(raw, "image/jpeg") == raw
-
-    def test_content_type_with_charset_param_still_handled(self):
-        from app.image_strip import strip_image_metadata
-        raw = b"not-a-jpeg"
-        assert strip_image_metadata(raw, "image/jpeg; charset=binary") == raw

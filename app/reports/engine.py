@@ -1,58 +1,32 @@
-"""Reports engine — the single SQL surface for every report.
+"""Reports engine: the single read-only SQL surface for every report.
 
-Public entry points:
-  Filters.from_dict({...})        — parse a user-supplied filter blob.
-  run_report(key, filters, db)    — run the named report, return ReportResult.
-
-Design notes:
-
-  * Every report respects the SAME Filters dataclass. Reports decide
-    which filters are meaningful (e.g. environment is Bug-only; a
-    "throughput by user" report ignores reporter_id).
-  * No new columns are added to the schema. "Who resolved this bug and
-    when" is derived from the activity_log table by parsing the detail
-    string written by routes/bugs.py::_persist_update (the format is a
-    stable contract — see RESOLUTION_DETAIL_RE below).
-  * The engine is pure read-side. No INSERT / UPDATE / DELETE.
-  * Queries are eager-loaded where the result row needs related objects
-    (project / reporter / assignees) so we don't N+1 on the wire.
-
-Per-item-type resolution map:
-  Bug         → Resolved, Closed
-  Requirement → Implemented
-  Task        → Done
-
-"Open" map:
-  Bug         → New, In Progress, Reopened
-  Requirement → New, In Review, Approved
-  Task        → New, In Progress
+Entry points: Filters.from_dict({...}) and run_report(key, filters, db). Every
+report shares the Filters dataclass. Resolution info is derived from activity_log
+detail strings written by routes/bugs.py::_persist_update (see RESOLUTION_DETAIL_RE).
+Per-type resolved/open status maps live in the constants below.
 """
 from __future__ import annotations
 
 import re
 import statistics
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Optional
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
+from app.config import get_settings
 from app.models import (
     Activity,
     Attachment,
     Bug,
     Project,
     User,
-    bug_assignees,
 )
 from app.reports.catalog import REPORT_CATALOG
 
-
-# ---------------------------------------------------------------------------
-# Resolution maps — what counts as "resolved" / "open" / "final" per item type.
-# Keep these in sync with app/schemas.py::STATUSES_BY_TYPE.
-# ---------------------------------------------------------------------------
+# Resolution maps — keep in sync with app/schemas.py::STATUSES_BY_TYPE.
 RESOLVED_STATUSES_BY_TYPE: dict[str, list[str]] = {
     "Bug": ["Resolved", "Closed"],
     "Requirement": ["Implemented"],
@@ -65,26 +39,15 @@ OPEN_STATUSES_BY_TYPE: dict[str, list[str]] = {
     "Task": ["New", "In Progress"],
 }
 
-# "Final" = resolution states + terminal-but-not-resolved states (Cancelled,
-# Rejected, Not a Bug, etc.). Used by the project-breakdown report.
+# "Final" = resolved plus terminal-but-not-resolved states; used by project-breakdown.
 FINAL_STATUSES_BY_TYPE: dict[str, list[str]] = {
     "Bug": ["Resolved", "Closed", "Not a Bug"],
     "Requirement": ["Implemented", "Rejected"],
     "Task": ["Done", "Cancelled"],
 }
 
-# Status strings that mean "the user closed this out". Union of all
-# per-type resolved sets — used when we don't know the item_type yet
-# (parsing the activity_log detail string).
-ALL_RESOLVED_STATUSES = sorted({
-    s for sts in RESOLVED_STATUSES_BY_TYPE.values() for s in sts
-})
-
-# Regex that pulls the NEW status out of the activity log detail line
-# written by routes/bugs.py::_persist_update. The format is stable:
-#   "#42 'Title' — status: 'In Progress' → 'Resolved'"
-# We capture the value after the arrow. Curly-quotes (en-dash dash style)
-# matter: we accept both straight ' and unicode ' / '.
+# Captures the new status after the arrow in a "status: 'x' → 'y'" detail line;
+# accepts straight and curly quotes.
 RESOLUTION_DETAIL_RE = re.compile(
     r"status:\s*['‘’][^'‘’]*['‘’]\s*"
     r"[→—\->]+\s*"
@@ -92,18 +55,18 @@ RESOLUTION_DETAIL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Captures the old (pre-arrow) status so throughput only credits genuine
+# open→resolved crossings (not e.g. Resolved→Closed).
+RESOLUTION_OLD_STATUS_RE = re.compile(
+    r"status:\s*['‘’]([^'‘’]*)['‘’]\s*[→—\->]+\s*['‘’][^'‘’]+['‘’]",
+    re.IGNORECASE,
+)
 
-# ---------------------------------------------------------------------------
-# Filters — universal across every report
-# ---------------------------------------------------------------------------
+
 @dataclass
 class Filters:
-    """Universal filter set. Every field defaults to "no filter".
-
-    Date semantics: date_from / date_to are inclusive dates (no times). The
-    engine converts them to start-of-day / end-of-day UTC for comparison
-    against created_at / updated_at columns.
-    """
+    """Universal filter set; every field defaults to "no filter". date_from/
+    date_to are inclusive dates, converted to start/end-of-day UTC for comparison."""
     date_from: Optional[date] = None
     date_to: Optional[date] = None
     item_types: list[str] = field(default_factory=list)
@@ -117,12 +80,14 @@ class Filters:
     include_not_a_bug: bool = False
     text_search: Optional[str] = None
 
-    # Free-form label users can add to identify a saved or downloaded run.
+    # Free-form label to identify a saved or downloaded run.
     label: str = ""
 
-    # ------------------------------------------------------------------
-    # Parsing helpers
-    # ------------------------------------------------------------------
+    # Route-set from the actor's accessible projects (never user-supplied, so
+    # scope can't be widened via the payload). None = unrestricted; empty set =
+    # see nothing. Omitted from from_dict/to_meta since it isn't user-chosen.
+    restrict_project_ids: Optional[set[int]] = None
+
     @classmethod
     def from_dict(cls, d: Optional[dict[str, Any]]) -> "Filters":
         d = d or {}
@@ -143,8 +108,7 @@ class Filters:
         )
 
     def to_meta(self) -> dict[str, Any]:
-        """Plain-dict representation suitable for the XLSX "Filters applied"
-        sheet and the API echo."""
+        """Serialized filters for the XLSX "Filters applied" sheet and API."""
         return {
             "date_from": self.date_from.isoformat() if self.date_from else None,
             "date_to": self.date_to.isoformat() if self.date_to else None,
@@ -160,6 +124,11 @@ class Filters:
             "text_search": self.text_search,
             "label": self.label,
         }
+
+    def with_overrides(self, **overrides: Any) -> "Filters":
+        """Typed wrapper over dataclasses.replace() so callers get back a
+        properly-typed Filters, not the generic DataclassInstance."""
+        return replace(self, **overrides)
 
 
 def _parse_date(v: Any) -> Optional[date]:
@@ -221,9 +190,6 @@ def _int_list(v: Any) -> list[int]:
         return []
 
 
-# ---------------------------------------------------------------------------
-# Result types
-# ---------------------------------------------------------------------------
 @dataclass
 class ReportColumn:
     key: str
@@ -250,11 +216,12 @@ class ReportResult:
     rows: list[dict[str, Any]]
     summary: dict[str, Any] = field(default_factory=dict)
     filters: dict[str, Any] = field(default_factory=dict)
-    # Optional secondary table: aggregated reports include a "drill-down"
-    # list of the underlying items for the XLSX export so a manager can
-    # click on the rolled-up number and immediately see the details.
+    # Drill-down of the underlying items for the XLSX export (aggregate reports).
     detail_columns: list[ReportColumn] = field(default_factory=list)
     detail_rows: list[dict[str, Any]] = field(default_factory=list)
+    # True when the detail query hit _detail_cap(); export route returns 413
+    # rather than let an aggregate under-count over a partial scan.
+    truncated: bool = False
 
     @property
     def total(self) -> int:
@@ -274,9 +241,6 @@ class ReportResult:
         }
 
 
-# ---------------------------------------------------------------------------
-# Shared filter application — every report's "from bugs where ..." starts here
-# ---------------------------------------------------------------------------
 def _start_of_day(d: date) -> datetime:
     return datetime.combine(d, time.min, tzinfo=timezone.utc)
 
@@ -294,17 +258,6 @@ def _apply_text_search(stmt, needle: str):
     ))
 
 
-# Enterprise: every Reports query MUST scope to the calling user's org so
-# a manager / admin in org A can never see anything from org B. The route
-# layer always supplies the actor's org_id; the engine then enforces the
-# WHERE clause via Project.org_id (Bug joins Project) or Activity.org_id
-# (the audit trail carries its own org_id column).
-def _apply_org_scope_via_project(stmt, org_id: Optional[int]):
-    if org_id is None:
-        return stmt
-    return stmt.where(Bug.project.has(Project.org_id == org_id))
-
-
 def _apply_entity_filters(stmt, filters: Filters):
     """Who/where filters: item type, project, people, event."""
     if filters.item_types:
@@ -317,6 +270,9 @@ def _apply_entity_filters(stmt, filters: Filters):
         stmt = stmt.where(Bug.reporter_id.in_(filters.reporter_ids))
     if filters.event_id is not None:
         stmt = stmt.where(Bug.event_id == filters.event_id)
+    # Route-set project scope; empty set matches nothing (tagless manager).
+    if filters.restrict_project_ids is not None:
+        stmt = stmt.where(Bug.project_id.in_(filters.restrict_project_ids))
     return stmt
 
 
@@ -335,7 +291,7 @@ def _apply_attribute_filters(
     if apply_status and filters.statuses:
         stmt = stmt.where(Bug.status.in_(filters.statuses))
     if not filters.include_not_a_bug and enforce_not_a_bug:
-        # Exclude Not-a-Bug from "Total" by default (matches dashboard KPI).
+        # Exclude Not-a-Bug by default (matches dashboard KPI).
         stmt = stmt.where(Bug.status != "Not a Bug")
     if filters.text_search:
         stmt = _apply_text_search(stmt, filters.text_search)
@@ -360,20 +316,9 @@ def _apply_bug_filters(
     date_column=None,           # which column the date range targets
     apply_status: bool = True,  # some reports ignore the status filter
     enforce_not_a_bug: bool = True,
-    org_id: Optional[int] = None,
 ):
-    """Layer the universal Filters onto a select(Bug.*) statement.
-
-    `date_column` defaults to Bug.created_at when None — most reports
-    "count by when it was filed". The throughput report swaps in
-    Activity.created_at via its own date application.
-
-    `org_id` — enterprise multi-tenancy guard. When set, every result
-    row must belong to a project owned by that org. The engine never
-    runs unscoped queries from a route handler; org_id flows in from
-    the actor.
-    """
-    stmt = _apply_org_scope_via_project(stmt, org_id)
+    """Layer the universal Filters onto a select(Bug.*) statement. `date_column`
+    defaults to Bug.created_at (most reports count by filed date)."""
     stmt = _apply_entity_filters(stmt, filters)
     stmt = _apply_attribute_filters(
         stmt, filters,
@@ -391,25 +336,20 @@ def _eager_bug():
     )
 
 
-# ---------------------------------------------------------------------------
-# Helpers — bug → row dict
-# ---------------------------------------------------------------------------
 def _days_open_value(created_at: Optional[datetime],
                      resolved_at: Optional[datetime]) -> Optional[int]:
-    """Whole days a bug stayed open: from creation to resolution, or to
-    now if still open. None when there's no creation timestamp."""
+    """Days open, creation to resolution (or now); None without a creation time."""
     if created_at is None:
         return None
     open_until = resolved_at if resolved_at is not None else datetime.now(timezone.utc)
-    # Both columns are timezone-aware on every modern row; legacy rows
-    # might be naive — coerce defensively.
+    # Coerce legacy naive timestamps defensively.
     ca = created_at if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc)
     ou = open_until if open_until.tzinfo else open_until.replace(tzinfo=timezone.utc)
     return max(0, (ou - ca).days)
 
 
 def _bug_scalar_fields(b: Bug) -> dict[str, Any]:
-    """Plain columns straight off the bug row."""
+    """Scalar columns directly from the bug row."""
     return {
         "id": b.id,
         "item_type": getattr(b, "item_type", None) or "Bug",
@@ -425,7 +365,7 @@ def _bug_scalar_fields(b: Bug) -> dict[str, Any]:
 
 
 def _bug_relation_fields(b: Bug) -> dict[str, Any]:
-    """Columns derived from eager-loaded related objects."""
+    """Columns from eager-loaded relationships."""
     return {
         "project": b.project.name if b.project else "",
         "event": b.event.name if getattr(b, "event", None) else "",
@@ -437,7 +377,7 @@ def _bug_relation_fields(b: Bug) -> dict[str, Any]:
 
 def _bug_to_detail_row(b: Bug, attachments_by_bug: dict[int, int],
                       resolved_info: dict[int, tuple[Optional[str], Optional[datetime]]]) -> dict[str, Any]:
-    """Full detail row — every column on the bug + computed extras."""
+    """Full detail row: every column on the bug plus computed extras."""
     resolved_by, resolved_at = resolved_info.get(b.id, (None, None))
     days_open = _days_open_value(b.created_at, resolved_at)
     row = _bug_scalar_fields(b)
@@ -457,9 +397,6 @@ def _fmt_dt(dt: Optional[datetime]) -> str:
     return dt.isoformat(timespec="seconds")
 
 
-# ---------------------------------------------------------------------------
-# Resolution-event helpers
-# ---------------------------------------------------------------------------
 def _is_resolved_status(status: str, item_type: str) -> bool:
     return status in RESOLVED_STATUSES_BY_TYPE.get(item_type or "Bug", [])
 
@@ -469,28 +406,34 @@ def _is_open_status(status: str, item_type: str) -> bool:
 
 
 def _parse_resolution_status(detail: str) -> Optional[str]:
-    """Pull the NEW status from an activity_log detail string. Returns
-    None if the detail isn't a status_changed row or doesn't parse."""
+    """Pull the new status from an activity_log detail string, or None."""
     if not detail:
         return None
-    m = RESOLUTION_DETAIL_RE.search(detail)
-    if not m:
+    # Rightmost match so a crafted title can't spoof the resolution.
+    matches = RESOLUTION_DETAIL_RE.findall(detail)
+    if not matches:
         return None
-    return m.group(1).strip()
+    return matches[-1].strip()
+
+
+def _parse_prior_status(detail: str) -> Optional[str]:
+    """Pull the old (pre-arrow) status; rightmost match, as _parse_resolution_status."""
+    if not detail:
+        return None
+    matches = RESOLUTION_OLD_STATUS_RE.findall(detail)
+    if not matches:
+        return None
+    return matches[-1].strip()
 
 
 def _fetch_resolution_info(
     db: Session,
     bug_ids: list[int],
 ) -> dict[int, tuple[Optional[str], Optional[datetime]]]:
-    """For each bug id, return (resolver_name, resolved_at) — the most
-    recent status_changed activity that transitioned the bug INTO a
-    resolved state for its item_type. Empty values when never resolved
-    (still open) or when no audit row matches.
-    """
+    """Return (resolver_name, resolved_at) per bug id from the most recent
+    status_changed activity into a resolved state. Absent when never resolved."""
     if not bug_ids:
         return {}
-    # Pull every status_changed activity for these bugs + the item_type.
     rows = db.execute(
         select(
             Activity.bug_id,
@@ -498,6 +441,7 @@ def _fetch_resolution_info(
             Activity.created_at,
             Activity.detail,
             Bug.item_type,
+            Bug.status.label("current_status"),
         )
         .join(Bug, Bug.id == Activity.bug_id)
         .where(
@@ -508,14 +452,13 @@ def _fetch_resolution_info(
     ).all()
     out: dict[int, tuple[Optional[str], Optional[datetime]]] = {}
     seen: set[int] = set()
-    for bug_id, actor_name, created_at, detail, item_type in rows:
+    for bug_id, actor_name, created_at, detail, item_type, current_status in rows:
         if bug_id in seen:
-            # We already captured the most recent resolution-into event
-            # for this bug. A later status change away from resolved
-            # (e.g. Reopened) doesn't undo the prior resolution event
-            # for "who resolved it last" purposes — but if the current
-            # status isn't resolved, the caller will have skipped this
-            # bug anyway via the open/resolved check.
+            continue
+        # Only attribute resolution when currently resolved, so a reopened bug
+        # doesn't carry a stale resolved_at/resolver.
+        if not _is_resolved_status(current_status or "", item_type or "Bug"):
+            seen.add(bug_id)
             continue
         new_status = _parse_resolution_status(detail or "")
         if new_status and _is_resolved_status(new_status, item_type or "Bug"):
@@ -535,9 +478,6 @@ def _attachments_by_bug(db: Session, bug_ids: list[int]) -> dict[int, int]:
     return {bug_id: int(cnt) for bug_id, cnt in rows}
 
 
-# ---------------------------------------------------------------------------
-# Column catalogs — kept as functions so each report can share / extend
-# ---------------------------------------------------------------------------
 def _detail_columns() -> list[ReportColumn]:
     return [
         ReportColumn("id", "ID", 8, kind="number"),
@@ -562,12 +502,22 @@ def _detail_columns() -> list[ReportColumn]:
     ]
 
 
-# ---------------------------------------------------------------------------
-# Reports
-# ---------------------------------------------------------------------------
-def _report_item_detail(db: Session, filters: Filters, *, org_id: Optional[int] = None) -> ReportResult:
-    """Universal SQL-like detail export — every item matching filters."""
-    stmt = _apply_bug_filters(_eager_bug(), filters, org_id=org_id).order_by(Bug.id.desc())
+def _detail_cap() -> int:
+    """Hard row ceiling per report; the +1 over MAX_REPORT_ROWS lets the export
+    route detect overflow and return 413."""
+    return get_settings().MAX_REPORT_ROWS + 1
+
+
+# Caps the day-by-day timeline against a pathological date_from.
+_MAX_TIMELINE_DAYS = 366
+
+
+def _report_item_detail(db: Session, filters: Filters) -> ReportResult:
+    """Full detail export: every item matching filters."""
+    # Bound the read; the route turns an over-limit result into a 413.
+    stmt = (_apply_bug_filters(_eager_bug(), filters)
+            .order_by(Bug.id.desc())
+            .limit(_detail_cap()))
     bugs = list(db.scalars(stmt).all())
     bug_ids = [b.id for b in bugs]
     attach = _attachments_by_bug(db, bug_ids)
@@ -596,9 +546,9 @@ def _report_item_detail(db: Session, filters: Filters, *, org_id: Optional[int] 
     )
 
 
-def _report_pending_snapshot(db: Session, filters: Filters, *, org_id: Optional[int] = None) -> ReportResult:
-    """Items that are currently OPEN. Status filter from the user is
-    intersected with the open-status set per item_type."""
+def _report_pending_snapshot(db: Session, filters: Filters) -> ReportResult:
+    """Currently-open items; the user's status filter is intersected with the
+    per-type open set."""
     types_to_use = filters.item_types or ["Bug", "Requirement", "Task"]
     open_set: set[str] = set()
     for t in types_to_use:
@@ -606,7 +556,7 @@ def _report_pending_snapshot(db: Session, filters: Filters, *, org_id: Optional[
     if filters.statuses:
         open_set &= set(filters.statuses)
     if not open_set:
-        # Empty intersection — no matches by construction.
+        # Empty intersection: nothing can match.
         return ReportResult(
             report_key="pending_snapshot",
             report_label="Pending Items Snapshot",
@@ -615,23 +565,23 @@ def _report_pending_snapshot(db: Session, filters: Filters, *, org_id: Optional[
             summary={"total_items": 0},
             filters=filters.to_meta(),
         )
-    stmt = _apply_bug_filters(_eager_bug(), filters, apply_status=False, org_id=org_id).where(
+    stmt = _apply_bug_filters(_eager_bug(), filters, apply_status=False).where(
         Bug.status.in_(list(open_set))
-    ).order_by(Bug.priority.desc(), Bug.created_at.asc())
+    ).order_by(Bug.priority.desc(), Bug.created_at.asc()).limit(_detail_cap())
     bugs = list(db.scalars(stmt).all())
     bug_ids = [b.id for b in bugs]
     attach = _attachments_by_bug(db, bug_ids)
-    # Pending items aren't resolved; resolved_info stays empty.
+    # Pending items aren't resolved; pass an empty resolved_info dict.
     rows = [_bug_to_detail_row(b, attach, {}) for b in bugs]
     by_priority: dict[str, int] = {}
     by_assignee: dict[str, int] = {}
     for r in rows:
         by_priority[r["priority"]] = by_priority.get(r["priority"], 0) + 1
-        # Count one per assignee, not per item.
-        for name in (r["assignees"] or "").split(", "):
-            n = name.strip()
-            if n:
-                by_assignee[n] = by_assignee.get(n, 0) + 1
+    # Count from the ORM relationship; splitting the display string would produce
+    # phantom names.
+    for b in bugs:
+        for a in b.assignees:
+            by_assignee[a.name] = by_assignee.get(a.name, 0) + 1
     return ReportResult(
         report_key="pending_snapshot",
         report_label="Pending Items Snapshot",
@@ -646,11 +596,9 @@ def _report_pending_snapshot(db: Session, filters: Filters, *, org_id: Optional[
     )
 
 
-def _build_throughput_query(filters: Filters, *, org_id: Optional[int] = None):
-    """SELECT every status_changed activity for the filter set within the
-    date window. Joined back to Bug so we can check item_type for the
-    resolution-state map. Excludes activities by deleted users (NULL
-    actor_user_id) since "by user" needs a user."""
+def _build_throughput_query(filters: Filters):
+    """Build the status_changed activity query, joined to Bug for item_type.
+    Deleted-user actors are kept, bucketed by their preserved name snapshot."""
     stmt = (
         select(
             Activity.bug_id,
@@ -668,12 +616,7 @@ def _build_throughput_query(filters: Filters, *, org_id: Optional[int] = None):
         .outerjoin(Project, Project.id == Bug.project_id)
         .where(Activity.action == "status_changed")
     )
-    if org_id is not None:
-        # Activity carries its own org_id, but Bug doesn't — scope on the
-        # cheaper indexed column AND on the project's org for defense in
-        # depth (in case a row was historically logged with the wrong org).
-        stmt = stmt.where(Activity.org_id == org_id, Project.org_id == org_id)
-    # Date range — anchored on the audit row's timestamp.
+    # Date range anchored on the audit row, not Bug.created_at.
     if filters.date_from:
         stmt = stmt.where(Activity.created_at >= _start_of_day(filters.date_from))
     if filters.date_to:
@@ -683,13 +626,15 @@ def _build_throughput_query(filters: Filters, *, org_id: Optional[int] = None):
         stmt = stmt.where(Bug.item_type.in_(filters.item_types))
     if filters.project_ids:
         stmt = stmt.where(Bug.project_id.in_(filters.project_ids))
+    # Route-set project scope (audit-log reports don't go through _apply_bug_filters).
+    if filters.restrict_project_ids is not None:
+        stmt = stmt.where(Bug.project_id.in_(filters.restrict_project_ids))
     if filters.event_id is not None:
         stmt = stmt.where(Bug.event_id == filters.event_id)
     if filters.assignee_ids:
         stmt = stmt.where(Bug.assignees.any(User.id.in_(filters.assignee_ids)))
     if filters.reporter_ids:
-        # The reporter filter on a throughput report is unusual but valid —
-        # "how many of MY filed bugs got resolved last week, and by whom".
+        # Unusual but valid: "how many bugs I filed got resolved?"
         stmt = stmt.where(Bug.reporter_id.in_(filters.reporter_ids))
     if filters.priorities:
         stmt = stmt.where(Bug.priority.in_(filters.priorities))
@@ -700,22 +645,27 @@ def _build_throughput_query(filters: Filters, *, org_id: Optional[int] = None):
 
 def _fold_throughput_row(
     raw,
-    per_user: dict[int, dict[str, Any]],
+    per_user: dict[Any, dict[str, Any]],
     detail_rows: list[dict[str, Any]],
 ) -> None:
-    """Process one throughput-query tuple: count it into the right user
-    bucket and append a detail row. No-op if the row isn't a transition
-    into a resolved state for the item's type."""
+    """Count one throughput tuple into its user bucket and append a detail row;
+    no-op unless it's a transition into a resolved state."""
     (bug_id, actor_id, actor_name, created_at, detail,
      item_type, title, priority, current_status, project_name) = raw
     it = item_type or "Bug"
     new_status = _parse_resolution_status(detail or "")
     if not new_status or not _is_resolved_status(new_status, it):
         return
-    key = actor_id if actor_id is not None else -1  # -1 = deleted-user actor
+    # Skip resolved→resolved (e.g. Resolved→Closed) to avoid double-counting.
+    old_status = _parse_prior_status(detail or "")
+    if old_status and _is_resolved_status(old_status, it):
+        return
     name = actor_name or "(deleted user)"
+    # actor_user_id is NULL for deleted users; bucket on the name snapshot so
+    # distinct ex-users don't collapse onto one row.
+    key = actor_id if actor_id is not None else f"deleted:{name}"
     bucket = per_user.setdefault(key, {
-        "user_id": key if key != -1 else None,
+        "user_id": actor_id,
         "user_name": name,
         "resolved_count": 0,
         "by_status": {},
@@ -737,26 +687,22 @@ def _fold_throughput_row(
     })
 
 
-def _accumulate_throughput(rows_raw) -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]]]:
-    """Fold throughput-query tuples into per-user buckets + detail rows.
-
-    Only rows whose detail string records a transition INTO a resolved
-    state for the item's type are counted. Deleted-user actors collapse
-    onto the -1 sentinel key.
-    """
-    per_user: dict[int, dict[str, Any]] = {}
+def _accumulate_throughput(rows_raw) -> tuple[dict[Any, dict[str, Any]], list[dict[str, Any]]]:
+    """Fold throughput tuples into per-user buckets and detail rows (resolved
+    transitions only)."""
+    per_user: dict[Any, dict[str, Any]] = {}
     detail_rows: list[dict[str, Any]] = []
     for raw in rows_raw:
         _fold_throughput_row(raw, per_user, detail_rows)
     return per_user, detail_rows
 
 
-def _report_throughput(db: Session, filters: Filters, *, org_id: Optional[int] = None) -> ReportResult:
-    """Per-user count of items they moved INTO a resolved state during
-    the time window. Multi-counts intentionally if the same bug was
-    reopened and re-resolved by different people in the same window —
-    that's two real units of work."""
-    rows_raw = db.execute(_build_throughput_query(filters, org_id=org_id)).all()
+def _report_throughput(db: Session, filters: Filters) -> ReportResult:
+    """Per-user count of items resolved in the window (a reopened-then-re-resolved
+    bug counts twice — two units of work)."""
+    # Bound the detail list so the 413 guard can't be outrun into an OOM.
+    rows_raw = db.execute(_build_throughput_query(filters).limit(_detail_cap())).all()
+    truncated = len(rows_raw) >= _detail_cap()
     per_user, detail_rows = _accumulate_throughput(rows_raw)
     rows: list[dict[str, Any]] = []
     for bucket in per_user.values():
@@ -797,6 +743,7 @@ def _report_throughput(db: Session, filters: Filters, *, org_id: Optional[int] =
         filters=filters.to_meta(),
         detail_columns=detail_columns,
         detail_rows=detail_rows,
+        truncated=truncated,
     )
 
 
@@ -809,15 +756,10 @@ def _distribution_report(
     label_header: str,
     report_key: str,
     report_label: str,
-    org_id: Optional[int] = None,
 ) -> ReportResult:
-    """Shared helper for status / priority distribution.
-
-    column = Bug.status or Bug.priority (SQLAlchemy column).
-    """
-    base = _apply_bug_filters(select(Bug.id), filters, org_id=org_id)
+    """Shared helper for status / priority distribution (column is the grouped column)."""
+    base = _apply_bug_filters(select(Bug.id), filters)
     base_subq = base.subquery()
-    # We GROUP BY the chosen column over the filtered set.
     grouped = db.execute(
         select(column, func.count(Bug.id))
         .where(Bug.id.in_(select(base_subq.c.id)))
@@ -828,11 +770,15 @@ def _distribution_report(
     total = sum(r["count"] for r in rows)
     for r in rows:
         r["percentage"] = round((r["count"] / total) * 100, 1) if total else 0.0
-    # Drill-down: every bug that contributed to a non-zero bucket.
-    detail_stmt = _apply_bug_filters(_eager_bug(), filters, org_id=org_id).order_by(Bug.id.desc())
+    # Drill-down detail, capped; the GROUP BY counts above stay exact regardless.
+    detail_stmt = (_apply_bug_filters(_eager_bug(), filters)
+                   .order_by(Bug.id.desc())
+                   .limit(_detail_cap()))
     detail_bugs = list(db.scalars(detail_stmt).all())
     attach = _attachments_by_bug(db, [b.id for b in detail_bugs])
-    detail_rows = [_bug_to_detail_row(b, attach, {}) for b in detail_bugs]
+    # Fill resolved-at/by in the drill-down (consistent with item_detail).
+    resolved_info = _fetch_resolution_info(db, [b.id for b in detail_bugs])
+    detail_rows = [_bug_to_detail_row(b, attach, resolved_info) for b in detail_bugs]
     columns = [
         ReportColumn(label_key, label_header, 18),
         ReportColumn("count", "Count", 12, kind="number", align="right"),
@@ -850,47 +796,50 @@ def _distribution_report(
     )
 
 
-def _report_status_distribution(db: Session, filters: Filters, *, org_id: Optional[int] = None) -> ReportResult:
+def _report_status_distribution(db: Session, filters: Filters) -> ReportResult:
     return _distribution_report(
         db, filters,
         column=Bug.status, label_key="status", label_header="Status",
         report_key="status_distribution", report_label="Status Distribution",
-        org_id=org_id,
     )
 
 
-def _report_priority_distribution(db: Session, filters: Filters, *, org_id: Optional[int] = None) -> ReportResult:
+def _report_priority_distribution(db: Session, filters: Filters) -> ReportResult:
     return _distribution_report(
         db, filters,
         column=Bug.priority, label_key="priority", label_header="Priority",
         report_key="priority_distribution", report_label="Priority Distribution",
-        org_id=org_id,
     )
 
 
-def _report_project_breakdown(db: Session, filters: Filters, *, org_id: Optional[int] = None) -> ReportResult:
-    """Per-project: created, still open, resolved/done. Drill-down is the
-    full item list for the active filter set."""
-    base = _apply_bug_filters(_eager_bug(), filters, org_id=org_id).order_by(Bug.id.desc())
-    bugs = list(db.scalars(base).all())
+def _add_breakdown_counts(bucket: dict[str, int], status: str,
+                          item_type: str, count: int) -> None:
+    """Fold one (status, item_type) group's count into a project bucket."""
+    bucket["created"] += count
+    if _is_open_status(status, item_type):
+        bucket["open"] += count
+    if _is_resolved_status(status, item_type):
+        bucket["resolved"] += count
+    if status in FINAL_STATUSES_BY_TYPE.get(item_type, []):
+        bucket["final"] += count
+
+
+def _report_project_breakdown(db: Session, filters: Filters) -> ReportResult:
+    """Per-project counts (created, open, resolved/final). Rolled-up counts are a
+    GROUP BY over the full set (exact); only the drill-down is capped."""
+    agg_stmt = _apply_bug_filters(
+        select(Project.name, Bug.item_type, Bug.status, func.count(Bug.id))
+        .select_from(Bug)
+        .join(Project, Project.id == Bug.project_id),
+        filters,
+    ).group_by(Project.name, Bug.item_type, Bug.status)
     by_project: dict[str, dict[str, int]] = {}
-    for b in bugs:
-        proj = b.project.name if b.project else "(no project)"
-        bucket = by_project.setdefault(proj, {
+    for proj, item_type, statusv, count in db.execute(agg_stmt).all():
+        bucket = by_project.setdefault(proj or "(no project)", {
             "created": 0, "open": 0, "resolved": 0, "final": 0,
         })
-        bucket["created"] += 1
-        it = getattr(b, "item_type", None) or "Bug"
-        if _is_open_status(b.status or "", it):
-            bucket["open"] += 1
-        if _is_resolved_status(b.status or "", it):
-            bucket["resolved"] += 1
-        if b.status in FINAL_STATUSES_BY_TYPE.get(it, []):
-            bucket["final"] += 1
-    rows = [
-        {"project": name, **counts}
-        for name, counts in by_project.items()
-    ]
+        _add_breakdown_counts(bucket, statusv or "", item_type or "Bug", int(count))
+    rows = [{"project": name, **counts} for name, counts in by_project.items()]
     rows.sort(key=lambda r: (-r["created"], r["project"].lower()))
     columns = [
         ReportColumn("project", "Project", 28),
@@ -899,6 +848,10 @@ def _report_project_breakdown(db: Session, filters: Filters, *, org_id: Optional
         ReportColumn("resolved", "Resolved", 12, kind="number", align="right"),
         ReportColumn("final", "Final", 10, kind="number", align="right"),
     ]
+    detail_stmt = (_apply_bug_filters(_eager_bug(), filters)
+                   .order_by(Bug.id.desc())
+                   .limit(_detail_cap()))
+    bugs = list(db.scalars(detail_stmt).all())
     attach = _attachments_by_bug(db, [b.id for b in bugs])
     resolved_info = _fetch_resolution_info(db, [b.id for b in bugs])
     detail_rows = [_bug_to_detail_row(b, attach, resolved_info) for b in bugs]
@@ -907,7 +860,8 @@ def _report_project_breakdown(db: Session, filters: Filters, *, org_id: Optional
         report_label="Project Breakdown",
         columns=columns,
         rows=rows,
-        summary={"project_count": len(rows), "item_count": len(bugs)},
+        summary={"project_count": len(rows),
+                 "item_count": sum(r["created"] for r in rows)},
         filters=filters.to_meta(),
         detail_columns=_detail_columns(),
         detail_rows=detail_rows,
@@ -926,19 +880,23 @@ def _age_bucket(days: int) -> str:
     return "90+ days"
 
 
-def _report_aging(db: Session, filters: Filters, *, org_id: Optional[int] = None) -> ReportResult:
+def _report_aging(db: Session, filters: Filters) -> ReportResult:
     """Open items sorted oldest first, with an age bucket."""
     types_to_use = filters.item_types or ["Bug", "Requirement", "Task"]
     open_set: set[str] = set()
     for t in types_to_use:
         open_set.update(OPEN_STATUSES_BY_TYPE.get(t, []))
+    no_open_match = False
     if filters.statuses:
         open_set &= set(filters.statuses)
-    stmt = _apply_bug_filters(_eager_bug(), filters, apply_status=False, org_id=org_id)
+        no_open_match = not open_set
+    stmt = _apply_bug_filters(_eager_bug(), filters, apply_status=False)
     if open_set:
         stmt = stmt.where(Bug.status.in_(list(open_set)))
-    stmt = stmt.order_by(Bug.created_at.asc())
-    bugs = list(db.scalars(stmt).all())
+    stmt = stmt.order_by(Bug.created_at.asc()).limit(_detail_cap())
+    # If the user's status filter excludes every open status, return nothing
+    # rather than silently returning resolved/closed items with a bogus age.
+    bugs = [] if no_open_match else list(db.scalars(stmt).all())
     bug_ids = [b.id for b in bugs]
     attach = _attachments_by_bug(db, bug_ids)
     rows: list[dict[str, Any]] = []
@@ -972,50 +930,78 @@ def _report_aging(db: Session, filters: Filters, *, org_id: Optional[int] = None
     )
 
 
-def _report_timeline(db: Session, filters: Filters, *, org_id: Optional[int] = None) -> ReportResult:
-    """Per-day counts of created vs resolved within the window. If no
-    date range is provided, defaults to the last 30 days."""
+def _utc_date(db: Session, col):
+    """``func.date(col)`` normalized to UTC. Postgres truncates timestamptz in the
+    session tz (shifts day counts), so coerce explicitly; SQLite is already UTC."""
+    try:
+        dialect = db.get_bind().dialect.name
+    except Exception:  # pragma: no cover - defensive; bind is always present in practice
+        dialect = ""
+    if dialect == "postgresql":
+        return func.date(func.timezone("UTC", col))
+    return func.date(col)
+
+
+def _utc_day_key(value) -> str:
+    """ISO UTC date string matching _utc_date's SQL bucketing, so resolved and
+    created counts align."""
+    if isinstance(value, datetime):
+        v = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return v.astimezone(timezone.utc).date().isoformat()
+    return value.isoformat()
+
+
+def _bucket_resolved_by_day(res_rows) -> dict[str, int]:
+    """Fold throughput rows into per-day resolved counts for _report_timeline."""
+    resolved_by_day: dict[str, int] = {}
+    for (_bug_id, _actor_id, _actor_name, created_at, detail,
+         item_type, *_rest) in res_rows:
+        it = item_type or "Bug"
+        ns = _parse_resolution_status(detail or "")
+        if ns and _is_resolved_status(ns, it):
+            # Skip resolved→resolved (e.g. Resolved→Closed) to avoid double-counting,
+            # same guard _fold_throughput_row uses for the identical purpose.
+            old = _parse_prior_status(detail or "")
+            if old and _is_resolved_status(old, it):
+                continue
+            # Bucket on the UTC day to match the created side (_utc_date) and
+            # the window keys below; without this, a non-UTC session would bucket
+            # created and resolved onto different days.
+            key = _utc_day_key(created_at)
+            resolved_by_day[key] = resolved_by_day.get(key, 0) + 1
+    return resolved_by_day
+
+
+def _report_timeline(db: Session, filters: Filters) -> ReportResult:
+    """Per-day created vs resolved counts; defaults to the last 30 days."""
     today = datetime.now(timezone.utc).date()
     start = filters.date_from or (today - timedelta(days=29))
     end = filters.date_to or today
-    # Created: bugs.created_at in [start, end]
+    # Clamp the span to _MAX_TIMELINE_DAYS.
+    if end < start:
+        start = end
+    if (end - start).days > _MAX_TIMELINE_DAYS:
+        start = end - timedelta(days=_MAX_TIMELINE_DAYS)
+    # Created side: bugs with created_at in [start, end]. statuses=[] so the
+    # created side isn't status-filtered; restrict_project_ids carries through
+    # unchanged, or the timeline leaks other projects.
+    created_filters = filters.with_overrides(date_from=start, date_to=end, statuses=[])
     created_stmt = _apply_bug_filters(
-        select(func.date(Bug.created_at), func.count(Bug.id)),
-        Filters(
-            date_from=start, date_to=end,
-            item_types=filters.item_types, statuses=[],   # don't filter status
-            priorities=filters.priorities,
-            environments=filters.environments,
-            project_ids=filters.project_ids,
-            assignee_ids=filters.assignee_ids,
-            reporter_ids=filters.reporter_ids,
-            event_id=filters.event_id,
-            include_not_a_bug=filters.include_not_a_bug,
-            text_search=filters.text_search,
-        ),
-        org_id=org_id,
-    ).group_by(func.date(Bug.created_at))
+        select(_utc_date(db, Bug.created_at), func.count(Bug.id)),
+        created_filters,
+    ).group_by(_utc_date(db, Bug.created_at))
     created_by_day = {str(d): int(c) for d, c in db.execute(created_stmt).all()}
-    # Resolved: rely on the throughput query, then bucket per day.
-    res_filters = Filters(
-        date_from=start, date_to=end,
-        item_types=filters.item_types,
-        priorities=filters.priorities,
-        environments=filters.environments,
-        project_ids=filters.project_ids,
-        assignee_ids=filters.assignee_ids,
-        reporter_ids=filters.reporter_ids,
-        event_id=filters.event_id,
-        include_not_a_bug=filters.include_not_a_bug,
-        text_search=filters.text_search,
-    )
-    resolved_by_day: dict[str, int] = {}
-    for (_bug_id, _actor_id, _actor_name, created_at, detail,
-         item_type, *_rest) in db.execute(_build_throughput_query(res_filters, org_id=org_id)).all():
-        ns = _parse_resolution_status(detail or "")
-        if ns and _is_resolved_status(ns, item_type or "Bug"):
-            key = (created_at.date() if isinstance(created_at, datetime) else created_at).isoformat()
-            resolved_by_day[key] = resolved_by_day.get(key, 0) + 1
+    # Resolved side: reuse the throughput query and bucket by day. statuses is
+    # left as-is since _build_throughput_query never reads Filters.statuses.
+    res_filters = filters.with_overrides(date_from=start, date_to=end)
+    # The 366-day window clamps the date span but not the number of
+    # status-change rows within it, so an unbounded query here could stream the
+    # entire activity history into memory on a busy instance.
+    res_rows = db.execute(
+        _build_throughput_query(res_filters).limit(_detail_cap())
+    ).all()
+    truncated = len(res_rows) >= _detail_cap()
+    resolved_by_day = _bucket_resolved_by_day(res_rows)
     rows: list[dict[str, Any]] = []
     day = start
     total_created = 0
@@ -1051,13 +1037,13 @@ def _report_timeline(db: Session, filters: Filters, *, org_id: Optional[int] = N
             "net": total_created - total_resolved,
         },
         filters=filters.to_meta(),
+        truncated=truncated,
     )
 
 
 def _ttr_row(raw, bug_created: Optional[datetime]) -> Optional[dict[str, Any]]:
-    """Build one Time-to-Resolution row from a throughput-query tuple, or
-    return None if the row isn't a resolved transition with a known
-    creation time."""
+    """Build one Time-to-Resolution row from a throughput-query tuple.
+    Returns None if the row isn't a resolved transition or the creation time is unknown."""
     (bug_id, _actor_id, actor_name, created_at, detail,
      item_type, title, priority, _current_status, project_name) = raw
     ns = _parse_resolution_status(detail or "")
@@ -1083,7 +1069,7 @@ def _ttr_row(raw, bug_created: Optional[datetime]) -> Optional[dict[str, Any]]:
 
 
 def _ttr_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """Aggregate avg / median / p95 / fastest / slowest over built rows."""
+    """Compute avg, median, p95, fastest, and slowest from the TTR rows."""
     durations = [r["hours_to_resolve"] for r in rows]
     if not durations:
         return {"count": 0, "average_hours": 0, "median_hours": 0,
@@ -1098,11 +1084,12 @@ def _ttr_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _report_time_to_resolution(db: Session, filters: Filters, *, org_id: Optional[int] = None) -> ReportResult:
-    """Per-resolved-item: hours from creation to resolution. Plus aggregate
+def _report_time_to_resolution(db: Session, filters: Filters) -> ReportResult:
+    """Per-resolved-item hours from creation to resolution, plus aggregate
     avg / median / p95 across the whole filtered set."""
-    rows_raw = db.execute(_build_throughput_query(filters, org_id=org_id)).all()
-    # Load bug creation times in one shot.
+    rows_raw = db.execute(_build_throughput_query(filters).limit(_detail_cap())).all()
+    truncated = len(rows_raw) >= _detail_cap()
+    # Load all bug creation times in a single query.
     bug_ids = list({row[0] for row in rows_raw})
     creation = dict(db.execute(
         select(Bug.id, Bug.created_at).where(Bug.id.in_(bug_ids))
@@ -1138,6 +1125,7 @@ def _report_time_to_resolution(db: Session, filters: Filters, *, org_id: Optiona
         rows=rows,
         summary=_ttr_summary(rows),
         filters=filters.to_meta(),
+        truncated=truncated,
     )
 
 
@@ -1145,7 +1133,7 @@ def _percentile(values: list[float], pct: float) -> float:
     if not values:
         return 0.0
     s = sorted(values)
-    # Linear interpolation between closest ranks (NIST style).
+    # Linear interpolation between adjacent ranks (NIST method).
     k = (len(s) - 1) * (pct / 100)
     f = int(k)
     c = min(f + 1, len(s) - 1)
@@ -1156,9 +1144,6 @@ def _percentile(values: list[float], pct: float) -> float:
     return d0 + d1
 
 
-# ---------------------------------------------------------------------------
-# Public dispatcher
-# ---------------------------------------------------------------------------
 _DISPATCH = {
     "item_detail":             _report_item_detail,
     "pending_snapshot":        _report_pending_snapshot,
@@ -1173,29 +1158,17 @@ _DISPATCH = {
 
 
 class UnknownReportError(ValueError):
-    """Raised when the report key isn't in REPORT_CATALOG."""
+    """Raised when the report key is not in REPORT_CATALOG."""
 
 
-def run_report(
-    key: str,
-    filters: Filters,
-    db: Session,
-    *,
-    org_id: Optional[int] = None,
-) -> ReportResult:
-    """Run the named report. Raises UnknownReportError if `key` is bogus.
-
-    `org_id` — enterprise multi-tenancy scope. The route layer ALWAYS
-    passes `actor.org_id`; the engine refuses to leak data across orgs.
-    Tests may omit it to keep fixture setup simple — in that case the
-    engine returns ALL rows (single-org tests).
-    """
+def run_report(key: str, filters: Filters, db: Session) -> ReportResult:
+    """Run the named report and return its result. Raises UnknownReportError for unrecognized keys."""
     if key not in _DISPATCH:
         raise UnknownReportError(
             f"Unknown report '{key}'. "
             f"Known: {', '.join(sorted(REPORT_CATALOG.keys()))}"
         )
-    return _DISPATCH[key](db, filters, org_id=org_id)
+    return _DISPATCH[key](db, filters)
 
 
 __all__ = [

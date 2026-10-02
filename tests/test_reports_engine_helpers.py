@@ -1,27 +1,10 @@
-"""Unit tests for the reports-engine helpers extracted during the Sonar
-S3776 cognitive-complexity refactor.
+"""Unit tests for reports-engine helpers (no DB round-trip).
 
-These exercise the new helper functions directly (no DB round-trip) so the
-new-code coverage stays above the quality gate, and they pin the behaviour
-the refactor must preserve:
-
-  * _days_open_value      — open-duration in whole days, tz-coercion
-  * _bug_scalar_fields    — plain bug columns with defaults
-  * _bug_relation_fields  — related-object columns with None handling
-  * _ttr_row              — one Time-to-Resolution row from a query tuple
-  * _ttr_summary          — avg / median / p95 / fastest / slowest
-  * _fold_throughput_row  — per-user bucket accumulation
-  * _percentile           — NIST linear interpolation
-  * filter-blob parsers   — _parse_date / _parse_int / _str_list / _int_list
-
-The throughput query tuple shape (see _build_throughput_query) is:
+Throughput query tuple shape (see _build_throughput_query):
   (bug_id, actor_user_id, actor_name, created_at, detail,
    item_type, title, priority, current_status, project_name)
-
-`_bug_scalar_fields` / `_bug_relation_fields` are typed to accept a Bug, so
-the tests build real (transient, never-flushed) Bug/Project/User/Event
-instances rather than duck-typed stand-ins — column defaults only apply at
-flush, so unset attributes read back as None / [].
+Scalar/relation-field tests use transient (never-flushed) Bug instances, so
+column defaults (applied only at flush) read back as None or [].
 """
 from __future__ import annotations
 
@@ -45,9 +28,7 @@ def _raw(detail, *, bug_id=5, actor_id=9, actor_name="Alice",
     )
 
 
-# ---------------------------------------------------------------------------
-# _days_open_value
-# ---------------------------------------------------------------------------
+# --- _days_open_value ---
 def test_days_open_value_resolved_span():
     from app.reports.engine import _days_open_value
     assert _days_open_value(_utc(2026, 1, 1), _utc(2026, 1, 6)) == 5
@@ -66,7 +47,7 @@ def test_days_open_value_still_open_measures_to_now():
 
 def test_days_open_value_never_negative():
     from app.reports.engine import _days_open_value
-    # resolved before created (clock skew / bad data) clamps to 0.
+    # resolved-before-created (clock skew / bad data) should clamp to 0.
     assert _days_open_value(_utc(2026, 1, 10), _utc(2026, 1, 1)) == 0
 
 
@@ -77,13 +58,11 @@ def test_days_open_value_coerces_naive_datetimes():
     assert _days_open_value(created, resolved) == 3
 
 
-# ---------------------------------------------------------------------------
-# _bug_scalar_fields / _bug_relation_fields  (real transient Bug instances)
-# ---------------------------------------------------------------------------
+# --- _bug_scalar_fields / _bug_relation_fields  (real transient Bug instances) ---
 def test_bug_scalar_fields_applies_defaults():
     from app.models import Bug
     from app.reports.engine import _bug_scalar_fields
-    b = Bug(id=7)  # every other column unset → reads back as None
+    b = Bug(id=7)  # all other columns unset, read back as None
     f = _bug_scalar_fields(b)
     assert f["id"] == 7
     assert f["item_type"] == "Bug"      # None → default
@@ -104,10 +83,10 @@ def test_bug_relation_fields_resolves_related_objects():
     from app.models import Bug, Event, Project, User
     from app.reports.engine import _bug_relation_fields
     b = Bug(id=1, title="t")
-    b.project = Project(name="Apollo")
-    b.event = Event(name="Launch")
-    b.reporter = User(name="Alice", email="alice@x.io")
-    b.assignees = [User(name="Bob"), User(name="Carol")]
+    b.project = Project(org_id=1, name="Apollo")
+    b.event = Event(org_id=1, name="Launch")
+    b.reporter = User(org_id=1, name="Alice", email="alice@x.io")
+    b.assignees = [User(org_id=1, name="Bob"), User(org_id=1, name="Carol")]
     f = _bug_relation_fields(b)
     assert f["project"] == "Apollo"
     assert f["event"] == "Launch"
@@ -119,7 +98,7 @@ def test_bug_relation_fields_resolves_related_objects():
 def test_bug_relation_fields_handles_all_none():
     from app.models import Bug
     from app.reports.engine import _bug_relation_fields
-    # No project/event/reporter, no assignees → every field falls back to "".
+    # No project/event/reporter/assignees — every field falls back to "".
     b = Bug(id=2, title="t")
     f = _bug_relation_fields(b)
     assert f["project"] == ""
@@ -129,9 +108,7 @@ def test_bug_relation_fields_handles_all_none():
     assert f["assignees"] == ""
 
 
-# ---------------------------------------------------------------------------
-# _ttr_row
-# ---------------------------------------------------------------------------
+# --- _ttr_row ---
 def test_ttr_row_builds_resolved_row():
     from app.reports.engine import _ttr_row
     raw = _raw("status: 'New' → 'Resolved'", created_at=_utc(2026, 1, 2))
@@ -158,16 +135,14 @@ def test_ttr_row_skips_when_no_creation_time():
 
 def test_ttr_row_clamps_and_coerces_naive():
     from app.reports.engine import _ttr_row
-    # naive resolution 12h after naive creation, status Closed (resolved for Bug).
+    # Naive datetimes: resolution 12h after creation, Closed counts as resolved.
     raw = _raw("status: 'New' → 'Closed'",
                created_at=datetime(2026, 1, 1, 12, 0), current_status="Closed")
     row = _ttr_row(raw, datetime(2026, 1, 1, 0, 0))
     assert row["hours_to_resolve"] == pytest.approx(12.0)
 
 
-# ---------------------------------------------------------------------------
-# _ttr_summary
-# ---------------------------------------------------------------------------
+# --- _ttr_summary ---
 def test_ttr_summary_empty_is_all_zero():
     from app.reports.engine import _ttr_summary
     s = _ttr_summary([])
@@ -182,14 +157,12 @@ def test_ttr_summary_aggregates_sorted_rows():
     assert s["count"] == 3
     assert s["average_hours"] == pytest.approx(4.0)
     assert s["median_hours"] == pytest.approx(4.0)
-    assert s["fastest_hours"] == pytest.approx(2.0)     # rows[0]
-    assert s["slowest_hours"] == pytest.approx(6.0)     # rows[-1]
+    assert s["fastest_hours"] == pytest.approx(2.0)
+    assert s["slowest_hours"] == pytest.approx(6.0)
     assert s["p95_hours"] >= 5.0
 
 
-# ---------------------------------------------------------------------------
-# _fold_throughput_row
-# ---------------------------------------------------------------------------
+# --- _fold_throughput_row ---
 def test_fold_throughput_row_counts_resolution():
     from app.reports.engine import _fold_throughput_row
     per_user, details = {}, []
@@ -203,16 +176,25 @@ def test_fold_throughput_row_counts_resolution():
     assert details[0]["bug_id"] == 5
 
 
-def test_fold_throughput_row_deleted_actor_uses_sentinel():
+def test_fold_throughput_row_deleted_actor_bucketed_by_name():
+    # Deleted users (NULL actor_user_id) are keyed by their snapshot name so
+    # two different ex-employees' work never merges under a single bucket.
     from app.reports.engine import _fold_throughput_row
     per_user, details = {}, []
-    raw = _raw("status: 'New' → 'Closed'", actor_id=None, actor_name=None,
+    raw = _raw("status: 'New' → 'Closed'", actor_id=None, actor_name="Gone Guy",
                current_status="Closed")
     _fold_throughput_row(raw, per_user, details)
-    assert -1 in per_user
-    assert per_user[-1]["user_id"] is None
-    assert per_user[-1]["user_name"] == "(deleted user)"
-    assert details[0]["user_name"] == "(deleted user)"
+    assert "deleted:Gone Guy" in per_user
+    assert per_user["deleted:Gone Guy"]["user_id"] is None
+    assert per_user["deleted:Gone Guy"]["user_name"] == "Gone Guy"
+    assert details[0]["user_name"] == "Gone Guy"
+
+    # A second distinct ex-user must land in its own bucket.
+    raw2 = _raw("status: 'New' → 'Closed'", actor_id=None, actor_name="Other Gone",
+                current_status="Closed")
+    _fold_throughput_row(raw2, per_user, details)
+    assert per_user["deleted:Gone Guy"]["resolved_count"] == 1
+    assert per_user["deleted:Other Gone"]["resolved_count"] == 1
 
 
 def test_fold_throughput_row_ignores_non_resolution():
@@ -236,9 +218,29 @@ def test_fold_throughput_row_accumulates_multiple_for_one_user():
     assert len(details) == 2
 
 
-# ---------------------------------------------------------------------------
-# _percentile (NIST linear interpolation)
-# ---------------------------------------------------------------------------
+# --- _bucket_resolved_by_day ---
+def test_bucket_resolved_by_day_counts_resolution():
+    from app.reports.engine import _bucket_resolved_by_day
+    rows = [_raw("status: 'New' → 'Resolved'", created_at=_utc(2026, 1, 2))]
+    assert _bucket_resolved_by_day(rows) == {"2026-01-02": 1}
+
+
+def test_bucket_resolved_by_day_skips_resolved_to_resolved():
+    # Resolved -> Closed is not a new resolution; must not be double-counted
+    # into the timeline (same guard _fold_throughput_row uses).
+    from app.reports.engine import _bucket_resolved_by_day
+    rows = [_raw("status: 'Resolved' → 'Closed'", current_status="Closed",
+                 created_at=_utc(2026, 1, 3))]
+    assert _bucket_resolved_by_day(rows) == {}
+
+
+def test_bucket_resolved_by_day_ignores_non_resolution():
+    from app.reports.engine import _bucket_resolved_by_day
+    rows = [_raw("status: 'New' → 'In Progress'", current_status="In Progress")]
+    assert _bucket_resolved_by_day(rows) == {}
+
+
+# --- _percentile (NIST linear interpolation) ---
 def test_percentile_empty_is_zero():
     from app.reports.engine import _percentile
     assert _percentile([], 95) == pytest.approx(0.0)
@@ -246,23 +248,22 @@ def test_percentile_empty_is_zero():
 
 def test_percentile_exact_rank():
     from app.reports.engine import _percentile
-    # 0th and 100th land exactly on the endpoints (f == c branch).
+    # 0th and 100th fall exactly on the endpoints (f == c branch).
     assert _percentile([10.0, 20.0, 30.0], 0) == pytest.approx(10.0)
     assert _percentile([10.0, 20.0, 30.0], 100) == pytest.approx(30.0)
 
 
 def test_percentile_interpolates_between_ranks():
     from app.reports.engine import _percentile
-    # 95th of 0..100 (step 10) → between the 9th (90) and 10th (100) ranks.
+    # 95th of 0..100 (step 10) interpolates between the 9th (90) and 10th (100) values.
     values = [float(x) for x in range(0, 101, 10)]
     assert _percentile(values, 95) == pytest.approx(95.0)
 
 
-# ---------------------------------------------------------------------------
-# Filter-blob parsing helpers
-# ---------------------------------------------------------------------------
+# --- Filter-blob parsing helpers ---
 def test_parse_date_variants():
     from datetime import date
+
     from app.reports.engine import _parse_date
     assert _parse_date("2026-06-11") == date(2026, 6, 11)
     assert _parse_date(date(2026, 1, 2)) == date(2026, 1, 2)
@@ -287,7 +288,7 @@ def test_str_list_variants():
     assert _str_list(None) == []
     assert _str_list("  hi ") == ["hi"]
     assert _str_list("   ") == []
-    # Dedupe + strip + drop non-strings / empties, order preserved.
+    # Strips, deduplicates, drops non-strings and empties; order preserved.
     assert _str_list(["a", " a ", "b", "", 5]) == ["a", "b"]
     assert _str_list(42) == []
 
@@ -300,9 +301,7 @@ def test_int_list_variants():
     assert _int_list("nope") == []
 
 
-# ---------------------------------------------------------------------------
-# _age_bucket — boundary buckets
-# ---------------------------------------------------------------------------
+# --- _age_bucket — boundary buckets ---
 @pytest.mark.parametrize("days,bucket", [
     (0, "0-7 days"),
     (7, "0-7 days"),

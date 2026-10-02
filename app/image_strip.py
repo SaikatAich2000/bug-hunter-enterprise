@@ -1,26 +1,8 @@
-"""EXIF / metadata stripper for uploaded images (T6).
+"""EXIF / metadata stripper for uploaded images.
 
-Privacy concern: photos taken with a phone include EXIF metadata —
-GPS coordinates, camera serial number, capture timestamp, original
-filename, sometimes the photographer's name. When a bug report is
-filed with a screenshot snapped on a phone, all of that metadata
-travels into Bug Hunter and is downloadable by anyone with access to
-the bug.
-
-This module re-encodes uploaded images through Pillow with the
-``info`` dict cleared, which drops EXIF (JPEG), tEXt/iTXt/eXIf chunks
-(PNG), XMP, ICC profiles, and any other ancillary metadata blocks.
-Pixel data is preserved exactly.
-
-Behaviour:
-  - Only runs when the upload's content_type starts with ``image/``.
-  - Pillow is imported lazily so non-image deployments don't pay for it.
-  - On ANY failure (Pillow not installed, format unsupported, corrupt
-    file, decompression-bomb-protection trip), the original bytes are
-    returned unchanged — fail-open, never block a legitimate upload
-    because of metadata cleanup.
-  - SVG is excluded (it's text/XML, not raster) and falls through to
-    the route's own active-content-type defenses.
+Re-encodes raster uploads through Pillow with the ``info`` dict cleared,
+dropping EXIF/XMP/ICC and PNG text chunks (GPS, serials, etc.) while keeping
+pixel data. Fails open on any error so cleanup never blocks a legit upload.
 """
 from __future__ import annotations
 
@@ -29,19 +11,17 @@ import logging
 
 logger = logging.getLogger("bug_hunter.image_strip")
 
-# Formats we recognise as raster images Pillow can safely re-encode.
-# Extending this set is fine — anything Pillow can read it can write.
+# Raster formats Pillow can safely re-encode. Add more as needed.
 _RASTER_PREFIXES = ("image/jpeg", "image/png", "image/gif", "image/webp",
                     "image/bmp", "image/tiff")
 
+# 50 MP decode ceiling — Pillow's own limits (~178/357 MP) can OOM a small server.
+_MAX_IMAGE_PIXELS = 50_000_000
+
 
 def strip_image_metadata(data: bytes, content_type: str | None) -> bytes:
-    """Return a metadata-stripped copy of ``data`` if it's a recognised
-    raster image, else ``data`` unchanged.
-
-    Idempotent: a second pass over already-stripped bytes is a no-op
-    (modulo lossless re-encode jitter for JPEG).
-    """
+    """Return a metadata-stripped copy of a recognised raster image, else
+    ``data`` unchanged. Idempotent."""
     if not data or not content_type:
         return data
     ct = content_type.lower().split(";")[0].strip()
@@ -51,35 +31,42 @@ def strip_image_metadata(data: bytes, content_type: str | None) -> bytes:
     try:
         from PIL import Image
     except ImportError:
-        # Pillow isn't installed — operator opted out by pinning a
-        # build without it. Return original.
+        # No Pillow = operator opted out; return original.
         return data
 
     try:
         with io.BytesIO(data) as src:
             img = Image.open(src)
+            # Check dimensions before load() allocates the pixel buffer.
+            width, height = img.size
+            if width * height > _MAX_IMAGE_PIXELS:
+                logger.info("EXIF strip skipped (%s): %d×%d px exceeds the decode budget",
+                            ct, width, height)
+                return data
+            # Multi-frame (animated GIF/WebP, TIFF): save() keeps only frame 1,
+            # so leave these untouched.
+            if getattr(img, "is_animated", False) or getattr(img, "n_frames", 1) > 1:
+                logger.info("EXIF strip skipped (%s): preserving multi-frame image", ct)
+                return data
             img.load()
             fmt = img.format
             if fmt is None:
                 return data
-            # info is where Pillow exposes EXIF/ICC/XMP/text chunks.
-            # Clearing it BEFORE save guarantees none of them ride into
-            # the output buffer.
+            # img.info holds EXIF/ICC/XMP/text chunks; clear before save. Preserve
+            # palette transparency (tRNS) first, or GIFs/palette PNGs turn opaque.
+            transparency = img.info.get("transparency")
             img.info = {}
             out = io.BytesIO()
-            # Pass exif=b"" explicitly for JPEG so even a future Pillow
-            # version that starts preserving EXIF from info.get('exif')
-            # still emits a blank EXIF block.
+            # exif=b"" guards against a future Pillow reading EXIF back from info.
             if fmt == "JPEG":
                 img.save(out, format=fmt, exif=b"")
+            elif transparency is not None:
+                img.save(out, format=fmt, transparency=transparency)
             else:
                 img.save(out, format=fmt)
             return out.getvalue()
-    except (OSError, ValueError) as exc:
-        # Corrupt image, format Pillow can't decode, decompression-bomb
-        # trip — leave the file alone. Sonar S5713: PIL.UnidentifiedImageError
-        # is a subclass of OSError, so catching OSError covers it too;
-        # listing both would be redundant. Logged at info level (not warn)
-        # because it's an expected outcome for exotic uploads.
+    except Exception as exc:  # noqa: BLE001 - deliberate fail-open
+        # Pillow raises a mix of OSError and bare Exception subclasses; a
+        # narrow tuple would let some escape as a 500.
         logger.info("EXIF strip skipped (%s): %s", ct, exc)
         return data

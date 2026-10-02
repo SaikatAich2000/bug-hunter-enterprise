@@ -1,18 +1,12 @@
-"""Email service.
+"""Email service with console / smtp / disabled backends.
 
-Three backends:
-  - console   : just logs the email to stdout. Default; perfect for dev.
-  - smtp      : sends via real SMTP server.
-  - disabled  : no-op. For tests.
-
-All public functions are designed to be called from a FastAPI
-BackgroundTasks instance: they take pre-fetched primitives (not DB
-sessions or ORM objects) so they don't blow up if called after the
-request has finished and the session is closed.
+Public functions run from FastAPI BackgroundTasks: they take pre-fetched
+primitives (no DB sessions/ORM) so they work after the request session closes.
 """
 from __future__ import annotations
 
 import logging
+import re
 import smtplib
 import ssl
 from dataclasses import dataclass
@@ -23,19 +17,18 @@ from app.config import Settings, get_settings
 
 logger = logging.getLogger("bug_hunter.email")
 
-# Repeated section label used by every email body that has a free-text
-# description block. Extracted so Sonar's S1192 duplicate-string-literal
-# rule stays quiet.
+# Redact ?token=/&token= values so a DEBUG log can't be replayed.
+_TOKEN_IN_URL_RE = re.compile(r"(?i)([?&]token=)[^&\s]+")
+
+
+def _redact_secrets_for_log(text: str) -> str:
+    return _TOKEN_IN_URL_RE.sub(r"\1[REDACTED]", text)
+
+# Shared label for the description block in notification bodies.
 _DESC_LABEL = "Description:"
 
-# Repeated email signature line. Em-dash is U+2014 — keep byte-identical.
-# Extracted so Sonar's S1192 duplicate-string-literal rule stays quiet.
-_SIG_BUG_HUNTER = "— Bug Hunter"
 
-
-# ---------------------------------------------------------------------------
-# Snapshot dataclasses (no SQLAlchemy objects past this point)
-# ---------------------------------------------------------------------------
+# --- Snapshot dataclasses (no SQLAlchemy objects past this point) ---
 @dataclass(frozen=True)
 class UserSnapshot:
     id: int
@@ -49,6 +42,10 @@ class UserSnapshot:
 
 @dataclass(frozen=True)
 class BugSnapshot:
+    """Snapshot of one work-item row for the email layer.
+
+    Defaults ("Bug" / None) keep pre-migration rows and older callers correct.
+    """
     id: int
     title: str
     project_name: str
@@ -58,39 +55,21 @@ class BugSnapshot:
     description: str
     reporter: UserSnapshot | None
     assignees: tuple[UserSnapshot, ...]
-    # v2.4 — item flavour for type-aware subject lines. Default Bug so
-    # any caller that hasn't been updated still gets the legacy subject.
     item_type: str = "Bug"
+    event_name: str | None = None
+    # The organization's own From address (Organization.email_from_override), if any.
+    from_address: str | None = None
 
 
-@dataclass(frozen=True)
-class EventSnapshot:
-    """Pre-built immutable view of an Event for background-task email
-    delivery. Mirrors BugSnapshot's role — no ORM objects past this
-    point so worker threads never touch the SQLAlchemy session."""
-    id: int
-    name: str
-    description: str
-    scheduled_for: str | None
-    managers: tuple[UserSnapshot, ...]
-
-
-# ---------------------------------------------------------------------------
-# Low-level transport
-# ---------------------------------------------------------------------------
-def _send_smtp(settings: Settings, msg: EmailMessage) -> None:
+# --- Low-level transport ---
+def _send_smtp(settings: Settings, msg: EmailMessage) -> bool:
     """Synchronous SMTP send. Called from a worker thread by FastAPI."""
     if not settings.SMTP_HOST:
         logger.warning("SMTP backend selected but SMTP_HOST is empty; dropping email.")
-        return
+        return False   # nothing sent → report failure, like the except path below
 
     try:
-        # Build an SSL context with EXPLICIT hostname + cert verification
-        # and an EXPLICIT minimum TLS version. ssl.create_default_context()
-        # already sets sane defaults on Python 3.10+, but Sonar's
-        # python:S4830 + python:S4423 rules want the posture stated locally
-        # so it's auditable without consulting stdlib internals. Reused
-        # across both SMTP_SSL and STARTTLS paths.
+        # Explicit TLS settings make the security posture obvious.
         ctx = ssl.create_default_context()
         ctx.check_hostname = True
         ctx.verify_mode = ssl.CERT_REQUIRED
@@ -117,49 +96,76 @@ def _send_smtp(settings: Settings, msg: EmailMessage) -> None:
                     s.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
                 s.send_message(msg)
         logger.info("SMTP email sent: subject=%r to=%s", msg["Subject"], msg["To"])
+        return True
     except (smtplib.SMTPException, OSError):
-        # Never let mailer failures break the API. We narrow to network and
-        # SMTP-protocol errors so programmer mistakes (e.g. bad header type)
-        # still surface in tests instead of getting swallowed.
+        # Narrow catch: programming errors still raise; callers see False.
         logger.exception("Failed to send email via SMTP")
+        return False
 
 
 def _send_console(msg: EmailMessage) -> None:
-    body = msg.get_content() if msg.is_multipart() is False else "(multipart)"
+    # Body may contain a live reset link or PII — gate it behind DEBUG.
     logger.info(
-        "[console-email]\n  From: %s\n  To: %s\n  Subject: %s\n  ----\n%s\n  ----",
-        msg["From"], msg["To"], msg["Subject"], body.strip(),
+        "[console-email] to=%s subject=%r (body suppressed — set log level "
+        "DEBUG to include it)",
+        msg["To"], msg["Subject"],
     )
+    if logger.isEnabledFor(logging.DEBUG):
+        body = msg.get_content() if msg.is_multipart() is False else "(multipart)"
+        logger.debug("[console-email] body for %r:\n%s", msg["Subject"],
+                     _redact_secrets_for_log(body.strip()))
 
 
-def _build(subject: str, to: list[str], body: str, settings: Settings) -> EmailMessage:
+def _header_safe(value: str) -> str:
+    """Strip CR/LF — header-injection defense; also keeps a newline from 500ing the send."""
+    return value.replace("\r", " ").replace("\n", " ")
+
+
+def _build(
+    subject: str, to: list[str], body: str, settings: Settings, from_address: str | None = None,
+) -> EmailMessage:
+    sender = from_address or settings.EMAIL_FROM
     msg = EmailMessage()
-    msg["From"] = settings.EMAIL_FROM
-    msg["To"] = ", ".join(to)
-    msg["Subject"] = subject
+    msg["From"] = _header_safe(sender)
+    if len(to) == 1:
+        msg["To"] = _header_safe(to[0])
+    else:
+        # Bcc hides recipients from each other; smtplib delivers via the envelope.
+        msg["To"] = _header_safe(sender)
+        msg["Bcc"] = ", ".join(_header_safe(addr) for addr in to)
+    msg["Subject"] = _header_safe(subject)
     msg.set_content(body)
     return msg
 
 
-def deliver(subject: str, to: list[str], body: str) -> None:
-    """Public dispatch — pick the right backend based on settings."""
+def deliver(
+    subject: str, to: list[str], body: str, from_address: str | None = None,
+) -> bool:
+    """Dispatch to the configured backend. ``from_address`` overrides EMAIL_FROM (an
+    organization's own sender).
+
+    True = handed to a backend (and accepted, for SMTP); False = skipped or failed."""
     settings = get_settings()
     if settings.EMAIL_BACKEND == "disabled":
-        return
+        return False
     to = sorted({addr.strip() for addr in to if addr and addr.strip()})
     if not to:
-        return
+        return False
 
-    msg = _build(subject, to, body, settings)
+    msg = _build(subject, to, body, settings, from_address)
     if settings.EMAIL_BACKEND == "smtp":
-        _send_smtp(settings, msg)
-    else:
-        _send_console(msg)
+        return _send_smtp(settings, msg)
+    _send_console(msg)
+    return True
 
 
-# ---------------------------------------------------------------------------
-# Recipient selection
-# ---------------------------------------------------------------------------
+def _digest_owns_work_item_email() -> bool:
+    """True when the daily digest job (not immediate `notify_*` sends) owns
+    work-item emails. Transactional emails (password reset) never consult this."""
+    return get_settings().EMAIL_DIGEST_ENABLED
+
+
+# --- Recipient selection ---
 def _recipients(bug: BugSnapshot, exclude_user_id: int | None) -> list[str]:
     """Reporter + all assignees, deduped, optionally minus the actor."""
     seen: dict[str, None] = {}
@@ -181,18 +187,28 @@ def _recipients(bug: BugSnapshot, exclude_user_id: int | None) -> list[str]:
     return out
 
 
-# ---------------------------------------------------------------------------
 # Notification helpers — these are what routes call.
 # Each takes only primitive data (no DB session, no ORM objects).
-# ---------------------------------------------------------------------------
 def _bug_link(bug_id: int) -> str:
     base = get_settings().APP_BASE_URL.rstrip("/")
     return f"{base}/#bug={bug_id}"
 
 
+def _item_label(bug: BugSnapshot) -> str:
+    """The grammatical noun for the item: 'bug' / 'requirement' / 'task'."""
+    return (bug.item_type or "Bug").lower()
+
+
 def _bug_meta_lines(bug: BugSnapshot) -> list[str]:
-    return [
-        f"Bug #{bug.id}: {bug.title}",
+    """Plain-text metadata block reused across every notification email."""
+    label_cap = (bug.item_type or "Bug").capitalize()
+    lines = [
+        f"{label_cap} #{bug.id}: {bug.title}",
+        f"Type:        {bug.item_type or 'Bug'}",
+    ]
+    if bug.event_name:
+        lines.append(f"Event:       {bug.event_name}")
+    lines += [
         f"Project:     {bug.project_name}",
         f"Status:      {bug.status}",
         f"Priority:    {bug.priority}",
@@ -202,27 +218,23 @@ def _bug_meta_lines(bug: BugSnapshot) -> list[str]:
             ", ".join(a.display for a in bug.assignees) if bug.assignees else "—"
         ),
     ]
-
-
-def _item_type_word(bug: BugSnapshot) -> str:
-    """Lower-case noun used in subjects/bodies — 'bug' / 'task' /
-    'requirement'. Falls back to 'bug' for legacy callers that haven't
-    set item_type on the snapshot."""
-    return (getattr(bug, "item_type", None) or "Bug").lower()
+    return lines
 
 
 def notify_bug_created(bug: BugSnapshot, actor_user_id: int | None) -> None:
+    if _digest_owns_work_item_email():
+        return
     to = _recipients(bug, exclude_user_id=actor_user_id)
     if not to:
         return
-    noun = _item_type_word(bug)
-    subject = f"[Bug Hunter] New {noun} #{bug.id}: {bug.title}"
-    lines = [f"A new {noun} has been reported.", ""]
+    label = _item_label(bug)
+    subject = f"[{get_settings().APP_NAME}] New {label} #{bug.id}: {bug.title}"
+    lines = [f"A new {label} has been created.", ""]
     lines += _bug_meta_lines(bug)
     if bug.description:
         lines += ["", _DESC_LABEL, bug.description]
     lines += ["", f"View: {_bug_link(bug.id)}"]
-    deliver(subject, to, "\n".join(lines))
+    deliver(subject, to, "\n".join(lines), bug.from_address)
 
 
 def notify_bug_updated(
@@ -231,19 +243,22 @@ def notify_bug_updated(
     actor_name: str,
     actor_user_id: int | None,
 ) -> None:
+    if _digest_owns_work_item_email():
+        return
     if not changes:
         return
     to = _recipients(bug, exclude_user_id=actor_user_id)
     if not to:
         return
-    noun = _item_type_word(bug)
-    subject = f"[Bug Hunter] {noun.capitalize()} #{bug.id} updated: {bug.title}"
-    lines = [f"{actor_name} updated {noun} #{bug.id}.", "", "Changes:"]
+    label = _item_label(bug)
+    label_cap = (bug.item_type or "Bug").capitalize()
+    subject = f"[{get_settings().APP_NAME}] {label_cap} #{bug.id} updated: {bug.title}"
+    lines = [f"{actor_name} updated {label} #{bug.id}.", "", "Changes:"]
     for field, old, new in changes:
         lines.append(f"  • {field}: {old or '(empty)'} → {new or '(empty)'}")
     lines += [""] + _bug_meta_lines(bug)
     lines += ["", f"View: {_bug_link(bug.id)}"]
-    deliver(subject, to, "\n".join(lines))
+    deliver(subject, to, "\n".join(lines), bug.from_address)
 
 
 def notify_assignment(
@@ -252,22 +267,24 @@ def notify_assignment(
     actor_name: str,
 ) -> None:
     """Send a personalized 'you've been assigned' email to each new assignee."""
-    noun = _item_type_word(bug)
+    if _digest_owns_work_item_email():
+        return
+    label = _item_label(bug)
     for user in newly_assigned:
         if not user.email:
             continue
-        subject = f"[Bug Hunter] You've been assigned to {noun} #{bug.id}: {bug.title}"
+        subject = f"[{get_settings().APP_NAME}] You've been assigned to {label} #{bug.id}: {bug.title}"
         lines = [
             f"Hi {user.name},",
             "",
-            f"{actor_name} assigned you to a {noun}.",
+            f"{actor_name} assigned you to a {label}.",
             "",
         ]
         lines += _bug_meta_lines(bug)
         if bug.description:
             lines += ["", _DESC_LABEL, bug.description]
         lines += ["", f"View: {_bug_link(bug.id)}"]
-        deliver(subject, [user.email], "\n".join(lines))
+        deliver(subject, [user.email], "\n".join(lines), bug.from_address)
 
 
 def notify_comment_added(
@@ -276,13 +293,15 @@ def notify_comment_added(
     comment_author_id: int | None,
     comment_body: str,
 ) -> None:
+    if _digest_owns_work_item_email():
+        return
     to = _recipients(bug, exclude_user_id=comment_author_id)
     if not to:
         return
-    noun = _item_type_word(bug)
-    subject = f"[Bug Hunter] New comment on {noun} #{bug.id}: {bug.title}"
+    label = _item_label(bug)
+    subject = f"[{get_settings().APP_NAME}] New comment on {label} #{bug.id}: {bug.title}"
     lines = [
-        f"{comment_author_name} commented on {noun} #{bug.id}:",
+        f"{comment_author_name} commented on {label} #{bug.id}:",
         "",
         comment_body,
         "",
@@ -290,92 +309,128 @@ def notify_comment_added(
     ]
     lines += _bug_meta_lines(bug)
     lines += ["", f"View: {_bug_link(bug.id)}"]
-    deliver(subject, to, "\n".join(lines))
+    deliver(subject, to, "\n".join(lines), bug.from_address)
 
 
-def _event_recipients(ev: "EventSnapshot", exclude_user_id: int | None) -> list[str]:
-    """Dedupe the event's manager emails, excluding the acting user
-    (no point notifying yourself of your own action)."""
-    seen: set[str] = set()
+# --- Event notifications (separate channel from per-item assignment emails) ---
+@dataclass(frozen=True)
+class EventSnapshot:
+    """Event snapshot for emails; ORM-free so BackgroundTasks can use it."""
+    id: int
+    name: str
+    description: str
+    scheduled_for: str | None
+    managers: tuple[UserSnapshot, ...]
+    from_address: str | None = None
+
+
+def _event_recipients(ev: EventSnapshot, exclude_user_id: int | None) -> list[str]:
+    """Recipients of an event email: every manager except the actor."""
     out: list[str] = []
-    for m in ev.managers:
-        if not m.email:
+    seen: dict[str, None] = {}
+    for u in ev.managers:
+        if exclude_user_id is not None and u.id == exclude_user_id:
             continue
-        if exclude_user_id is not None and m.id == exclude_user_id:
+        if not u.email:
             continue
-        key = m.email.lower()
+        key = u.email.lower()
         if key in seen:
             continue
-        seen.add(key)
-        out.append(m.email)
+        seen[key] = None
+        out.append(u.email)
     return out
 
 
-def _event_meta_lines(ev: "EventSnapshot") -> list[str]:
-    lines = [f"Event: {ev.name}"]
-    if ev.scheduled_for:
-        lines.append(f"Scheduled for: {ev.scheduled_for}")
-    if ev.managers:
-        lines.append("Managers: " + ", ".join(m.display for m in ev.managers))
-    return lines
+def _event_meta_lines(ev: EventSnapshot) -> list[str]:
+    return [
+        f"Event #{ev.id}: {ev.name}",
+        f"Scheduled: {ev.scheduled_for or '—'}",
+        "Managers:  " + (
+            ", ".join(m.display for m in ev.managers) if ev.managers else "—"
+        ),
+    ]
 
 
-def notify_event_created(ev: "EventSnapshot", actor_name: str, actor_user_id: int | None) -> None:
-    """Email managers when an event is created. Member-tier users are
-    NOT recipients — events are a manager-tier coordination tool."""
+def _event_link(event_id: int) -> str:
+    base = get_settings().APP_BASE_URL.rstrip("/")
+    return f"{base}/#event={event_id}"
+
+
+def notify_event_created(
+    ev: EventSnapshot,
+    actor_name: str,
+    actor_user_id: int | None,
+) -> None:
+    if _digest_owns_work_item_email():
+        return
     to = _event_recipients(ev, exclude_user_id=actor_user_id)
     if not to:
         return
-    subject = f"[Bug Hunter] New event: {ev.name}"
-    lines = [f"{actor_name} created a new event.", ""]
+    subject = f"[{get_settings().APP_NAME}] New event #{ev.id}: {ev.name}"
+    lines = [
+        f"{actor_name} created a new event you're managing.",
+        "",
+    ]
     lines += _event_meta_lines(ev)
     if ev.description:
         lines += ["", _DESC_LABEL, ev.description]
-    deliver(subject, to, "\n".join(lines))
+    lines += ["", f"View: {_event_link(ev.id)}"]
+    deliver(subject, to, "\n".join(lines), ev.from_address)
 
 
 def notify_event_updated(
-    ev: "EventSnapshot",
+    ev: EventSnapshot,
     changes: list[tuple[str, str, str]],
     actor_name: str,
     actor_user_id: int | None,
 ) -> None:
+    if _digest_owns_work_item_email():
+        return
     if not changes:
         return
     to = _event_recipients(ev, exclude_user_id=actor_user_id)
     if not to:
         return
-    subject = f"[Bug Hunter] Event updated: {ev.name}"
-    lines = [f"{actor_name} updated event '{ev.name}'.", "", "Changes:"]
+    subject = f"[{get_settings().APP_NAME}] Event #{ev.id} updated: {ev.name}"
+    lines = [f"{actor_name} updated event #{ev.id}.", "", "Changes:"]
     for field, old, new in changes:
         lines.append(f"  • {field}: {old or '(empty)'} → {new or '(empty)'}")
     lines += [""] + _event_meta_lines(ev)
-    deliver(subject, to, "\n".join(lines))
+    lines += ["", f"View: {_event_link(ev.id)}"]
+    deliver(subject, to, "\n".join(lines), ev.from_address)
 
 
-def notify_event_deleted(ev: "EventSnapshot", actor_name: str, actor_user_id: int | None) -> None:
+def notify_event_deleted(
+    ev: EventSnapshot,
+    actor_name: str,
+    actor_user_id: int | None,
+) -> None:
+    if _digest_owns_work_item_email():
+        return
     to = _event_recipients(ev, exclude_user_id=actor_user_id)
     if not to:
         return
-    subject = f"[Bug Hunter] Event deleted: {ev.name}"
+    subject = f"[{get_settings().APP_NAME}] Event #{ev.id} deleted: {ev.name}"
     lines = [
-        f"{actor_name} deleted event '{ev.name}'.",
+        f"{actor_name} deleted event #{ev.id}: {ev.name}.",
         "",
-        "The items previously attached to this event are preserved — "
-        "they're now standalone items without an event link.",
+        "Any items that belonged to this event are preserved as standalone work items.",
     ]
-    deliver(subject, to, "\n".join(lines))
+    deliver(subject, to, "\n".join(lines), ev.from_address)
 
 
-def notify_password_reset(email: str, name: str, reset_url: str) -> None:
+def notify_password_reset(
+    email: str, name: str, reset_url: str, from_address: str | None = None,
+) -> None:
     """Send the user a password-reset link."""
     if not email:
         return
-    subject = "[Bug Hunter] Reset your password"
+    app_name = get_settings().APP_NAME
+    subject = f"[{app_name}] Reset your password"
     body = "\n".join([
         f"Hi {name or 'there'},",
         "",
-        "We received a request to reset your Bug Hunter password.",
+        f"We received a request to reset your {app_name} password.",
         "Click the link below to choose a new one. The link is valid for 2 hours.",
         "",
         reset_url,
@@ -383,9 +438,12 @@ def notify_password_reset(email: str, name: str, reset_url: str) -> None:
         "If you didn't request this, you can ignore this email — your password "
         "won't change unless someone uses the link.",
         "",
-        _SIG_BUG_HUNTER,
+        f"— {app_name}",
     ])
-    deliver(subject, [email], body)
+    # Transactional: log a clear error on failure — the user only sees the
+    # generic "if an account exists" response.
+    if not deliver(subject, [email], body, from_address) and get_settings().EMAIL_BACKEND != "disabled":
+        logger.error("Password-reset email was NOT delivered for a reset request.")
 
 
 def notify_invitation(
@@ -394,53 +452,53 @@ def notify_invitation(
     org_name: str,
     accept_url: str,
     role: str,
+    from_address: str | None = None,
 ) -> None:
-    """Send the invitee a link to join an organization."""
+    """Send the invitee a link to join an organization (valid 7 days)."""
     if not email:
         return
-    role_label = {"admin": "an admin", "manager": "a manager", "member": "a member"}.get(
-        role, f"a {role}"
-    )
-    subject = f"[Bug Hunter] {inviter_name or 'Someone'} invited you to {org_name or 'Bug Hunter'}"
+    app_name = get_settings().APP_NAME
+    role_label = {"admin": "an admin", "manager": "a manager", "user": "a member"}.get(role, f"a {role}")
+    inviter = inviter_name or "A colleague"
+    subject = f"[{app_name}] {inviter} invited you to {org_name or app_name}"
     body = "\n".join([
         "Hi,",
         "",
-        f"{inviter_name or 'A colleague'} has invited you to join "
-        f"\"{org_name}\" on Bug Hunter as {role_label}.",
+        f"{inviter} has invited you to join \"{org_name}\" on {app_name} as {role_label}.",
         "",
-        "Click the link below to set your name + password and join the team. "
+        "Open the link below to set your name and password and join the team. "
         "The link is valid for 7 days.",
         "",
         accept_url,
         "",
         "If you weren't expecting this email, you can safely ignore it.",
         "",
-        _SIG_BUG_HUNTER,
+        f"— {app_name}",
     ])
-    deliver(subject, [email], body)
+    if not deliver(subject, [email], body, from_address) and get_settings().EMAIL_BACKEND != "disabled":
+        logger.error("Invitation email was NOT delivered.")
 
 
 def notify_email_change_code(
-    new_email: str,
-    user_name: str,
-    code: str,
+    new_email: str, user_name: str, code: str, from_address: str | None = None,
 ) -> None:
-    """Send a 6-digit verification code to the NEW email address. Sent
-    only to the new address (never the old) — we want to confirm the
-    user actually controls the inbox they're switching to."""
+    """Send the 6-digit confirmation code to the NEW address only, so the change proves
+    control of the inbox being switched to."""
     if not new_email:
         return
-    subject = "[Bug Hunter] Confirm your new email address"
+    app_name = get_settings().APP_NAME
+    subject = f"[{app_name}] Confirm your new email address"
     body = "\n".join([
         f"Hi {user_name or 'there'},",
         "",
-        "Use this 6-digit code to confirm your new Bug Hunter email address:",
+        f"Use this 6-digit code to confirm your new {app_name} email address:",
         "",
         f"    {code}",
         "",
-        "The code expires in 15 minutes. If you didn't request this, you can",
-        "ignore this email — nothing will change unless the code is entered.",
+        "The code expires in 15 minutes. If you didn't request this, ignore this email;",
+        "nothing changes unless the code is entered.",
         "",
-        _SIG_BUG_HUNTER,
+        f"— {app_name}",
     ])
-    deliver(subject, [new_email], body)
+    if not deliver(subject, [new_email], body, from_address) and get_settings().EMAIL_BACKEND != "disabled":
+        logger.error("Email-change code was NOT delivered.")

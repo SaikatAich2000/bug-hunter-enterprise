@@ -1,0 +1,46 @@
+{
+  "name": "bug-hunter-frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Bug Hunter — React 18 + JSX single-page app, built with Vite into app/static. The product version is NOT here: it comes from APP_VERSION in .env (see .env.example).",
+  "scripts": {
+    "dev": "vite",
+    "vendor": "node scripts/vendor-firebase.mjs",
+    "clean:assets": "node -e \"require('fs').rmSync('../app/static/assets',{recursive:true,force:true})\"",
+    "build": "npm run clean:assets && node scripts/vendor-firebase.mjs && vite build",
+    "lint": "eslint src",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/sortable": "^10.0.0",
+    "@dnd-kit/utilities": "^3.2.2",
+    "dompurify": "^3.4.16",
+    "firebase": "^12.14.0",
+    "qrcode-generator": "^1.4.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@testing-library/jest-dom": "^6.4.5",
+    "@testing-library/react": "^14.2.1",
+    "@testing-library/user-event": "^14.5.2",
+    "@vitejs/plugin-react": "^4.3.4",
+    "@vitest/coverage-v8": "^4.1.11",
+    "axe-core": "^4.13.0",
+    "eslint": "^9.39.5",
+    "eslint-plugin-jsx-a11y": "^6.10.2",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.12.0",
+    "jsdom": "^24.1.0",
+    "vite": "^6.4.3",
+    "vitest": "^4.1.11"
+  },
+  "overrides": {
+    "@grpc/grpc-js": "^1.14.5"
+  }
+}

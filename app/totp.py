@@ -1,73 +1,91 @@
-"""TOTP (RFC 6238) helpers for login-time 2FA.
+"""TOTP (RFC 6238) helpers for two-factor sign-in.
 
-Flow:
-  1. User clicks "Enable 2FA" on the profile page.
-  2. We generate a fresh `pyotp` secret + the otpauth:// URL.
-  3. Backend returns both. The frontend renders the otpauth URL as a
-     QR code (the frontend has a JS QR library — we don't need a
-     bitmap toolchain on the server).
-  4. User scans with Google Authenticator / Authy / 1Password / Bitwarden,
-     enters the generated 6-digit code.
-  5. Backend verifies the code (a `verify` with one-step skew tolerance,
-     to soak typical clock drift). On success: mark `totp_enabled=true`,
-     issue N one-time recovery codes (plaintext shown to the user once,
-     hashed in the DB).
-  6. From the next login on, after password OK the login endpoint
-     responds with `requires_totp=true` and waits for a follow-up
-     /api/auth/login/totp call with the 6-digit code (or one recovery
-     code).
-
-We use a SHORT-LIVED signed token to bridge step 5 (the half-logged-in
-state between password check and TOTP check). Same `itsdangerous` signer
-we already use for session cookies — different salt, 3-minute TTL.
+Enrolment: the server makes a secret and an otpauth:// URI; the user adds it to an
+authenticator app and proves it with a first code, which switches 2FA on and issues one-time
+recovery codes (shown once, stored hashed). From then on a correct password only yields a
+short-lived "pending" token; POST /api/auth/login/totp trades it plus a code for the session.
 """
 from __future__ import annotations
 
 import hashlib
+import hmac
 import secrets
+import time
 from typing import Optional
 
 import pyotp
 from itsdangerous import BadSignature, TimestampSigner
+from sqlalchemy import update
+from sqlalchemy.orm import Session
 
-from app.auth import _signer  # reuse SESSION_SECRET base
-from app.config import get_settings
+from app.auth import session_secret
+from app.models import User
+from app.secrets_box import seal, unseal
 
 _TOTP_DIGITS = 6
-_TOTP_INTERVAL_SECONDS = 30
-_TOTP_VALID_WINDOW = 1   # accept previous + next step to absorb clock drift
+_TOTP_INTERVAL = 30
+_TOTP_VALID_WINDOW = 1   # accept the previous and next step to absorb clock drift
 _PENDING_TTL_SECONDS = 180
+_RECOVERY_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O/1/I
 
 
 def generate_secret() -> str:
-    """Return a fresh base-32 TOTP secret suitable for pyotp."""
     return pyotp.random_base32()
 
 
 def provisioning_uri(secret: str, account_email: str, issuer: str) -> str:
-    """Build an otpauth://totp/... URI the user's authenticator can scan."""
     return pyotp.totp.TOTP(secret).provisioning_uri(name=account_email, issuer_name=issuer)
 
 
-def verify_code(secret: str, code: str) -> bool:
-    """Verify a 6-digit TOTP code with a one-step skew tolerance."""
+def store_secret(user: User, secret: str) -> None:
+    user.totp_secret = seal(secret)
+
+
+def stored_secret(user: User) -> str:
+    return unseal(user.totp_secret or "")
+
+
+def _now() -> float:
+    return time.time()
+
+
+def matching_step(secret: str, code: str) -> Optional[int]:
+    """The newest time step (within one step of clock drift) whose code is ``code``, or None."""
     if not secret or not code:
-        return False
+        return None
     code = code.strip().replace(" ", "")
     if not code.isdigit() or len(code) != _TOTP_DIGITS:
+        return None
+    totp = pyotp.TOTP(secret, interval=_TOTP_INTERVAL)
+    current = int(_now() // _TOTP_INTERVAL)
+    for step in range(current + _TOTP_VALID_WINDOW, current - _TOTP_VALID_WINDOW - 1, -1):
+        if hmac.compare_digest(totp.at(step * _TOTP_INTERVAL), code):
+            return step
+    return None
+
+
+def accept_code(db: Session, user: User, code: str) -> bool:
+    """Check an authenticator code and spend it: a code, once accepted, never works again.
+
+    The step is recorded with a conditional UPDATE, so two requests racing with the same code
+    cannot both succeed. The caller commits."""
+    step = matching_step(stored_secret(user), code)
+    if step is None:
         return False
-    return pyotp.TOTP(secret).verify(code, valid_window=_TOTP_VALID_WINDOW)
+    spent = db.execute(
+        update(User)
+        .where(User.id == user.id, (User.totp_last_step.is_(None)) | (User.totp_last_step < step))
+        .values(totp_last_step=step)
+    ).rowcount
+    if not spent:
+        return False
+    db.refresh(user, attribute_names=["totp_last_step"])
+    return True
 
 
-# ---------------------------------------------------------------------------
-# Pending-login token
-# ---------------------------------------------------------------------------
 def _pending_signer() -> TimestampSigner:
-    """Different salt from the main session signer so a leaked pending
-    token can't masquerade as a real session."""
-    settings = get_settings()
-    secret = settings.SESSION_SECRET or _signer().secret_key  # share the base secret
-    return TimestampSigner(secret, salt="bh-totp-pending")
+    """A different salt from the session signer, so a pending token is never a session."""
+    return TimestampSigner(session_secret(), salt="bh-totp-pending")
 
 
 def make_pending_token(user_id: int) -> str:
@@ -79,33 +97,18 @@ def parse_pending_token(token: str) -> Optional[int]:
         return None
     try:
         raw = _pending_signer().unsign(token, max_age=_PENDING_TTL_SECONDS)
-    except BadSignature:
-        # `SignatureExpired` is a subclass of `BadSignature`, so the
-        # broader catch handles both the expired and tampered cases.
-        return None
-    try:
         return int(raw.decode("utf-8"))
-    except ValueError:
-        # `UnicodeDecodeError` is a subclass of `ValueError`, so it's
-        # already covered by the broader catch.
+    except (BadSignature, ValueError):  # expired, tampered or not a number
         return None
 
 
-# ---------------------------------------------------------------------------
-# Recovery codes
-# ---------------------------------------------------------------------------
 def generate_recovery_codes(n: int) -> list[str]:
-    """Issue N human-readable one-time codes. Format: 'XXXXX-XXXXX' (10
-    alpha chars + dash). Each character is from a 32-symbol alphabet
-    (no easily-confused 0/O/1/I), giving 32**10 ≈ 1.1 * 10**15 entropy
-    per code — plenty against guessing.
-    """
-    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-    out: list[str] = []
+    """``n`` one-time codes shaped XXXXX-XXXXX (about 50 bits each)."""
+    codes = []
     for _ in range(n):
-        chars = [secrets.choice(alphabet) for _ in range(10)]
-        out.append("".join(chars[:5]) + "-" + "".join(chars[5:]))
-    return out
+        chars = [secrets.choice(_RECOVERY_ALPHABET) for _ in range(10)]
+        codes.append("".join(chars[:5]) + "-" + "".join(chars[5:]))
+    return codes
 
 
 def hash_recovery_code(code: str) -> str:
