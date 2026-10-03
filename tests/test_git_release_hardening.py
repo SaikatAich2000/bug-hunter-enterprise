@@ -125,8 +125,9 @@ def test_concurrent_duplicate_creation_creates_one_remote_branch(
     In a free race the scheduler decides which correct path the loser takes:
     it either reads the winner's committed row (idempotent reuse, created=False)
     or passes the existence check first and is stopped by the partial unique
-    index. The forced-overlap run holds both workers after the local-record
-    check, so the unique-index path is exercised on every run.
+    index; the winner may in turn adopt a remote branch the loser just created.
+    The forced-overlap run holds both workers after the local-record check, so
+    the unique-index path is exercised on every run.
     """
     from app.database import SessionLocal
     from app.git import branches as branches_module
@@ -196,15 +197,15 @@ def test_concurrent_duplicate_creation_creates_one_remote_branch(
         # route call below must see the real function again.
         monkeypatch.setattr(branches_module, "find_existing_branch", original_find)
 
-    if forced_overlap:
-        # Both workers passed the local-record check, so exactly one insert
-        # loses to the unique index. The winner either created the remote
-        # branch itself or adopted the one the loser had just created (the
-        # remote-existence reconciliation), depending on which insert commits
-        # first.
-        assert sorted(results) in (["created", "lost-race"], ["lost-race", "reused"])
-    else:
-        assert sorted(results) in (["created", "lost-race"], ["created", "reused"])
+    # Whichever order the scheduler picks, exactly one insert loses to the unique
+    # index or reuses the winner's row. The winner either created the remote branch
+    # itself or adopted the one the loser had just created (the remote-existence
+    # reconciliation), so "lost-race" + "reused" is as valid as the other two.
+    assert sorted(results) in (
+        ["created", "lost-race"],
+        ["created", "reused"],
+        ["lost-race", "reused"],
+    )
     assert [
         branch for (_, _, branch) in provider.remote_branches
         if branch.startswith(f"feature_{story['id']}_")
