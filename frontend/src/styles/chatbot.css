@@ -90,9 +90,11 @@
 }
 
 /* Phones use the "Ask Sleuth" chrome button instead; hide FAB (kept in DOM, still forwards clicks). */
-@media (max-width: 900px) {
+@media (max-width: 1180px) {
   .sleuth-fab { display: none; }
 }
+/* An open dialog owns the screen: the floating button would sit on top of its fields. */
+body:has(.modal:not([hidden])) .sleuth-fab { display: none; }
 
 .sleuth-panel {
   position: fixed;

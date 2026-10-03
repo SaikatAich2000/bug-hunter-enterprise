@@ -61,6 +61,15 @@ html, body {
   display: flex;
   flex-direction: column;
 }
+/* The signed-in app is a viewport-sized shell, as the layout intends: the top bar and sidebar stay in view and only the content
+   area scrolls. Without a bounded height the whole page scrolled instead, so sticky panels and the sidebar footer scrolled away. */
+body.viewport-fit { overflow: hidden; }
+body.viewport-fit #root { height: 100%; height: 100dvh; min-height: 0; }
+body.viewport-fit #root > .chrome, body.viewport-fit #root > .supernav { flex-shrink: 0; }
+@media print {
+  body.viewport-fit { overflow: visible; }
+  body.viewport-fit #root { height: auto; }
+}
 
 .kpi-num, .col-id, .att-count, .session-line3,
 .audit-time, .activity-time, .comment-time {
@@ -105,6 +114,8 @@ html, body {
 
   --danger: #e24a4a;
   --danger-strong: #cf463c;
+  /* Error text on a tinted dark surface: --danger-strong is a fill colour and only reaches 2.9:1 there. */
+  --danger-ink: #ff9a92;
   --danger-soft: rgba(226, 74, 74, 0.16);
   --danger-grad: linear-gradient(135deg, #cf463c, #e24a4a);
   --warn: #e6a23c;
@@ -206,6 +217,7 @@ html, body {
 
   --danger: #cf463c;
   --danger-strong: #b93b32;
+  --danger-ink: #b93b32;
   --danger-soft: rgba(207, 70, 60, 0.10);
   --danger-grad: linear-gradient(135deg, #b93b32, #cf463c);
   --warn: #8a6010;
@@ -272,7 +284,7 @@ body {
    specific (e.g. .field select) still wins on
    specificity, this is purely the fallback so nothing ships unstyled. */
 select:not(.bh-sel-native),
-input[type="date"], input[type="text"], input[type="search"],
+input:not([type]), input[type="date"], input[type="text"], input[type="search"],
 input[type="number"], input[type="email"], input[type="password"],
 input[type="tel"], input[type="url"],
 textarea {
@@ -288,14 +300,14 @@ textarea {
 }
 select:not(.bh-sel-native) { cursor: pointer; }
 select:not(.bh-sel-native):hover:not(:disabled),
-input[type="date"]:hover:not(:disabled), input[type="text"]:hover:not(:disabled),
+input:not([type]):hover:not(:disabled), input[type="date"]:hover:not(:disabled), input[type="text"]:hover:not(:disabled),
 input[type="search"]:hover:not(:disabled), input[type="number"]:hover:not(:disabled),
 textarea:hover:not(:disabled) {
   border-color: var(--accent);
   background: var(--bg-elev-3);
 }
 select:not(.bh-sel-native):focus,
-input[type="date"]:focus, input[type="text"]:focus, input[type="search"]:focus,
+input:not([type]):focus, input[type="date"]:focus, input[type="text"]:focus, input[type="search"]:focus,
 input[type="number"]:focus, input[type="email"]:focus, input[type="password"]:focus,
 textarea:focus {
   border-color: var(--accent);
@@ -303,7 +315,7 @@ textarea:focus {
   background: var(--bg-elev-3);
 }
 select:not(.bh-sel-native):disabled,
-input[type="date"]:disabled, input[type="text"]:disabled, input[type="search"]:disabled,
+input:not([type]):disabled, input[type="date"]:disabled, input[type="text"]:disabled, input[type="search"]:disabled,
 textarea:disabled {
   opacity: 0.55;
   cursor: not-allowed;
@@ -399,8 +411,29 @@ body:not([data-theme="light"]) input[type="date"]::-webkit-calendar-picker-indic
   border-radius: 2px;
   box-shadow: 0 0 8px var(--accent-glow);
 }
-.chrome .spacer { flex: 1; }
+.chrome .spacer { flex: 1; min-width: 0; }
 .chrome-right { display: flex; align-items: center; gap: 12px; flex: none; }
+.chrome .nav-btn { white-space: nowrap; }
+
+/* The bar's content (brand, organization, eight sections, bell, profile) needs about 1540px in full; it
+   compacts in steps and hands over to the drawer layout at 1180px. */
+.chrome .org-badge { max-width: 160px; }
+.chrome .profile-btn { max-width: 190px; }
+@media (max-width: 1700px) {
+  .chrome { gap: 14px; padding: 0 16px; }
+  .chrome .nav { gap: 0; }
+  .chrome .nav-btn { padding: 0 9px; gap: 6px; font-size: 12px; letter-spacing: 0.02em; }
+  .chrome .nav-btn.active::after { left: 9px; right: 9px; }
+  .brandmark .wm small { display: none; }
+  .chrome-right { gap: 8px; }
+}
+@media (max-width: 1440px) {
+  .chrome .nav-btn .nav-icon { display: none; }
+}
+@media (max-width: 1320px) {
+  .profile-name, .profile-caret { display: none; }
+  .chrome .org-badge { max-width: 120px; }
+}
 
 /* Mobile-only "Ask Sleuth" chrome button; desktop uses the floating FAB, the ≤900px block flips this to inline-flex and hides it. */
 .chrome-sleuth-btn {
@@ -493,7 +526,8 @@ body:not([data-theme="light"]) input[type="date"]::-webkit-calendar-picker-indic
 
 /* Each view re-mounts on navigation so its root replays the entrance; page-head titles re-key on view too. All motion is guarded. */
 @media (prefers-reduced-motion: no-preference) {
-  .view { animation: bh-view-in 0.34s var(--ease-out) both; }
+  /* "backwards", not "both": a filled-forward transform would stay the containing block of every position:fixed dialog rendered inside the view. */
+  .view { animation: bh-view-in 0.34s var(--ease-out) backwards; }
   .pagehead-titles { animation: bh-head-in 0.34s var(--ease-out) both; }
   .chrome .nav-btn.active::after { animation: bh-underline-in 0.28s var(--ease-out) both; }
 }
@@ -507,6 +541,7 @@ body:not([data-theme="light"]) input[type="date"]::-webkit-calendar-picker-indic
   border-radius: var(--r-card);
   border: 1px solid var(--border);
   overflow: hidden;
+  overflow: clip;   /* clips the corners without becoming a scroll container, so sticky children (the bulk bar) can stick */
   background: var(--bg-elev);
   box-shadow: var(--shadow-lg);
 }
@@ -540,15 +575,17 @@ body:not([data-theme="light"]) input[type="date"]::-webkit-calendar-picker-indic
   height: 100%;
   min-height: 0;
   overflow-y: auto;
+  /* Keeps focused and scrolled-to items clear of the pinned collapse/close bar at the bottom. */
+  scroll-padding-bottom: 56px;
   /* Clips horizontally so content is revealed cleanly as the rail animates width, instead of wrapping mid-transition. */
   overflow-x: hidden;
   transition: padding 0.26s var(--ease-out);
   z-index: 10;
 }
-/* Desktop chrome bar owns the view nav; this is hidden on wide screens and shown only inside the phone drawer (see max-width:900px block). */
+/* Desktop chrome bar owns the view nav; this is hidden on wide screens and shown only inside the phone drawer (see the max-width:1180px block). */
 .sidebar-nav { display: none; }
 
-/* Mobile drawer brand header (wordmark + version); hidden on desktop where the chrome bar shows the brand. */
+/* Drawer brand header (wordmark, version, organization); hidden on desktop where the chrome bar shows the brand. */
 .sidebar-brand { display: none; }
 .sidebar-brand .logo { width: 38px; height: 38px; border-radius: 50%; flex: none; }
 .sidebar-brand .wm { line-height: 1.1; }
@@ -569,6 +606,17 @@ body:not([data-theme="light"]) input[type="date"]::-webkit-calendar-picker-indic
   text-transform: uppercase;
   margin-top: 3px;
   font-family: "JetBrains Mono", ui-monospace, "SFMono-Regular", Consolas, monospace;
+}
+.sidebar-brand .wm small.sidebar-org {
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  letter-spacing: 0.04em;
+  text-transform: none;
+  font-family: inherit;
+  font-size: 12px;
 }
 
 .nav { display: flex; flex-direction: column; gap: 2px; }
@@ -645,8 +693,8 @@ body:not([data-theme="light"]) input[type="date"]::-webkit-calendar-picker-indic
 /* When collapsed, rotate the chevron to indicate the expand action. */
 body.sidebar-collapsed .sidebar-collapse-btn .collapse-icon { transform: rotate(180deg); }
 
-/* Desktop only: collapsing narrows the rail to an icon strip. Mobile drawer (≤900px) ignores collapse state — sidebar is off-canvas there instead. */
-@media (min-width: 901px) {
+/* Desktop only: collapsing narrows the rail to an icon strip. The drawer layout (≤1180px) ignores collapse state — the sidebar is off-canvas there instead. */
+@media (min-width: 1181px) {
   body.sidebar-collapsed .frame { grid-template-columns: 46px 1fr; }
   body.sidebar-collapsed .sidebar { padding-left: 0; padding-right: 0; overflow: hidden; }
   body.sidebar-collapsed .sidebar > .side-section,
@@ -680,12 +728,20 @@ body.sidebar-collapsed .sidebar-collapse-btn .collapse-icon { transform: rotate(
 /* The LAST entity list (Team for managers/admins, else Projects) grows to fill the rail instead of capping at 220px; earlier sections keep the cap and scroll. */
 .sidebar > .side-section:last-of-type {
   flex: 1 1 auto;
-  min-height: 0;
+  min-height: 180px;   /* header + the list's own minimum, so a short window scrolls the rail instead of overlapping the footer */
 }
 .sidebar > .side-section:last-of-type > .side-list {
   flex: 1 1 auto;
-  min-height: 0;
+  /* Never squeezed to nothing on a short window: the rail scrolls instead. */
+  min-height: 132px;
   max-height: none;
+}
+/* In the drawer the whole panel scrolls, so every list shows in full (the last one was squeezed under the pinned Close bar). */
+@media (max-width: 1180px) {
+  .sidebar > .side-section,
+  .sidebar > .side-section:last-of-type { flex: none; min-height: auto; }
+  .sidebar > .side-section > .side-list,
+  .sidebar > .side-section:last-of-type > .side-list { flex: none; max-height: none; overflow: visible; min-height: 0; }
 }
 .side-item {
   display: flex;
@@ -1315,8 +1371,14 @@ body.sidebar-collapsed .sidebar-collapse-btn .collapse-icon { transform: rotate(
 .icon-btn.danger:hover { background: var(--danger); color: white; }
 
 .view { padding: 0 24px 24px; }
+/* Room under the content for the floating Sleuth button (shown above 1180px), so it never sits on the last row. */
+@media (min-width: 1181px) {
+  .view { padding-bottom: 88px; }
+}
 
 .table-scroll {
+  /* The table answers to its own width (not the window's): the sidebar and drawer change how much room it gets. */
+  container: tbl / inline-size;
   overflow-x: auto;
   border: 1px solid var(--border);
   border-radius: var(--r-card);
@@ -1355,9 +1417,10 @@ body.sidebar-collapsed .sidebar-collapse-btn .collapse-icon { transform: rotate(
   width: 1%;
   white-space: nowrap;
 }
-.bug-table td.col-project   { max-width: 200px; white-space: normal; word-break: break-word; }
-.bug-table td.col-event     { max-width: 220px; white-space: normal; }
-.bug-table td.col-assignees { max-width: 280px; white-space: normal; }
+/* min-width keeps a name from collapsing to one letter per line when the table is squeezed. */
+.bug-table td.col-project   { min-width: 120px; max-width: 200px; white-space: normal; overflow-wrap: break-word; }
+.bug-table td.col-event     { min-width: 110px; max-width: 220px; white-space: normal; overflow-wrap: break-word; }
+.bug-table td.col-assignees { min-width: 110px; max-width: 280px; white-space: normal; }
 /* Title is the greedy column, expanding to fill leftover space; inner .title-text wraps and is line-clamped to 2 lines. */
 .bug-table th.col-title, .bug-table td.col-title {
   width: 100%;
@@ -1383,6 +1446,41 @@ body.sidebar-collapsed .sidebar-collapse-btn .collapse-icon { transform: rotate(
 .bug-table tbody tr:hover { background: linear-gradient(to right, var(--accent-soft), transparent 78%); }
 .bug-table tbody tr:hover td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 .bug-table tbody tr:last-child td { border-bottom: none; }
+
+/* Drop the least important columns as the table narrows, so the actions column never scrolls out of sight. */
+@container tbl (max-width: 1120px) {
+  .bug-table th.col-att, .bug-table td.col-att { display: none; }
+  .bug-table td.col-project { max-width: 160px; }
+  .bug-table td.col-assignees { max-width: 200px; }
+}
+@container tbl (max-width: 1000px) {
+  .bug-table th.col-env, .bug-table td.col-env { display: none; }
+}
+@container tbl (max-width: 900px) {
+  .bug-table th.col-due, .bug-table td.col-due,
+  .bug-table th.col-event, .bug-table td.col-event { display: none; }
+  .bug-table td.col-project { max-width: 130px; }
+}
+@container tbl (max-width: 930px) {
+  .bug-table th, .bug-table td { padding: 10px 9px; }
+  .bug-table td.col-assignees { max-width: 150px; }
+}
+@container tbl (max-width: 800px) {
+  .bug-table { min-width: 0; }
+  .bug-table th.col-assignees, .bug-table td.col-assignees { display: none; }
+  .bug-table th.col-title, .bug-table td.col-title { min-width: 150px; }
+}
+@container tbl (max-width: 640px) {
+  .bug-table th.col-project, .bug-table td.col-project,
+  .bug-table th.col-priority, .bug-table td.col-priority { display: none; }
+  .bug-table th, .bug-table td { padding: 10px 7px; }
+  .bug-table th.col-title, .bug-table td.col-title { min-width: 120px; }
+}
+@container tbl (max-width: 340px) {
+  .bug-table th, .bug-table td { padding: 8px 5px; }
+  .bug-table th.col-title, .bug-table td.col-title { min-width: 90px; }
+  .bug-table .badge { padding: 2px 6px; font-size: 10px; }
+}
 
 .col-id        { color: var(--accent); font-weight: 700; text-align: left; }
 .col-att       { text-align: center; }
@@ -1760,7 +1858,7 @@ body.sidebar-collapsed .sidebar-collapse-btn .collapse-icon { transform: rotate(
   border: 1px solid var(--border);
   border-radius: 10px;
   box-shadow: var(--shadow-sm);
-  margin: 14px 24px 18px;
+  margin: 14px 0 18px;
 }
 .audit-controls select, .audit-controls input {
   background: var(--bg-elev);
@@ -1786,13 +1884,13 @@ body.sidebar-collapsed .sidebar-collapse-btn .collapse-icon { transform: rotate(
   background: var(--bg-elev-3);
   box-shadow: var(--shadow-focus);
 }
-.audit-controls input { flex: 1; }
+.audit-controls input { flex: 1 1 340px; }
 
 .audit-list {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 0 24px 24px;
+  padding: 0 0 24px;
 }
 .audit-row {
   background: var(--bg-elev);
@@ -1879,7 +1977,10 @@ body.sidebar-collapsed .sidebar-collapse-btn .collapse-icon { transform: rotate(
   border-radius: 11px;
   width: 100%;
   max-width: 540px;
+  /* The overlay pads 16px on every side: use the whole remaining height, so a form that is only a few pixels too tall does not scroll. */
   max-height: 92vh;
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
   display: flex;
   flex-direction: column;
   box-shadow: var(--shadow-xl);
@@ -1889,6 +1990,8 @@ body.sidebar-collapsed .sidebar-collapse-btn .collapse-icon { transform: rotate(
 }
 @keyframes modal-rise { from { opacity: 0; transform: translateY(12px) scale(0.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
 .modal-card.sm { max-width: 400px; }
+/* Above every other dialog regardless of DOM order: the others portal to <body> after the app root that holds this one. */
+#modalConfirm { z-index: 150; }
 .confirm-card { max-width: 380px; }
 .confirm-body {
   padding: 14px 20px 4px;
@@ -1910,7 +2013,8 @@ body.sidebar-collapsed .sidebar-collapse-btn .collapse-icon { transform: rotate(
 .modal-card.xxl {
   max-width: 1400px;
   width: 95vw;
-  max-height: 92vh;
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
 }
 
 .modal-head {
@@ -1989,6 +2093,16 @@ body.sidebar-collapsed .sidebar-collapse-btn .collapse-icon { transform: rotate(
   margin-top: 8px;
   border-top: 1px solid var(--border);
 }
+/* The action row stays at the bottom of a scrolling dialog, so Save/Create never sits below the fold on short screens. */
+.modal-body .modal-foot {
+  position: sticky;
+  /* A sticky box measures from the scroller's content edge, so it must reach past the body's 18px bottom padding to sit flush. */
+  bottom: -18px;
+  z-index: 2;
+  padding-bottom: 14px;
+  background: var(--bg-elev);
+  box-shadow: 0 -10px 12px -10px rgba(0, 0, 0, 0.35);
+}
 
 /* Bulk import result */
 .bulk-import-result { margin-top: 16px; }
@@ -2049,6 +2163,7 @@ body.sidebar-collapsed .sidebar-collapse-btn .collapse-icon { transform: rotate(
 }
 
 .bug-modal-body .modal-foot {
+  bottom: 0;
   margin: 0;
   padding: 16px 24px 18px;
   border-top: 1px solid var(--border);
@@ -2919,7 +3034,7 @@ input[type="checkbox"]:checked::after {
 /* Variants stay fully opaque (solid fallback, then color-mix tint) — a translucent soft tint washed out over the page background. */
 .toast.error {
   border-color: var(--danger); border-width: 1.5px;
-  color: var(--danger-strong); font-weight: 600;
+  color: var(--danger-ink); font-weight: 600;
   background: var(--bg-elev);
   background: color-mix(in srgb, var(--danger) 12%, var(--bg-elev));
 }
@@ -2946,7 +3061,7 @@ input[type="checkbox"]:checked::after {
   .bug-modal-grid { grid-template-columns: minmax(0, 1fr) 320px; gap: 20px; }
 }
 
-@media (max-width: 900px) {
+@media (max-width: 1180px) {
   /* The frame collapses to a single column; the sidebar becomes an off-canvas drawer toggled by the chrome menu button. */
   .frame {
     grid-template-columns: 1fr;
@@ -2992,7 +3107,9 @@ input[type="checkbox"]:checked::after {
     margin-bottom: 6px;
     border-bottom: 1px solid var(--border);
   }
+}
 
+@media (max-width: 900px) {
   .bug-modal-grid { grid-template-columns: 1fr; gap: 16px; }
   .bug-modal-side {
     position: static;
@@ -3019,10 +3136,12 @@ input[type="checkbox"]:checked::after {
   .modal-card { max-height: 95vh; }
   .modal-card.xxl { width: 100%; max-width: 100%; }
   .charts-grid { grid-template-columns: 1fr; }
-  .audit-controls { padding: 14px 12px 12px; margin: 14px 12px 12px; }
-  .audit-list { padding: 0 12px 24px; }
-  .sessions-controls { padding: 14px 12px 12px; margin: 14px 12px 12px; flex-direction: column; align-items: stretch; }
-  .sessions-list { padding: 0 12px 24px; }
+  .audit-controls { padding: 12px; margin: 12px 0; }
+  .audit-controls select, .audit-controls input { flex: 1 1 100%; min-width: 0; }
+  .audit-controls .btn { flex: 1 1 28%; }
+  .audit-list { padding: 0 0 24px; }
+  .sessions-controls { padding: 12px; margin: 12px 0; flex-direction: column; align-items: stretch; }
+  .sessions-list { padding: 0 0 24px; }
   .bug-table td.col-project   { max-width: 130px; }
   .bug-table td.col-event     { max-width: 140px; }
   .bug-table td.col-assignees { max-width: 180px; }
@@ -3052,7 +3171,6 @@ input[type="checkbox"]:checked::after {
   .bug-modal-head-actions .btn { padding: 6px 10px; font-size: 12px; }
   .bug-table th.col-assignees, .bug-table td.col-assignees,
   .bug-table th.col-priority,  .bug-table td.col-priority { display: none; }
-  .bug-table { min-width: 420px; }
 
   .bug-modal-body .bug-title-field { margin: 14px 14px 0; }
   .bug-modal-grid { padding: 14px; }
@@ -3108,9 +3226,8 @@ input[type="checkbox"]:checked::after {
 @media (max-width: 380px) {
   .kpi-strip { grid-template-columns: 1fr; }
   .kpi:nth-child(5) { grid-column: auto; }
-  .audit-controls, .sessions-controls { margin: 10px 8px; padding: 12px 10px; }
+  .audit-controls, .sessions-controls { margin: 10px 0; padding: 12px 10px; }
   .col-project { display: none; }
-  .bug-table { min-width: 360px; }
   .chrome { gap: 8px; }
   .pagehead h1 { font-size: 17px; }
   /* Toast responsiveness is handled by the @media (max-width: 600px) .toast rule above. */
@@ -3174,21 +3291,28 @@ input[type="checkbox"]:checked::after {
 
 /* Auth pages. */
 .auth-body {
+  /* Grows with its content and scrolls: a taller form (sign-up) used to be clipped on short screens and phones. */
+  height: auto;
   min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 16px;
   background: var(--bg-grad);
+  /* The gradient layers stay put while the form scrolls (no seam where they would repeat). */
+  background-attachment: fixed;
   padding: 32px 16px;
   position: relative;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 /* The version line is a sibling of #root (kept outside the React tree so _serve_html can substitute __APP_VERSION__); column layout stacks it centered beneath the card. */
 .auth-body::before, .auth-body::after {
   content: "";
-  position: absolute;
+  /* Fixed to the window so the glow never adds scrollable overflow below the form. */
+  position: fixed;
   border-radius: 50%;
   filter: blur(80px);
   opacity: 0.45;
@@ -3298,6 +3422,17 @@ input[type="checkbox"]:checked::after {
   transition: color 0.12s ease;
 }
 .auth-links a:hover { text-decoration: underline; color: var(--accent-strong); }
+
+/* Short screens (laptops with browser chrome, phones in landscape): tighter spacing so the longer forms fit with little or no scrolling. */
+@media (max-height: 780px) {
+  .auth-body { padding: 14px 16px; gap: 10px; }
+  .auth-card { padding: 22px 28px; }
+  .auth-brand { margin-bottom: 14px; }
+  .auth-logo { width: 46px; height: 46px; margin-bottom: 8px; }
+  .auth-brand h1 { font-size: 22px; margin-bottom: 4px; }
+  .auth-form { gap: 9px; }
+  .auth-submit { padding: 10px 16px; margin-top: 2px; }
+}
 .auth-alert {
   padding: 11px 14px;
   border-radius: 7px;
@@ -3308,7 +3443,7 @@ input[type="checkbox"]:checked::after {
   background: var(--bg-elev);
   background: color-mix(in srgb, var(--danger) 13%, var(--bg-elev));
   border-color: var(--danger);
-  color: var(--danger-strong);
+  color: var(--danger-ink);
   font-weight: 600;
 }
 .auth-alert.success {
@@ -3376,7 +3511,7 @@ input[type="checkbox"]:checked::after {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 0 24px 24px;
+  padding: 0 0 24px;
 }
 .session-row {
   display: grid;
@@ -4405,7 +4540,7 @@ body.is-loading .events-detail-mode {
 
 .reports-sprint-banner {
   display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
-  margin: 0 24px 8px; padding: 10px 16px; background: var(--accent-soft); border: 1px solid var(--accent);
+  margin: 0 0 8px; padding: 10px 16px; background: var(--accent-soft); border: 1px solid var(--accent);
   border-radius: var(--r-field); font-size: 13px; color: var(--text);
 }
 
@@ -4413,14 +4548,14 @@ body.is-loading .events-detail-mode {
   display: grid;
   grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
   gap: 18px;
-  padding: 6px 24px 24px;
+  padding: 6px 0 24px;
   align-items: start;
   min-height: 0;
 }
 .reports-shell > * { min-width: 0; }   /* prevent intrinsic content size from blowing the grid out */
 
 @media (max-width: 1200px) {
-  .reports-shell { grid-template-columns: minmax(260px, 300px) minmax(0, 1fr); gap: 14px; padding: 6px 18px 18px; }
+  .reports-shell { grid-template-columns: minmax(260px, 300px) minmax(0, 1fr); gap: 14px; padding: 6px 0 18px; }
 }
 @media (max-width: 1000px) {
   .reports-shell { grid-template-columns: 1fr; }
@@ -4428,7 +4563,7 @@ body.is-loading .events-detail-mode {
 }
 @media (max-width: 720px) {
 
-  .reports-shell { padding: 6px 12px 14px; gap: 10px; }
+  .reports-shell { padding: 6px 0 14px; gap: 10px; }
   .reports-side, .reports-main { padding: 12px; border-radius: 8px; }
 }
 
@@ -4525,6 +4660,14 @@ body.is-loading .events-detail-mode {
 }
 .reports-side-actions .btn { width: 100%; min-width: 0; }
 .reports-side-actions .btn.primary { font-weight: 700; }
+
+/* A fixed-height panel started below the fold (the page heading and banner sit above it), so Run report was cut off at every screen size.
+   The panel takes its natural height instead and keeps its actions pinned to the bottom of the visible area. */
+@media (min-width: 1001px) {
+  .reports-side { height: auto; max-height: none; position: static; overflow: visible; }
+  .reports-side-scroll { overflow: visible; }
+  .reports-side-actions { position: sticky; bottom: 0; z-index: 2; border-radius: 0 0 10px 10px; }
+}
 
 /* Each chip is a pill hiding its native checkbox; selected state uses the accent gradient so a glance shows what's filtered. */
 .reports-chips {
@@ -5030,6 +5173,10 @@ body.is-loading .events-detail-mode {
   background: var(--panel-field);
   border-bottom: 1px solid var(--border);
   animation: bh-bulk-in 0.22s var(--ease-out) both;
+  /* Stays in view while the selected rows scroll beneath it. */
+  position: sticky;
+  top: 0;
+  z-index: 3;
 }
 @keyframes bh-bulk-in {
   from { opacity: 0; transform: translateY(-6px); }
@@ -5110,7 +5257,7 @@ body.is-loading .events-detail-mode {
 
 /* Git branch creation: compact Development section inside existing item dialogs. */
 .git-branch-list { display: grid; gap: 8px; margin-bottom: 12px; }
-.git-branch-row, .git-branch-confirm { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--line, #d8dce3); border-radius: 8px; }
+.git-branch-row, .git-branch-confirm { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 8px; }
 .git-branch-row a { overflow-wrap: anywhere; }
 .git-branch-create { display: grid; gap: 10px; }
 .git-branch-create > .field { margin: 0; }
@@ -5138,8 +5285,12 @@ body.is-loading .events-detail-mode {
 }
 
 /* Project-level Git administration, kept inside the existing project modal. */
-.project-modal-content { max-height: min(82vh, 900px); overflow: auto; }
-.project-git-settings { border-top: 1px solid var(--line, #d8dce3); padding: 18px 20px 22px; }
+/* The dialog's own wrapper is the scroller (it also holds members, custom fields and Git settings), so it fills the card's remaining height
+   and the form inside it must not become a second scroller, or its pinned Save row would have nothing to stick to. */
+.project-modal-content { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.project-modal-content > .modal-body { overflow: visible; }
+.project-modal-content .modal-foot { bottom: 0; }
+.project-git-settings { border-top: 1px solid var(--border-strong); padding: 18px 20px 22px; }
 .project-git-settings h3, .project-git-settings h4 { margin: 0; }
 .project-git-auth { margin: 8px 0 14px; }
 .project-git-auth.is-error { color: var(--danger, #b42318); }
@@ -5151,6 +5302,29 @@ body.is-loading .events-detail-mode {
 .project-git-actions { margin: 12px 0 18px; }
 .project-git-section-head, .project-git-repository-head { justify-content: space-between; }
 .project-git-repositories { display: grid; gap: 12px; }
-.project-git-repository { border: 1px solid var(--line, #d8dce3); border-radius: 8px; padding: 12px; }
+.project-git-repository { border: 1px solid var(--border-strong); border-radius: 8px; padding: 12px; }
 
 @media (max-width: 640px) { .project-git-grid { grid-template-columns: 1fr; } }
+
+/* Short windows (a laptop browser at high display scaling is often only ~560px tall): thinner bars and tighter headers give the content the room,
+   instead of the fixed top bars using a fifth of the screen. Declared last so it wins over the size-specific rules above. */
+@media (max-height: 700px) {
+  .chrome { height: 46px; }
+  .brandmark .logo { width: 30px; height: 30px; }
+  .chrome .nav-btn.active::after { bottom: 5px; }
+  .supernav { height: 38px; }
+  .pagehead { padding: 12px 24px 4px; }
+  .pagehead h1 { font-size: 21px; }
+  .pagehead .sub { margin-top: 2px; }
+  .kpi-strip { padding: 10px 24px; gap: 10px; }
+  .kpi { padding: 9px 14px 8px; }
+  .kpi-num { font-size: 22px; }
+  .filter-bar { padding-bottom: 10px; }
+  .bug-table th, .bug-table td { padding-top: 8px; padding-bottom: 8px; }
+}
+@media (max-height: 700px) and (max-width: 700px) {
+  .pagehead { padding: 10px 12px 4px; }
+  .kpi-strip { padding: 8px 12px; }
+  .view { padding-bottom: 16px; }
+}
+

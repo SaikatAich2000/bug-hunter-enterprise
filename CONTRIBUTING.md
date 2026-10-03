@@ -160,15 +160,14 @@ To cut a release:
 
 1. Set `APP_VERSION` in `.env` (the only edit a release should need).
 2. Mirror it in the `APP_VERSION` repository variable
-   (Settings → Secrets and variables → Actions → Variables). The SonarQube scan
-   reads it from there and fails the job if it is missing, so the analysis
-   history never mixes versions.
+   (Settings → Secrets and variables → Actions → Variables). The backend test
+   job reads it from there (and falls back to a sentinel when it is missing).
 3. Leave `APP_VERSION` blank in `.env.example`; it is a template, not a value.
 
 Everything else follows automatically: `/api/health` and the UI version string,
 the Docker image tag (`docker-compose.yml` uses `${APP_VERSION:?...}`, so a
-missing value fails loudly instead of tagging a stale image), the SonarQube
-project version, and the default release-archive filename.
+missing value fails loudly instead of tagging a stale image), the local
+SonarQube scan's project version, and the default release-archive filename.
 
 `tests/test_release_hygiene.py` enforces this: it reads the live `.env` value
 and fails if that value appears as a literal in any other file.

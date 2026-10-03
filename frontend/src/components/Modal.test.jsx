@@ -20,7 +20,7 @@ function mount(props, ...children) {
   act(() => {
     root.render(React.createElement(Modal, props, ...children));
   });
-  return container.querySelector(".modal");
+  return document.querySelector(".modal");
 }
 
 afterEach(() => {

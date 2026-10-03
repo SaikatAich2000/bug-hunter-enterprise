@@ -481,13 +481,12 @@ The GitHub Actions pipeline (`.github/workflows/build-and-push.yml`) runs on
 pushes and pull requests to `main`: compile, ruff, bandit, the backend suite
 with the 80% coverage gate, ESLint, the frontend tests and build, `npm audit`
 and `pip-audit`. All actions are pinned to commit SHAs. Three repository
-variables control the rest:
+variables control the rest (SonarQube is a local tool only; the pipeline does not run it):
 
 | Variable | Effect |
 | --- | --- |
-| `SONAR_ENABLED=true` | Run the SonarQube scan and wait for its quality gate (needs `SONAR_TOKEN` and `SONAR_HOST_URL` secrets). |
 | `IMAGE_PUSH_ENABLED=true` | Build and push the image on `main` after every check passes (needs the `ACR_*` secrets). |
-| `RUN_TESTS=false` | Skip the backend and frontend test jobs and the SonarQube gate for an image-only run. Lint, build and dependency audits still gate the push. |
+| `RUN_TESTS=false` | Skip the backend and frontend test jobs for an image-only run. Lint, build and dependency audits still gate the push. |
 
 Browser suites are not run in CI.
 

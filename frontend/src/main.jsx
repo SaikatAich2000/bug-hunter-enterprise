@@ -20,6 +20,7 @@ try {
   /* storage blocked */
 }
 document.documentElement.dataset.theme = storedTheme || "dark";
+document.body.classList.add("viewport-fit");
 if (collapsed) {
   document.body.classList.add("sidebar-collapsed");
 }

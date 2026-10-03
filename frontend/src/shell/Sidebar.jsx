@@ -133,10 +133,11 @@ export default function Sidebar({ mobileOpen, onNavigate }) {
         <div className="wm">
           <b aria-label={appName}>{wordmark.first}{wordmark.rest && <span>{wordmark.rest}</span>}</b>
           {health && <small>{`Version ${health.version}`}</small>}
+          {currentUser.organization_name && <small className="sidebar-org">{currentUser.organization_name}</small>}
         </div>
       </div>
 
-      {/* Mobile-only view nav (hidden ≥900px via CSS). */}
+      {/* Drawer-only view nav (hidden above 1180px via CSS). */}
       <nav className="sidebar-nav" aria-label="Main sections">
         {NAV_ITEMS.filter((item) => allowed(item.view)).map((item) => (
           <button

@@ -33,17 +33,20 @@ let container;
 let root;
 
 function mount() {
+  // The modal portals to <body>, so a previous mount has to go before the next one.
+  if (root) act(() => root.unmount());
+  container?.remove();
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => {
     root.render(React.createElement(ChangePasswordModal));
   });
-  return container;
+  return document.body;
 }
 
 function setInput(name, value) {
-  const el = container.querySelector(`input[name="${name}"]`);
+  const el = document.querySelector(`input[name="${name}"]`);
   act(() => {
     const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
     setter.call(el, value);
@@ -55,7 +58,7 @@ function setInput(name, value) {
 
 function submit() {
   act(() => {
-    container.querySelector("#formChangePassword").dispatchEvent(
+    document.querySelector("#formChangePassword").dispatchEvent(
       new Event("submit", { bubbles: true, cancelable: true }),
     );
   });
@@ -116,7 +119,7 @@ describe("ChangePasswordModal", () => {
       method: "POST",
       json: { current_password: "old-secret", new_password: "N3w-valid-pass" },
     });
-    expect(container.querySelector("input[name='current_password']").value).toBe("");
+    expect(document.querySelector("input[name='current_password']").value).toBe("");
     expect(appState.setChangePasswordOpen).toHaveBeenCalledWith(false);
     expect(toastMock).toHaveBeenCalledWith("Password updated", "success");
   });
@@ -135,7 +138,7 @@ describe("ChangePasswordModal", () => {
   it("closes from the cancel button", () => {
     mount();
     act(() => {
-      container.querySelector("[data-close-modal]").click();
+      document.querySelector("[data-close-modal]").click();
     });
     expect(appState.setChangePasswordOpen).toHaveBeenCalledWith(false);
     expect(apiMock).not.toHaveBeenCalled();

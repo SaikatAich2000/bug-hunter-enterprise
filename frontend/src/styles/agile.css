@@ -91,11 +91,12 @@ button.ag-key:hover, button.ag-key:focus-visible { color: var(--accent); text-de
 .ag-menu-sep { height: 1px; background: var(--border-strong); margin: 4px 0; }
 
 /* --- dialogs ------------------------------------------------------------------ */
-.ag-dialog { display: flex; flex-direction: column; gap: 12px; padding: 16px 20px 20px; overflow-y: auto; }
+.ag-dialog { display: flex; flex-direction: column; gap: 12px; padding: 16px 20px 20px; overflow-y: auto; min-height: 0; }
 .ag-dialog .field { display: flex; flex-direction: column; gap: 4px; }
 .ag-dialog textarea { resize: vertical; }
 .ag-form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.ag-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; flex-wrap: wrap; }
+/* Stays at the bottom of a scrolling dialog (the 20px reaches past the form's bottom padding), so Create/Start never sits below the fold on short screens. */
+.ag-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; flex-wrap: wrap; position: sticky; bottom: -20px; z-index: 2; padding: 12px 0 14px; background: var(--bg-elev); border-top: 1px solid var(--border); box-shadow: 0 -10px 12px -10px rgba(0, 0, 0, 0.35); }
 .ag-complete-summary { margin: 0; padding-left: 20px; }
 .ag-colors { display: flex; gap: 8px; flex-wrap: wrap; border: 0; padding: 0; margin: 0; }
 .ag-colors legend { margin-bottom: 6px; }

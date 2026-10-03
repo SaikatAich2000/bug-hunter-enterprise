@@ -3,8 +3,12 @@
  * Accessibility: the card is a modal dialog labelled by its title. Opening it
  * moves focus into it (to an element marked `data-autofocus`, else the card
  * itself), Tab and Shift+Tab stay inside it, and closing it returns focus to
- * where it was. */
+ * where it was.
+ *
+ * The overlay is portalled to <body>: rendered inside a view it would be trapped in that view's
+ * stacking context (under the sticky header) and sized by any transformed ancestor. */
 import { useEffect, useId, useRef } from "react";
+import { createPortal } from "react-dom";
 
 const FOCUSABLE = [
   "a[href]", "button:not([disabled])", "input:not([disabled]):not([type=hidden])", "select:not([disabled])",
@@ -69,7 +73,7 @@ export default function Modal({
     }
   };
 
-  return (
+  return createPortal(
     <div className="modal" id={id} hidden={!open} data-bh-modal>
       {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Tab trap for the dialog */}
       <div
@@ -98,6 +102,7 @@ export default function Modal({
         </div>
         {children}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

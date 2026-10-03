@@ -40,7 +40,7 @@
   object-fit: contain;
   flex: none;
 }
-@media (max-width: 900px) {
+@media (max-width: 700px) {
   .org-badge { display: none; }
 }
 
@@ -218,6 +218,8 @@
 }
 .ent-inline-form input:not([type="checkbox"]),
 .ent-inline-form select { min-width: 0; flex: 1 1 140px; }
+/* Inside the project dialog the sections sit below the padded form, so they carry their own gutter. */
+.project-modal-content > .ent-section { margin: 0; padding: 18px 20px; border-top: 1px solid var(--border-soft); border-bottom: 0; }
 
 /* Saved views in the filter bar */
 .saved-views {
@@ -308,3 +310,6 @@
 .policy-shell a { color: var(--accent); }
 .policy-meta { margin: 0 0 20px; color: var(--text-muted); }
 .policy-back { display: inline-block; margin-bottom: 16px; }
+
+/* The account dialog keeps one height across its tabs instead of jumping as the content changes. */
+#modalAccount .modal-body { min-height: min(400px, 60vh); }

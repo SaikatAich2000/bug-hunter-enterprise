@@ -152,8 +152,6 @@ def test_sonar_project_version_is_supplied_at_scan_time():
     )
     scan = _read("scripts/sonar-scan.sh")
     assert "-Dsonar.projectVersion=" in scan, "local scan must pass APP_VERSION"
-    workflow = _read(".github/workflows/build-and-push.yml")
-    assert "-Dsonar.projectVersion=" in workflow, "CI scan must pass APP_VERSION"
 
 
 def test_health_endpoint_reports_the_configured_version(admin_client):
