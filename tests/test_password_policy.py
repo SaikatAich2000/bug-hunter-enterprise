@@ -47,3 +47,17 @@ def test_too_long_rejected_regardless():
     check = _check()
     with pytest.raises(ValueError):
         check("a1" * 200)                      # 400 chars exceeds the 200-char DoS guard
+
+
+def test_signup_and_invitation_accept_refuse_the_old_exempt_passwords(client):
+    """Tenancy: the two enterprise paths that create accounts (sign-up, invitation accept) run
+    the same policy, so no tenant can start with "changeme"."""
+    for pw in ("changeme", "legacy-default"):
+        res = client.post("/api/auth/signup", json={
+            "name": "Owner", "email": "owner@policy.test", "password": pw, "organization_name": "Policy Org",
+        })
+        assert res.status_code == 422, res.text
+    res = client.post("/api/invitations/accept", json={
+        "token": "x" * 40, "name": "Invitee", "password": "changeme",
+    })
+    assert res.status_code == 422, res.text
