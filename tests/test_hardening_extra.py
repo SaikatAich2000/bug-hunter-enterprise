@@ -138,18 +138,19 @@ def test_project_update_with_no_actual_changes_skips_audit(admin_client):
     assert len(after) == len(before), "identical PUT must not write an audit row"
 
 
-# Oversized images must be returned unchanged without being decoded.
-def test_image_oversized_skipped_before_decode(monkeypatch):
+# An image the Pillow path can't decode within budget is refused before decoding.
+def test_image_over_the_decode_budget_is_refused_before_decode(monkeypatch):
+    import pytest
     from PIL import Image
 
     from app import image_strip
     img = Image.new("RGB", (8, 8), (0, 0, 255))
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    data = buf.getvalue()
-    monkeypatch.setattr(image_strip, "_MAX_IMAGE_PIXELS", 10)   # force the oversized path
-    out = image_strip.strip_image_metadata(data, "image/png")
-    assert out == data   # returned as-is, not decoded
+    img.save(buf, format="BMP")
+    monkeypatch.setattr(image_strip, "_MAX_DECODE_BYTES", 10)
+    monkeypatch.setattr(Image.Image, "load", lambda self: pytest.fail("decoded over budget"))
+    with pytest.raises(image_strip.ImageTooLarge):
+        image_strip.strip_image_metadata(buf.getvalue(), "image/bmp")
 
 
 # Unhandled errors return a sanitized 500 with security headers; covers get_db rollback.

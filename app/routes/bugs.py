@@ -27,6 +27,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
+from starlette.concurrency import run_in_threadpool
 
 from app import bulk_import, notification_service
 from app.access import (
@@ -72,7 +73,7 @@ from app.email_service import (
     notify_bug_updated,
     notify_comment_added,
 )
-from app.image_strip import strip_image_metadata
+from app.image_strip import ImageTooLarge, strip_image_metadata
 from app.models import (
     Activity,
     Attachment,
@@ -1704,10 +1705,17 @@ async def upload_attachment(
     if not data:
         raise HTTPException(status_code=400, detail="This file is empty, so there's nothing to attach.")
 
-    # Strip EXIF/GPS/XMP/ICC metadata from raster images. No-op for non-images;
-    # fails open on errors so an exotic format doesn't block the upload.
-    data = strip_image_metadata(data, file.content_type)
-    # Re-check the cap: stripping and re-encoding could grow the file slightly.
+    # Strip EXIF/GPS/XMP metadata from raster images (off the event loop: a re-encode can
+    # take a while). No-op for non-images and for bytes that are not a readable image.
+    try:
+        data = await run_in_threadpool(strip_image_metadata, data, file.content_type)
+    except ImageTooLarge:
+        raise HTTPException(
+            status_code=413,
+            detail=("This image is too large to process. Save it as JPEG or PNG, or resize "
+                    "it below 16 megapixels, and try again."),
+        ) from None
+    # Re-check the cap: re-encoding a GIF, BMP or TIFF could grow the file slightly.
     if len(data) > MAX_FILE_BYTES:
         raise HTTPException(
             status_code=413,
