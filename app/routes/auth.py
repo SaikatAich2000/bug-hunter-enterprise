@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -168,7 +168,7 @@ def start_session(db: Session, user: User, request: Request, response: Response)
 
 
 def _email_taken(db: Session, email: str, exclude_id: int | None = None) -> bool:
-    stmt = select(User.id).where(User.email == email)
+    stmt = select(User.id).where(func.lower(User.email) == email.lower())
     if exclude_id is not None:
         stmt = stmt.where(User.id != exclude_id)
     return db.scalar(stmt) is not None
@@ -233,7 +233,7 @@ def login(
     account_lockout.check_locked(payload.email)
 
     # LoginIn already lowercases the email.
-    user = db.scalar(select(User).where(User.email == payload.email))
+    user = db.scalar(select(User).where(func.lower(User.email) == payload.email.lower()))
     # Run bcrypt even for unknown emails to keep response timing uniform.
     if user is None:
         verify_password(payload.password, _dummy_password_hash())
@@ -495,7 +495,7 @@ def forgot_password(
     """Issue a password-reset email. With FORGOT_PASSWORD_ENUMERATION_SAFE (default)
     always 204 so account existence never leaks; otherwise 404s on unknown addresses."""
     settings = get_settings()
-    user = db.scalar(select(User).where(User.email == payload.email))
+    user = db.scalar(select(User).where(func.lower(User.email) == payload.email.lower()))
     if user is None or not user.is_active:
         # Run (and discard) the same token work so timing doesn't reveal account existence.
         if settings.FORGOT_PASSWORD_ENUMERATION_SAFE:

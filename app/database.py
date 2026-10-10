@@ -695,6 +695,26 @@ def _create_index_safely(conn, idx, table_name: str) -> None:
         )
 
 
+def _ensure_email_unique_index(conn) -> None:
+    """One account per address whatever its case: a unique index on lower(email).
+
+    Raw SQL because SQLAlchemy cannot reflect an expression index on SQLite, which would
+    break the additive-index check; IF NOT EXISTS keeps it idempotent on SQLite and
+    PostgreSQL. A legacy database that already holds case-variant duplicates logs and skips
+    (the application-level check still blocks new ones) rather than refusing to boot.
+    """
+    try:
+        with conn.begin_nested():
+            conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email_lower ON users (lower(email))"
+            ))
+    except SQLAlchemyError:
+        logger.warning(
+            "Could not create uq_users_email_lower: users with case-variant duplicate emails "
+            "exist. Merge or rename them; the index is retried on every boot.", exc_info=True,
+        )
+
+
 def _retire_legacy_branch_index(conn) -> None:
     """Drop the legacy whole-table unique branch index (idempotent, additive).
 
@@ -737,6 +757,7 @@ def init_db(on_migrated: Callable[[], None] | None = None) -> bool:
         with engine.begin() as conn:
             _retire_legacy_branch_index(conn)
             _add_missing_indexes(conn)
+            _ensure_email_unique_index(conn)
         with engine.begin() as conn:
             _seed_global_workflow_statuses(conn)
         with engine.begin() as conn:
@@ -766,6 +787,7 @@ def init_db(on_migrated: Callable[[], None] | None = None) -> bool:
             _add_missing_columns(conn)
             _retire_legacy_branch_index(conn)
             _add_missing_indexes(conn)
+            _ensure_email_unique_index(conn)
             _seed_global_workflow_statuses(conn)
             _adopt_single_tenant_data(conn)
             _migrate_enterprise_tables(conn)

@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -88,7 +88,7 @@ def create_invitation(
     if payload.role == ROLE_ADMIN and actor.role != ROLE_ADMIN:
         raise HTTPException(status_code=403, detail="Only admins can invite people as admins.")
     # Emails are unique across organizations, so an existing account blocks the invitation.
-    existing = db.scalar(select(User).where(User.email == payload.email))
+    existing = db.scalar(select(User).where(func.lower(User.email) == payload.email.lower()))
     if existing is not None:
         raise HTTPException(
             status_code=409,
@@ -210,7 +210,7 @@ def accept_invitation(
 ) -> dict:
     """Public: create the account from a valid token and sign the new user in."""
     inv = _live_invitation(db, payload.token)
-    if db.scalar(select(User).where(User.email == inv.email)):
+    if db.scalar(select(User).where(func.lower(User.email) == inv.email.lower())):
         raise HTTPException(
             status_code=409, detail="That email is already registered. Sign in with it instead.",
         )
