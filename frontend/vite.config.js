@@ -20,6 +20,7 @@ export default defineConfig({
         login: resolve(__dirname, "login.html"),
         reset: resolve(__dirname, "reset.html"),
         signup: resolve(__dirname, "signup.html"),
+        "verify-email": resolve(__dirname, "verify-email.html"),
         "accept-invite": resolve(__dirname, "accept-invite.html"),
         privacy: resolve(__dirname, "privacy.html"),
         "delete-account": resolve(__dirname, "delete-account.html"),

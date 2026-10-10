@@ -181,6 +181,7 @@ def _bootstrap() -> None:
         db.add(User(
             org_id=org.id, name=s.BOOTSTRAP_ADMIN_NAME, email=email, role=ROLE_ADMIN,
             is_active=True, password_hash=hash_password(s.BOOTSTRAP_ADMIN_PASSWORD),
+            email_verified_at=datetime.now(timezone.utc),
         ))
         db.commit()
         logger.warning("Bootstrap: created organization %r with admin %s. CHANGE THE PASSWORD.",
@@ -762,6 +763,8 @@ _RATE_RULES: dict[str, tuple[int, int]] = {
     # second factor: a 6-digit code is brute-forceable, so throttle per IP as well as per account.
     "/api/auth/login/totp": (8, 60),
     "/api/auth/signup": (5, 60),
+    "/api/auth/verify-email": (10, 60),
+    "/api/auth/resend-verification": (3, 60),
     "/api/invitations/accept": (8, 60),
     # re-authenticates with the password and checks a 6-digit code.
     "/api/auth/email-change/request": (5, 60),
@@ -1054,6 +1057,13 @@ def signup_page(request: Request) -> Response:
     if _has_valid_session(request):
         return RedirectResponse(url="/", status_code=302)
     return _serve_html("signup.html")
+
+
+@app.get("/verify-email.html", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/verify-email", response_class=HTMLResponse, include_in_schema=False)
+def verify_email_page() -> HTMLResponse:
+    # Reachable signed in or out: the link in the mail is opened in whatever browser.
+    return _serve_html("verify-email.html")
 
 
 @app.get("/reset.html", response_class=HTMLResponse, include_in_schema=False)

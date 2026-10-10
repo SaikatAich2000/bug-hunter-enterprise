@@ -47,6 +47,11 @@ export default function SignupPage() {
           password,
         },
       });
+      if (res.status === 202) {
+        // Verification required: no session yet, the link was mailed.
+        location.replace(`/verify-email.html?sent=1`);
+        return;
+      }
       if (res.ok) {
         location.replace("/");
         return;

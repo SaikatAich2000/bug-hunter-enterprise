@@ -217,6 +217,7 @@ def accept_invitation(
     user = User(
         org_id=inv.org_id, name=payload.name, email=inv.email, role=inv.role, is_active=True,
         password_hash=hash_password(payload.password),
+        email_verified_at=datetime.now(timezone.utc),  # the link reached their inbox
     )
     db.add(user)
     try:

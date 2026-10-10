@@ -446,6 +446,30 @@ def notify_password_reset(
         logger.error("Password-reset email was NOT delivered for a reset request.")
 
 
+def notify_email_verification(
+    email: str, name: str, verify_url: str, from_address: str | None = None,
+) -> None:
+    """Send a new sign-up the link that proves they own the address (valid 24 hours)."""
+    if not email:
+        return
+    app_name = get_settings().APP_NAME
+    subject = f"[{app_name}] Confirm your email address"
+    body = "\n".join([
+        f"Hi {name or 'there'},",
+        "",
+        f"Confirm this address to finish creating your {app_name} account.",
+        "The link is valid for 24 hours and works once.",
+        "",
+        verify_url,
+        "",
+        "If you didn't sign up, ignore this email; nothing is activated without the link.",
+        "",
+        f"— {app_name}",
+    ])
+    if not deliver(subject, [email], body, from_address) and get_settings().EMAIL_BACKEND != "disabled":
+        logger.error("Email-verification message was NOT delivered.")
+
+
 def notify_invitation(
     email: str,
     inviter_name: str,

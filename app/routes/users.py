@@ -8,6 +8,7 @@ the last remaining admin of an organization is protected.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -187,6 +188,7 @@ def create_user(
         role=payload.role,
         is_active=payload.is_active,
         password_hash=hash_password(payload.password),
+        email_verified_at=datetime.now(timezone.utc),  # an admin vouches for it
     )
     db.add(user)
     try:

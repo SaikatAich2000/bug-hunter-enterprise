@@ -167,6 +167,10 @@ class User(Base):
     # Time step of the last accepted authenticator code: a code is good once (RFC 6238 5.2).
     totp_last_step: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # When the owner proved the address (mailed link, accepted invitation, confirmed email
+    # change, or created by an admin). NULL = a public sign-up that has not verified yet.
+    email_verified_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), default=_utcnow, nullable=False
     )
@@ -204,6 +208,22 @@ class PasswordResetToken(Base):
         # Covers the (user_id, used_at) filter in invalidate_outstanding_reset_tokens.
         Index("idx_prt_user_id_used_at", "user_id", "used_at"),
     )
+
+
+# Single-use email-verification tokens for public sign-ups (sha256 hash, never plaintext).
+class EmailVerificationToken(Base):
+    __tablename__ = "email_verification_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey(_FK_USERS_ID, ondelete="CASCADE"), nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)
+
+    __table_args__ = (Index("idx_evt_user_id_used_at", "user_id", "used_at"),)
 
 
 class Project(Base):

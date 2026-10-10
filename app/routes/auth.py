@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -35,12 +36,17 @@ from app.auth import (
 )
 from app.config import get_settings
 from app.database import get_db
-from app.email_service import notify_email_change_code, notify_password_reset
+from app.email_service import (
+    notify_email_change_code,
+    notify_email_verification,
+    notify_password_reset,
+)
 from app.metrics import record_event
 from app.models import (
     ROLE_ADMIN,
     Activity,
     EmailChangeRequest,
+    EmailVerificationToken,
     PasswordResetToken,
     TotpRecoveryCode,
     User,
@@ -58,6 +64,7 @@ from app.schemas import (
     ProfileUpdateIn,
     ResetPasswordIn,
     SignupIn,
+    VerifyEmailIn,
 )
 from app.tenancy import create_organization
 from app.totp import (
@@ -89,6 +96,11 @@ _DETAIL_INVALID_LOGIN = "Invalid email or password"
 _DETAIL_WRONG_PASSWORD = "Current password is incorrect"
 _EMAIL_CHANGE_TTL = timedelta(minutes=15)
 _EMAIL_CHANGE_MAX_ATTEMPTS = 5
+_EMAIL_VERIFY_TTL = timedelta(hours=24)
+_EMAIL_VERIFY_RESEND_COOLDOWN = timedelta(seconds=60)
+_DETAIL_INVALID_VERIFY_TOKEN = "Invalid or expired verification link"
+_DETAIL_UNVERIFIED = ("Confirm your email address first: open the link we sent you, or ask for "
+                      "a new one on the verification page.")
 
 
 def _audit(
@@ -174,11 +186,34 @@ def _email_taken(db: Session, email: str, exclude_id: int | None = None) -> bool
     return db.scalar(stmt) is not None
 
 
-@router.post("/signup", response_model=MeOut, status_code=201, responses=AUTH_401)
+def _issue_verification(db: Session, user: User, background: BackgroundTasks) -> None:
+    """Retire the user's outstanding links, store a fresh one and mail it. The caller commits."""
+    now = datetime.now(timezone.utc)
+    db.execute(
+        EmailVerificationToken.__table__.update()
+        .where(EmailVerificationToken.user_id == user.id, EmailVerificationToken.used_at.is_(None))
+        .values(used_at=now)
+    )
+    raw_token, token_hash = generate_token()
+    db.add(EmailVerificationToken(
+        user_id=user.id, token_hash=token_hash, expires_at=now + _EMAIL_VERIFY_TTL,
+    ))
+    url = f"{get_settings().APP_BASE_URL.rstrip('/')}/verify-email.html?token={raw_token}"
+    background.add_task(
+        notify_email_verification, user.email, user.name, url,
+        user.organization.email_from_override,
+    )
+
+
+@router.post("/signup", response_model=MeOut, status_code=201,
+             responses={**AUTH_401, 202: {"description": "Check your email to finish sign-up"}})
 def signup(
-    payload: SignupIn, request: Request, response: Response, db: Session = Depends(get_db),
+    payload: SignupIn, request: Request, response: Response, background: BackgroundTasks,
+    db: Session = Depends(get_db),
 ) -> dict:
-    """Create an organization and its first admin, and sign them in."""
+    """Create an organization and its first admin. With EMAIL_VERIFICATION_REQUIRED (default)
+    the admin must first open the link mailed to them (202, no session); otherwise they are
+    signed in at once (201)."""
     if not get_settings().ALLOW_PUBLIC_SIGNUP:
         raise HTTPException(
             status_code=403,
@@ -190,10 +225,12 @@ def signup(
             detail="An account with that email already exists. Try signing in.",
         )
     _reject_if_breached(payload.password)
+    needs_verification = get_settings().EMAIL_VERIFICATION_REQUIRED
     org = create_organization(db, payload.organization_name)
     user = User(
         org_id=org.id, name=payload.name, email=payload.email, role=ROLE_ADMIN,
         is_active=True, password_hash=hash_password(payload.password),
+        email_verified_at=None if needs_verification else datetime.now(timezone.utc),
     )
     db.add(user)
     try:
@@ -203,13 +240,73 @@ def signup(
         raise HTTPException(
             status_code=409, detail="An account with that email already exists.",
         ) from exc
-    start_session(db, user, request, response)
     _audit(db, user, "org_created", f"Organization '{org.name}' created by {user.email}",
            entity_id=org.id)
     _audit(db, user, "user_signup", f"{user.email} signed up as admin of '{org.name}'",
            entity_id=user.id)
+    if needs_verification:
+        _issue_verification(db, user, background)
+        db.commit()
+        return JSONResponse(  # type: ignore[return-value]
+            status_code=202, content={"verification_required": True, "email": user.email},
+        )
+    start_session(db, user, request, response)
     db.commit()
     return to_me(user)
+
+
+@router.post("/verify-email", status_code=204, responses=RESET_TOKEN_400)
+def verify_email(payload: VerifyEmailIn, db: Session = Depends(get_db)) -> Response:
+    """Consume a verification link: the address is proven and sign-in is allowed."""
+    row = db.scalar(select(EmailVerificationToken).where(
+        EmailVerificationToken.token_hash == hash_token(payload.token)))
+    now = datetime.now(timezone.utc)
+    if row is None or row.used_at is not None:
+        raise HTTPException(status_code=400, detail=_DETAIL_INVALID_VERIFY_TOKEN)
+    expires = row.expires_at if row.expires_at.tzinfo else row.expires_at.replace(tzinfo=timezone.utc)
+    user = db.get(User, row.user_id)
+    if expires < now or user is None:
+        raise HTTPException(status_code=400, detail=_DETAIL_INVALID_VERIFY_TOKEN)
+    # Guarded UPDATE consumes the link once even when two requests race.
+    consumed = (
+        db.query(EmailVerificationToken)
+        .filter(EmailVerificationToken.id == row.id, EmailVerificationToken.used_at.is_(None))
+        .update({EmailVerificationToken.used_at: now}, synchronize_session=False)
+    )
+    if not consumed:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=_DETAIL_INVALID_VERIFY_TOKEN)
+    if user.email_verified_at is None:
+        user.email_verified_at = now
+        _audit(db, user, "email_verified", f"{user.email} verified their address",
+               entity_id=user.id, as_system=True)
+    db.commit()
+    return Response(status_code=204)
+
+
+@router.post("/resend-verification", status_code=204)
+def resend_verification(
+    payload: ForgotPasswordIn, background: BackgroundTasks, db: Session = Depends(get_db),
+) -> Response:
+    """Mail a fresh verification link. Always 204 so account existence never leaks; at most one
+    link a minute per account, and only for an unverified, active account."""
+    user = db.scalar(select(User).where(func.lower(User.email) == payload.email.lower()))
+    if user is None or not user.is_active or user.email_verified_at is not None:
+        generate_token()  # uniform work
+        return Response(status_code=204)
+    latest = db.scalar(
+        select(EmailVerificationToken.created_at).where(EmailVerificationToken.user_id == user.id)
+        .order_by(EmailVerificationToken.id.desc())
+    )
+    if latest is not None:
+        latest = latest if latest.tzinfo else latest.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) - latest < _EMAIL_VERIFY_RESEND_COOLDOWN:
+            return Response(status_code=204)
+    _issue_verification(db, user, background)
+    _audit(db, user, "email_verification_resent", f"Verification link re-sent to {user.email}",
+           entity_id=user.id, as_system=True)
+    db.commit()
+    return Response(status_code=204)
 
 
 def _complete_login(
@@ -249,6 +346,9 @@ def login(
         logger.info("Login refused: inactive account %s", _mask_email(user.email))
         account_lockout.record_failure(payload.email)
         raise HTTPException(status_code=401, detail=_DETAIL_INVALID_LOGIN)
+    # Said only after the password checked out, so it cannot be used to probe for accounts.
+    if get_settings().EMAIL_VERIFICATION_REQUIRED and user.email_verified_at is None:
+        raise HTTPException(status_code=403, detail=_DETAIL_UNVERIFIED)
 
     if get_settings().TOTP_ENABLED and user.totp_enabled and user.totp_secret:
         # The login isn't complete until the second factor passes, so the lockout bucket

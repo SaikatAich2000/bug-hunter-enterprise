@@ -495,6 +495,10 @@ class ForgotPasswordIn(BaseModel):
         return _validate_email(v)
 
 
+class VerifyEmailIn(BaseModel):
+    token: str = Field(min_length=1, max_length=512)
+
+
 class ResetPasswordIn(BaseModel):
     # Token is a hex SHA-256 value; capped to bound hashing/comparison.
     token: str = Field(min_length=1, max_length=512)

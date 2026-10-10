@@ -244,6 +244,11 @@ def _add_missing_columns(conn) -> None:
     # generic pass skip the table silently.
     inspector = inspect(conn)
 
+    # Accounts that predate email verification are vouched for: stamped once, when the column
+    # first appears (never again, or a pending sign-up would be verified on the next boot).
+    user_cols = _column_names(inspector, "users")
+    verify_backfill = bool(user_cols) and "email_verified_at" not in user_cols
+
     bug_cols = _column_names(inspector, "bugs")
     if bug_cols and "item_type" not in bug_cols:
         _add_column_safely(conn,
@@ -284,6 +289,11 @@ def _add_missing_columns(conn) -> None:
     _add_missing_epic_detail_columns(conn, inspector)
     _add_missing_git_columns(conn, inspector)
     _add_missing_columns_from_metadata(conn)
+    if verify_backfill:
+        conn.execute(text(
+            "UPDATE users SET email_verified_at = COALESCE(created_at, CURRENT_TIMESTAMP) "
+            "WHERE email_verified_at IS NULL"
+        ))
 
 
 def _add_missing_columns_from_metadata(conn) -> None:
