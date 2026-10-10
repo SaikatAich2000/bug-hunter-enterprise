@@ -556,6 +556,23 @@ def _preserve_legacy_html_descriptions(conn) -> None:
         logger.exception("legacy description preservation failed; descriptions were not copied")
 
 
+def _encrypt_plain_secrets(conn) -> None:
+    """Seal 2FA and webhook secrets written before FIELD_ENCRYPTION_KEY was configured."""
+    from app.secrets_box import is_sealed, seal
+
+    for table, column in (("users", "totp_secret"), ("webhooks", "secret")):
+        rows = conn.execute(text(f"SELECT id, {column} FROM {table} WHERE {column} IS NOT NULL AND {column} <> ''")).all()
+        for row_id, value in rows:
+            if not is_sealed(value):
+                conn.execute(text(f"UPDATE {table} SET {column} = :v WHERE id = :i"), {"v": seal(value), "i": row_id})
+
+
+def _seal_secrets_if_keyed(conn) -> None:
+    # Only with a key: without one the job must stay pending, not be recorded as done.
+    if _settings.FIELD_ENCRYPTION_KEY:
+        _run_once(conn, "encrypt_plain_secrets_v1", _encrypt_plain_secrets)
+
+
 def _run_once(conn, name: str, migrate: Callable[[object], None]) -> None:
     """Run a data migration exactly once per database (recorded in app_migrations). Callers
     hold the migration lock, so two replicas never run the same one."""
@@ -854,6 +871,7 @@ def init_db(on_migrated: Callable[[], None] | None = None) -> bool:
             _backfill_project_keys(conn)
             _backfill_bug_display_id(conn)
             _run_once(conn, "plain_text_storage_v1", _plain_text_storage)
+            _seal_secrets_if_keyed(conn)
             _align_agile_hierarchy(conn)
         if on_migrated is not None:
             on_migrated()
@@ -881,6 +899,7 @@ def init_db(on_migrated: Callable[[], None] | None = None) -> bool:
             _backfill_project_keys(conn)
             _backfill_bug_display_id(conn)
             _run_once(conn, "plain_text_storage_v1", _plain_text_storage)
+            _seal_secrets_if_keyed(conn)
             _align_agile_hierarchy(conn)
             # After the data alignment, so upgraded rows already satisfy the constraints.
             _add_missing_check_constraints(conn)

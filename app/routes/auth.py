@@ -42,7 +42,6 @@ from app.models import (
     Activity,
     EmailChangeRequest,
     PasswordResetToken,
-    TotpRecoveryCode,
     User,
 )
 from app.models import Session as SessionRow
@@ -62,7 +61,7 @@ from app.schemas import (
 from app.tenancy import create_organization
 from app.totp import (
     accept_code,
-    hash_recovery_code,
+    consume_recovery_code,
     make_pending_token,
     parse_pending_token,
 )
@@ -273,17 +272,7 @@ def _consume_second_factor(db: Session, user: User, code: str) -> bool | None:
     consumes). Returns True/False for authenticator/recovery success, None for a wrong code."""
     if accept_code(db, user, code):
         return False
-    recovery = db.scalar(
-        select(TotpRecoveryCode).where(
-            TotpRecoveryCode.user_id == user.id,
-            TotpRecoveryCode.code_hash == hash_recovery_code(code),
-            TotpRecoveryCode.used_at.is_(None),
-        )
-    )
-    if recovery is None:
-        return None
-    recovery.used_at = datetime.now(timezone.utc)
-    return True
+    return True if consume_recovery_code(db, user, code) else None
 
 
 @router.post("/login/totp", responses=AUTH_401)

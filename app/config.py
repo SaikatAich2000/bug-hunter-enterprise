@@ -232,6 +232,8 @@ class Settings:
     # Optional Fernet key encrypting TOTP secrets and webhook signing secrets at rest
     # (values written without a key stay readable and are encrypted when next saved).
     FIELD_ENCRYPTION_KEY: str = os.getenv("FIELD_ENCRYPTION_KEY", "").strip()
+    # Comma-separated retired keys, kept only so values sealed under them stay readable.
+    FIELD_ENCRYPTION_KEY_PREVIOUS: str = os.getenv("FIELD_ENCRYPTION_KEY_PREVIOUS", "").strip()
     # Shown on the public privacy page as the contact for privacy questions.
     PRIVACY_CONTACT_EMAIL: str = os.getenv("PRIVACY_CONTACT_EMAIL", "").strip()
     # Audit rows older than this many days are purged daily; 0 keeps everything.

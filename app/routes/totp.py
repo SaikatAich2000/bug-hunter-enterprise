@@ -27,7 +27,7 @@ from app.totp import (
     accept_code,
     generate_recovery_codes,
     generate_secret,
-    hash_recovery_code,
+    new_recovery_code_row,
     provisioning_uri,
     store_secret,
 )
@@ -77,7 +77,7 @@ def _require_available() -> None:
 def _issue_recovery_codes(db: Session, user: User) -> list[str]:
     codes = generate_recovery_codes(get_settings().TOTP_RECOVERY_CODE_COUNT)
     db.add_all(
-        TotpRecoveryCode(user_id=user.id, code_hash=hash_recovery_code(c)) for c in codes
+        new_recovery_code_row(user.id, c) for c in codes
     )
     return codes
 

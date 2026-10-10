@@ -767,6 +767,8 @@ class TotpRecoveryCode(Base):
         Integer, ForeignKey(_FK_USERS_ID, ondelete="CASCADE"), nullable=False
     )
     code_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    # Per-code salt of the HMAC in code_hash; NULL marks a legacy unsalted SHA-256 hash.
+    salt: Mapped[str | None] = mapped_column(String(32), nullable=True)
     used_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)
 

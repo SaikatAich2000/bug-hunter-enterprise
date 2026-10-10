@@ -277,8 +277,17 @@ def _production_config_errors(s) -> list[str]:
             Fernet(key.encode("utf-8"))
         except Exception:
             errors.append("GIT_CREDENTIAL_ENCRYPTION_KEY is malformed")
+    field_key = getattr(s, "FIELD_ENCRYPTION_KEY", "") or ""
+    if field_key:
+        from app.secrets_box import valid_key_problem
+
+        problem = valid_key_problem(field_key, getattr(s, "FIELD_ENCRYPTION_KEY_PREVIOUS", "") or "")
+        if problem:
+            errors.append(f"FIELD_ENCRYPTION_KEY {problem}")
     if not getattr(s, "is_production_env", False):
         return errors
+    if not field_key:
+        errors.append("FIELD_ENCRYPTION_KEY must be set in production (encrypts 2FA and webhook secrets)")
     if not s.COOKIE_SECURE:
         errors.append("COOKIE_SECURE must be true in production")
     if not (s.APP_BASE_URL or "").strip():
