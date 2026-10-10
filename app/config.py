@@ -228,6 +228,10 @@ class Settings:
     # A public sign-up must prove ownership of its address (mailed link) before the first
     # login. Accounts made by an invitation or an admin are already vouched for.
     EMAIL_VERIFICATION_REQUIRED: bool = _env_bool("EMAIL_VERIFICATION_REQUIRED", True)
+    # Invitations are email sends on the organization's behalf: cap them per organization
+    # (a burst per minute, and a ceiling per rolling day) so one account cannot spam.
+    INVITE_RATE_PER_MINUTE: int = _env_int("INVITE_RATE_PER_MINUTE", 10, minimum=1)
+    INVITE_DAILY_CAP: int = _env_int("INVITE_DAILY_CAP", 200, minimum=1)
     # bcrypt cost for new password hashes (existing hashes keep verifying at their own cost).
     BCRYPT_ROUNDS: int = _env_int("BCRYPT_ROUNDS", 12, minimum=10)
     # Two-factor sign-in with an authenticator app (TOTP). Each user still opts in.

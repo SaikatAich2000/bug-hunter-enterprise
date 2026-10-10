@@ -1,7 +1,7 @@
 """Invitations API: email-token invitations to join the caller's organization."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
 from sqlalchemy import func, select
@@ -44,6 +44,28 @@ def _audit(db: Session, org_id: int, actor: User | None, action: str, detail: st
         actor_name=actor.name if actor else "system",
         action=action, detail=detail,
     ))
+
+
+def _enforce_send_limits(db: Session, org_id: int) -> None:
+    """Per-organization throttle on new invitations: a short burst limit and a daily ceiling.
+    Counted from the table (every send writes a row), so it holds across workers and restarts."""
+    s = get_settings()
+    now = datetime.now(timezone.utc)
+
+    def sent_since(delta: timedelta) -> int:
+        return db.scalar(select(func.count(Invitation.id)).where(
+            Invitation.org_id == org_id, Invitation.created_at >= now - delta)) or 0
+
+    if sent_since(timedelta(minutes=1)) >= s.INVITE_RATE_PER_MINUTE:
+        raise HTTPException(
+            status_code=429, headers={"Retry-After": "60"},
+            detail="Too many invitations just now. Wait a minute and try again.",
+        )
+    if sent_since(timedelta(days=1)) >= s.INVITE_DAILY_CAP:
+        raise HTTPException(
+            status_code=429, headers={"Retry-After": "3600"},
+            detail="Your organization reached its daily invitation limit. Try again tomorrow.",
+        )
 
 
 def _require_inviter(actor: User) -> None:
@@ -97,6 +119,7 @@ def create_invitation(
                     else "That email is already registered with another organization."),
         )
     _validate_projects(db, actor, payload.project_ids)
+    _enforce_send_limits(db, actor.org_id)
 
     # A new invitation replaces any still-pending one for the same address.
     now = datetime.now(timezone.utc)

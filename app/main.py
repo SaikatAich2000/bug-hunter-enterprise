@@ -773,7 +773,18 @@ _RATE_RULES: dict[str, tuple[int, int]] = {
     # change-password bcrypt-verifies on every call — throttle the amplification.
     "/api/auth/reset-password": (5, 60),
     "/api/auth/change-password": (5, 60),
+    # deleting an account is irreversible and password-gated: throttle guessing.
+    "/api/auth/account": (3, 60),
+    # two-factor management: the confirm step checks a 6-digit code, the others a password.
+    "/api/auth/2fa/begin": (5, 60),
+    "/api/auth/2fa/confirm": (8, 60),
+    "/api/auth/2fa/disable": (5, 60),
+    "/api/auth/2fa/recovery-codes/regenerate": (5, 60),
+    # per-IP burst guard; the per-organization limits live in routes/invitations.py.
+    "/api/invitations": (20, 60),
 }
+# Rules apply to POST unless the path names its own method.
+_RATE_METHODS: dict[str, str] = {"/api/auth/account": "DELETE"}
 _rate_buckets: dict[tuple[str, str], deque] = {}
 _rate_lock = Lock()
 # Soft cap to bound memory when hammered from many IPs.
@@ -814,7 +825,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
         rule = _RATE_RULES.get(path)
-        if rule is None or request.method.upper() != "POST":
+        if rule is None or request.method.upper() != _RATE_METHODS.get(path, "POST"):
             return await call_next(request)
 
         max_req, window = rule
