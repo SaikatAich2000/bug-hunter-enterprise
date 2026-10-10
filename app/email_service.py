@@ -95,7 +95,8 @@ def _send_smtp(settings: Settings, msg: EmailMessage) -> bool:
                 if settings.SMTP_USERNAME:
                     s.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
                 s.send_message(msg)
-        logger.info("SMTP email sent: subject=%r to=%s", msg["Subject"], msg["To"])
+        logger.info("SMTP email sent: subject=%r to=%s bcc=%d", msg["Subject"],
+                    _masked_recipients(msg["To"]), len((msg["Bcc"] or "").split(",")) if msg["Bcc"] else 0)
         return True
     except (smtplib.SMTPException, OSError):
         # Narrow catch: programming errors still raise; callers see False.
@@ -108,7 +109,7 @@ def _send_console(msg: EmailMessage) -> None:
     logger.info(
         "[console-email] to=%s subject=%r (body suppressed — set log level "
         "DEBUG to include it)",
-        msg["To"], msg["Subject"],
+        _masked_recipients(msg["To"]), msg["Subject"],
     )
     if logger.isEnabledFor(logging.DEBUG):
         body = msg.get_content() if msg.is_multipart() is False else "(multipart)"
@@ -116,9 +117,23 @@ def _send_console(msg: EmailMessage) -> None:
                      _redact_secrets_for_log(body.strip()))
 
 
+def mask_email(email: str) -> str:
+    """An address safe for logs: ``alice@x.com`` -> ``a***@x.com``."""
+    if not email or "@" not in email:
+        return "***"
+    local, _, domain = email.strip().partition("@")
+    return f"{local[:1]}***@{domain}"
+
+
+def _masked_recipients(header: str | None) -> str:
+    return ", ".join(mask_email(a) for a in (header or "").split(",") if a.strip())
+
+
 def _header_safe(value: str) -> str:
-    """Strip CR/LF — header-injection defense; also keeps a newline from 500ing the send."""
-    return value.replace("\r", " ").replace("\n", " ")
+    """One header line: line breaks of every kind (CR, LF, VT, FF, NEL, the Unicode line and
+    paragraph separators) and other non-printable characters become single spaces. This is the
+    header-injection defense, and it keeps an odd character in a name from failing the send."""
+    return " ".join("".join(ch if ch.isprintable() else " " for ch in value).split())
 
 
 def _build(

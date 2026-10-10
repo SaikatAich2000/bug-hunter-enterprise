@@ -262,54 +262,42 @@ def test_ingest_confirm_ttl(monkeypatch):
 
 
 # push_service — register survives a unique-token insert race
-def test_push_register_insert_race(admin_client, monkeypatch):
-    from sqlalchemy import select
-    from sqlalchemy.exc import IntegrityError
+def test_push_register_when_another_request_already_inserted_the_token(admin_client):
+    # The row a concurrent request just inserted is refreshed, not duplicated or a 500.
+    from sqlalchemy import func, select
 
     from app import push_service
     from app.models import PushSubscription, User
     db0 = _session()
     admin_id = db0.scalar(select(User.id).where(User.email == BOOTSTRAP_EMAIL))
-    # Pre-insert the row to simulate a concurrent request winning the race.
     db0.add(PushSubscription(user_id=admin_id, token="race-tok", platform="web"))
     db0.commit()
 
     db = _session()
-    real_scalar, real_flush = db.scalar, db.flush
-    n = {"scalar": 0, "flush": 0}
-
-    def fake_scalar(*a, **k):
-        n["scalar"] += 1
-        # Miss on first call to simulate the race window; fall through to real DB after that.
-        return None if n["scalar"] == 1 else real_scalar(*a, **k)
-
-    def fake_flush(*a, **k):
-        n["flush"] += 1
-        if n["flush"] == 1:
-            raise IntegrityError("dup", {}, ValueError("dup token"))
-        return real_flush(*a, **k)
-
-    monkeypatch.setattr(db, "scalar", fake_scalar)
-    monkeypatch.setattr(db, "flush", fake_flush)
-    sub = push_service.register(db, user_id=admin_id, token="race-tok", platform="web")
-    assert sub.token == "race-tok"
-    assert sub.user_id == admin_id
+    sub = push_service.register(db, user_id=admin_id, token="race-tok", platform="android")
+    db.commit()
+    assert (sub.user_id, sub.platform) == (admin_id, "android")
+    assert db.scalar(select(func.count()).select_from(PushSubscription)) == 1
 
 
-def test_push_register_race_reraises_when_row_gone(monkeypatch):
-    # If recovery after IntegrityError still finds no row, re-raise (something else is wrong).
-    from sqlalchemy.exc import IntegrityError
+def test_push_register_refuses_a_token_bound_to_another_account(admin_client):
+    from sqlalchemy import select
 
     from app import push_service
+    from app.models import PushSubscription, User
     db = _session()
-
-    def boom_flush(*a, **k):
-        raise IntegrityError("dup", {}, ValueError("x"))
-
-    monkeypatch.setattr(db, "scalar", lambda *a, **k: None)
-    monkeypatch.setattr(db, "flush", boom_flush)
-    with pytest.raises(IntegrityError):
-        push_service.register(db, user_id=1, token="gone-tok", platform="web")
+    admin_id = db.scalar(select(User.id).where(User.email == BOOTSTRAP_EMAIL))
+    org_id = db.scalar(select(User.org_id).where(User.id == admin_id))
+    other = User(org_id=org_id, name="Other", email="other-push@test.local", role="user", password_hash="x")
+    db.add(other)
+    db.flush()
+    db.add(PushSubscription(user_id=other.id, token="theirs-tok", platform="web"))
+    db.commit()
+    with pytest.raises(push_service.PushTokenConflict):
+        push_service.register(db, user_id=admin_id, token="theirs-tok", platform="web")
+    db.rollback()
+    owner = db.scalar(select(PushSubscription.user_id).where(PushSubscription.token == "theirs-tok"))
+    assert owner == other.id
 
 
 # download — a Range request returns the exact sliced bytes
@@ -336,9 +324,21 @@ def test_login_not_csrf_exempt(client):
     assert r.headers.get("Cache-Control") == "no-store"
 
 
-def test_sessions_list_sweeps_without_error(admin_client):
-    # Exercises the expired-session sweep path.
-    assert admin_client.get("/api/sessions").status_code == 200
+def test_sessions_list_hides_expired_rows_without_writing(admin_client):
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import func, select
+
+    from app.models import Session as SessionRow
+    db = _session()
+    row = db.scalars(select(SessionRow)).first()
+    db.add(SessionRow(user_id=row.user_id, jti="expired-jti", expires_at=datetime.now(timezone.utc) - timedelta(days=1)))
+    db.commit()
+    listed = admin_client.get("/api/sessions")
+    assert listed.status_code == 200
+    assert all(s.get("jti") != "expired-jti" for s in listed.json())
+    # Removing it is the retention job's work, not a GET's.
+    assert db.scalar(select(func.count()).select_from(SessionRow).where(SessionRow.jti == "expired-jti")) == 1
 
 
 # Setting an inactive user as reporter is rejected

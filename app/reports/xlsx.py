@@ -3,6 +3,7 @@ Applied sheet. Used by routes/reports.py and chatbot/excel.py."""
 from __future__ import annotations
 
 import io
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -34,9 +35,18 @@ _ZEBRA_FILL = "F2F4F8"
 _FORMULA_TRIGGERS = ("=", "+", "-", "@", "\t", "\r", "\n")
 
 
+# Characters a worksheet cannot hold (C0 controls except tab/newline/CR); openpyxl raises on
+# them, which failed the whole export for one stray character in old data.
+_ILLEGAL_XML_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
 def _defang_formula_text(s: str) -> str:
-    """Prefix with a quote if s starts with a formula trigger (checks both
-    the raw and whitespace-stripped first char — Excel trims leading spaces)."""
+    """Drop characters a worksheet can't hold, then prefix with a quote if s starts with a
+    formula trigger (checks both the raw and whitespace-stripped first char — Excel trims
+    leading spaces)."""
+    if not s:
+        return s
+    s = _ILLEGAL_XML_CHARS.sub("", s)
     if not s:
         return s
     stripped = s.lstrip()

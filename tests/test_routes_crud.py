@@ -249,8 +249,8 @@ def test_cov_sessions_list_and_is_current(admin_client):
     assert current[0]["user_email"] == _BOOTSTRAP_EMAIL
 
 
-def test_cov_sessions_sweep_expired_rows(admin_client):
-    """Listing sessions sweeps rows whose expires_at is past (back-dated directly, then confirmed gone)."""
+def test_cov_sessions_hides_then_retention_removes_expired_rows(admin_client):
+    """Listing sessions hides rows whose expires_at is past; the retention job deletes them."""
     from datetime import datetime, timedelta, timezone
 
     from app.database import SessionLocal
@@ -273,9 +273,10 @@ def test_cov_sessions_sweep_expired_rows(admin_client):
         db.close()
 
     rows = admin_client.get("/api/sessions").json()
-    assert all(r["id"] != target_id for r in rows), "expired row should be swept"
+    assert all(r["id"] != target_id for r in rows), "expired row should be hidden"
 
-    # Double-check at the DB level.
+    from app.jobs.retention import run_once
+    run_once()
     db2 = SessionLocal()
     try:
         assert db2.get(SessionRow, target_id) is None

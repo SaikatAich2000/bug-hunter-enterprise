@@ -184,17 +184,12 @@ def get_agile_settings(
 ) -> dict:
     project = _get_project_or_404(db, project_id, user)
     board = boards_svc.get_default_board(db, project_id)
-    # Self-heal: a project whose board row is missing (e.g. a data reset removed
-    # the board while `agile_enabled` stayed true) would otherwise leave the
-    # Sprint Board and Sprint Items tabs permanently blank, because both panels
-    # only render when `agile_enabled && board_id`. Repairing the flag here makes
-    # the state consistent again and points the UI at the Enable Agile panel.
-    if project.agile_enabled and board is None:
-        project.agile_enabled = False
-        db.commit()
+    # A project whose board row is missing (e.g. a data reset removed it while the flag stayed
+    # on) reads as not enabled, which points the UI at the Enable Agile panel; enabling it
+    # again recreates the board. A GET never writes.
     return {
         "project_id": project.id,
-        "agile_enabled": project.agile_enabled,
+        "agile_enabled": bool(project.agile_enabled and board is not None),
         "agile_feature_flags": project.agile_feature_flags or {},
         "board_id": board.id if board else None,
     }

@@ -154,32 +154,75 @@ def release_360(db: Session, version: Version) -> dict:
     }
 
 
+def _release_progress_many(db: Session, versions: list[Version]) -> dict[int, dict]:
+    """release_progress for many versions in three queries instead of three per version."""
+    from app.agile.taxonomy import category_of, status_categories
+
+    ids = [v.id for v in versions]
+    out = {vid: {"item_count": 0, "completed_count": 0, "total_estimate": 0.0,
+                 "completed_estimate": 0.0, "unestimated_count": 0} for vid in ids}
+    if not ids:
+        return out
+    links = db.execute(select(WorkItemVersion.version_id, WorkItemVersion.work_item_id).where(
+        WorkItemVersion.version_id.in_(ids), WorkItemVersion.relation_type == "fix",
+    )).all()
+    items = {b.id: b for b in db.scalars(
+        select(Bug).where(Bug.id.in_({item_id for _, item_id in links}))
+    ).all()} if links else {}
+    categories = status_categories(db)
+    for version_id, item_id in links:
+        item = items.get(item_id)
+        if item is None:
+            continue
+        entry = out[version_id]
+        entry["item_count"] += 1
+        pts = float(item.story_points) if item.story_points is not None else None
+        if pts is None:
+            entry["unestimated_count"] += 1
+        else:
+            entry["total_estimate"] += pts
+        if category_of(categories, item) == "done":
+            entry["completed_count"] += 1
+            if pts is not None:
+                entry["completed_estimate"] += pts
+    return out
+
+
 def roadmap_data(db: Session, project_id: int) -> dict:
-    """timeline rows for Epics and Releases in one project.
-    Advanced auto-scheduling is explicitly out of scope even for this slice."""
-    from app.agile.taxonomy import epic_progress, get_or_create_epic_detail
+    """Timeline rows for Epics and Releases in one project, in a fixed number of queries.
+    Read-only: an epic without a details row reads as having no dates."""
+    from app.agile.taxonomy import epic_progress_many
+    from app.models import EpicDetail
 
     epics = list(db.scalars(
         select(Bug).where(Bug.project_id == project_id, Bug.item_type == "Epic")
     ).all())
+    epic_ids = [e.id for e in epics]
+    details = {d.epic_id: d for d in db.scalars(
+        select(EpicDetail).where(EpicDetail.epic_id.in_(epic_ids))
+    ).all()} if epic_ids else {}
+    progress = epic_progress_many(db, epic_ids)
     epic_rows = []
     for epic in epics:
-        detail = get_or_create_epic_detail(db, epic)
+        detail = details.get(epic.id)
+        start, target = (detail.start_date, detail.target_date) if detail else (None, None)
         epic_rows.append({
             "kind": "epic", "id": epic.id, "title": epic.title,
-            "start_date": detail.start_date, "target_date": detail.target_date,
-            "health": detail.health, "scheduled": bool(detail.start_date or detail.target_date),
-            "progress": epic_progress(db, epic),
+            "start_date": start, "target_date": target,
+            "health": detail.health if detail else "unknown",
+            "scheduled": bool(start or target),
+            "progress": progress[epic.id],
         })
 
     versions = list(db.scalars(select(Version).where(Version.project_id == project_id)).all())
+    release_progress_by_id = _release_progress_many(db, versions)
     version_rows = []
     for v in versions:
         version_rows.append({
             "kind": "release", "id": v.id, "title": v.name,
             "start_date": v.start_date, "target_date": v.release_date,
             "status": v.status, "scheduled": bool(v.start_date or v.release_date),
-            "progress": release_progress(db, v),
+            "progress": release_progress_by_id[v.id],
         })
 
     warnings = []

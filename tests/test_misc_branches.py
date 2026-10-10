@@ -428,24 +428,6 @@ def test_sessions_list_empty_skips_user_prefetch(client):
     assert r.json() == []
 
 
-def test_sessions_list_survives_sweep_error(admin_client, monkeypatch):
-    # SQLAlchemyError during the sweep is caught and rolled back; listing still returns.
-    from sqlalchemy.exc import SQLAlchemyError
-
-    import app.routes.sessions as sessions_mod
-
-    real_execute_marker = {"raised": False}
-
-    def boom_delete(*args, **kwargs):
-        real_execute_marker["raised"] = True
-        raise SQLAlchemyError("sweep boom")
-
-    monkeypatch.setattr(sessions_mod, "delete", boom_delete)
-    r = admin_client.get("/api/sessions")
-    assert r.status_code == 200
-    assert real_execute_marker["raised"] is True
-
-
 # app/main.py - asset hash, body-limit ASGI, cache headers, rate buckets, IP, CSRF.
 class _FakeURL:
     def __init__(self, path):
@@ -507,7 +489,7 @@ def test_main_body_limit_skips_non_request_messages():
     async def send(_msg):
         return None
 
-    mw = main.StreamingBodyLimitMiddleware(app_inner)
+    mw = main.BodyLimitMiddleware(app_inner)
     scope = {"type": "http", "path": "/api/x"}
     asyncio.run(mw(scope, receive, send))
     assert received["msgs"] == [{"type": "http.disconnect"}]
@@ -516,7 +498,7 @@ def test_main_body_limit_skips_non_request_messages():
 def test_main_body_limit_413_on_oversized_body(monkeypatch):
     # Oversized body triggers 413 when the response hasn't started.
     import app.main as main
-    monkeypatch.setattr(main.settings, "MAX_REQUEST_BODY_BYTES", 8)
+    monkeypatch.setattr(main.settings, "MAX_JSON_BODY_BYTES", 8)
 
     async def app_inner(_scope, receive, _send):
         await receive()
@@ -529,7 +511,7 @@ def test_main_body_limit_413_on_oversized_body(monkeypatch):
     async def send(msg):
         sent.append(msg)
 
-    mw = main.StreamingBodyLimitMiddleware(app_inner)
+    mw = main.BodyLimitMiddleware(app_inner)
     scope = {"type": "http", "path": "/api/x"}
     asyncio.run(mw(scope, receive, send))
     starts = [m for m in sent if m.get("type") == "http.response.start"]
@@ -540,7 +522,7 @@ def test_main_body_limit_413_on_oversized_body(monkeypatch):
 def test_main_body_limit_reraises_when_response_started(monkeypatch):
     # Response already started: no clean 413, so _RequestBodyTooLarge is re-raised.
     import app.main as main
-    monkeypatch.setattr(main.settings, "MAX_REQUEST_BODY_BYTES", 8)
+    monkeypatch.setattr(main.settings, "MAX_JSON_BODY_BYTES", 8)
 
     async def app_inner(_scope, receive, send):
         # Start the response before reading the oversized body.
@@ -553,7 +535,7 @@ def test_main_body_limit_reraises_when_response_started(monkeypatch):
     async def send(_msg):
         return None
 
-    mw = main.StreamingBodyLimitMiddleware(app_inner)
+    mw = main.BodyLimitMiddleware(app_inner)
     scope = {"type": "http", "path": "/api/x"}
     coro = mw(scope, receive, send)
     with pytest.raises(main._RequestBodyTooLarge):

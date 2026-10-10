@@ -19,8 +19,8 @@ import httpx
 import pytest
 
 KEY = base64.urlsafe_b64encode(b"k" * 32).decode()
-SAVED_PAT = "ghp_savedprojecttoken1234"
-GLOBAL_PAT = "ghp_globaldeploymenttoken99"
+SAVED_PAT = "saved-project-token-1234"
+GLOBAL_PAT = "global-deployment-token-99"
 
 
 @pytest.fixture
@@ -93,10 +93,10 @@ def test_draft_test_against_another_server_never_carries_a_saved_token(git, admi
 
     # The same draft with a token typed in is tested with that token only.
     res = admin_client.post(f"{git.url}/test", json={
-        "base_url": "https://attacker.example", "credential": "ghp_typedfortest123",
+        "base_url": "https://attacker.example", "credential": "typed-for-test-123",
     })
     assert res.json()["ok"] is True
-    assert git.seen == [("https://attacker.example/api/v3", "ghp_typedfortest123")]
+    assert git.seen == [("https://attacker.example/api/v3", "typed-for-test-123")]
 
 
 def test_draft_test_without_a_project_token_never_carries_the_global_token(git, admin_client):
@@ -127,7 +127,7 @@ def test_changing_the_server_requires_the_token_again(git, admin_client):
     assert "Re-enter the access token" in moved.json()["detail"]
     # Re-entering the token (or clearing it) makes the change explicit and allowed.
     assert _save(admin_client, git.url, base_url="https://attacker.example",
-                 credential="ghp_newservertoken123").status_code == 200
+                 credential="new-server-token-123").status_code == 200
     assert _save(admin_client, git.url, base_url="https://other.example",
                  clear_credential=True).status_code == 200
 
@@ -150,7 +150,7 @@ def test_private_servers_are_allowed_when_the_deployment_opts_in(git, admin_clie
 
 
 def test_a_non_ascii_token_is_refused(git, admin_client):
-    res = _save(admin_client, git.url, credential="ghp_tökén1234567")
+    res = _save(admin_client, git.url, credential="tökén-1234567")
     assert res.status_code == 422
     assert "ASCII" in res.text
 
@@ -209,7 +209,7 @@ def test_the_provider_reports_a_refused_host_safely(monkeypatch):
         raise net_guard.HostNotAllowed("internal")
 
     monkeypatch.setattr(httpx.Client, "request", _refuse)
-    provider = github.GitHubEnterpriseProvider(base_url="https://ghe.example.com", token="ghp_x1234567")
+    provider = github.GitHubEnterpriseProvider(base_url="https://ghe.example.com", token="tok-x1234567")
     with pytest.raises(github.GitProviderError) as excinfo:
         provider.validate_connection()
     assert excinfo.value.code == github.INVALID_BASE_URL

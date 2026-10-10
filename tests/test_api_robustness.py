@@ -89,3 +89,131 @@ def test_daily_report_rejects_impossible_dates_cleanly(admin_client, bad):
     r = admin_client.get(f"/api/agile/reports/daily?sprint_id={sprint['id']}&report_date={bad}")
     assert r.status_code == 422
     assert "strptime" not in r.text and "does not match format" not in r.text
+
+
+def test_validation_errors_never_echo_the_submitted_value(client):
+    secret = "hunter2-NOT-ECHOED"
+    res = client.post("/api/auth/login", json={"email": "not-an-email", "password": [secret]})
+    assert res.status_code == 422
+    assert secret not in res.text
+    for err in res.json()["detail"]:
+        assert set(err) == {"type", "loc", "msg"}
+
+
+def test_validation_messages_read_naturally(admin_client):
+    pid = admin_client.get("/api/projects").json()[0]["id"]
+    res = admin_client.post("/api/bugs", json={"project_id": pid, "title": "x" * 1000})
+    assert res.status_code == 422
+    msg = res.json()["detail"][0]["msg"]
+    assert msg.startswith("Title: ") and "Value error" not in msg
+    res = admin_client.post("/api/users", json={
+        "name": "Weak", "email": "weak@test.local", "role": "user", "password": "short",
+    })
+    assert res.status_code == 422
+    assert not res.json()["detail"][0]["msg"].startswith("Value error")
+
+
+def test_bcrypt_test_override_is_ignored_in_production(monkeypatch):
+    from app import auth
+    from app.config import Settings, get_settings
+
+    monkeypatch.setenv("BCRYPT_TEST_ROUNDS", "4")
+    get_settings.cache_clear()
+    assert auth._bcrypt_rounds() == 4
+    monkeypatch.setattr(Settings, "is_production", property(lambda self: True))
+    get_settings.cache_clear()
+    assert auth._bcrypt_rounds() == 12
+    get_settings.cache_clear()
+
+
+def test_explicit_nulls_on_required_fields_are_a_422_not_a_500(admin_client):
+    pid = admin_client.get("/api/projects").json()[0]["id"]
+    bug = admin_client.post("/api/bugs", json={"project_id": pid, "title": "Null target"}).json()
+    for field in ("project_id", "title", "status", "priority", "environment", "item_type"):
+        res = admin_client.put(f"/api/bugs/{bug['id']}", json={field: None})
+        assert res.status_code == 422, (field, res.status_code, res.text)
+        assert f"{field} cannot be null" in res.json()["detail"][0]["msg"]
+    event = admin_client.post("/api/events", json={"name": "Null event"}).json()
+    res = admin_client.put(f"/api/events/{event['id']}", json={"name": None})
+    assert res.status_code == 422
+
+
+def test_names_and_titles_are_single_line(admin_client):
+    res = admin_client.post("/api/projects", json={"name": "Ops\x00\x1b[31m Board\r\nTwo"})
+    assert res.status_code == 201, res.text
+    assert res.json()["name"] == "Ops [31m Board Two"
+    pid = res.json()["id"]
+    bug = admin_client.post("/api/bugs", json={"project_id": pid, "title": "Line\x0bbreak\x07title"}).json()
+    assert bug["title"] == "Line break title"
+    # And the spreadsheet export of such data no longer fails.
+    res = admin_client.post("/api/reports/export.xlsx", json={"report_key": "item_detail", "filters": {}})
+    assert res.status_code == 200, res.text
+
+
+def test_plain_text_fields_keep_what_was_typed(admin_client):
+    pid = admin_client.get("/api/projects").json()[0]["id"]
+    text = "Steps:\n1. Open <Settings>\n2. Check a < b & c > d\x07"
+    bug = admin_client.post("/api/bugs", json={"project_id": pid, "title": "Verbatim", "description": text})
+    assert bug.status_code == 201, bug.text
+    assert bug.json()["description"] == text.replace("\x07", "")
+
+
+def test_email_headers_survive_every_unicode_line_break():
+    from app.config import get_settings
+    from app.email_service import _build
+
+    nasty = "Release Bcc: victim@example.com\x85\x0bnow\x1c done"
+    msg = _build(nasty, ["to@example.com"], "body", get_settings())
+    assert msg["Subject"] == "Release Bcc: victim@example.com now done"
+    assert "victim" not in (msg["Bcc"] or "")
+    msg.as_bytes()  # serializes without a header error
+
+
+def test_export_survives_control_characters_already_in_the_data(admin_client):
+    from sqlalchemy import text
+
+    from app.database import SessionLocal
+
+    pid = admin_client.get("/api/projects").json()[0]["id"]
+    bug = admin_client.post("/api/bugs", json={"project_id": pid, "title": "Clean title"}).json()
+    with SessionLocal() as db:  # rows written before titles were single-line
+        db.execute(text("UPDATE bugs SET title = :t, description = :d WHERE id = :i"),
+                   {"t": "Old\x01title\x1f", "d": "=cmd\x0b|calc", "i": bug["id"]})
+        db.commit()
+    res = admin_client.post("/api/reports/export.xlsx", json={"report_key": "item_detail", "filters": {}})
+    assert res.status_code == 200, res.text
+
+
+def test_push_subscribe_is_an_idempotent_upsert(admin_client):
+    for _ in range(3):
+        res = admin_client.post("/api/push/subscribe", json={"token": "tok-" + "a" * 40, "platform": "web"})
+        assert res.status_code == 200, res.text
+    from sqlalchemy import func, select
+
+    from app.database import SessionLocal
+    from app.models import PushSubscription
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(PushSubscription)) == 1
+
+
+def test_board_timezone_must_be_a_real_zone(admin_client):
+    pid = admin_client.get("/api/projects").json()[0]["id"]
+    assert admin_client.post(f"/api/agile/projects/{pid}/enable", json={}).status_code == 200
+    board_id = admin_client.get(f"/api/agile/projects/{pid}/settings").json()["board_id"]
+    board = admin_client.get(f"/api/agile/boards/{board_id}").json()
+    bad = admin_client.put(f"/api/agile/boards/{board_id}", json={"timezone": "Mars/Olympus", "version": board["version"]})
+    assert bad.status_code == 422
+    assert "not a known timezone" in bad.json()["detail"][0]["msg"]
+    good = admin_client.put(f"/api/agile/boards/{board_id}", json={"timezone": "Asia/Kolkata", "version": board["version"]})
+    assert good.status_code == 200, good.text
+    assert good.json()["timezone"] == "Asia/Kolkata"
+
+
+def test_quick_filter_json_is_capped(admin_client):
+    pid = admin_client.get("/api/projects").json()[0]["id"]
+    assert admin_client.post(f"/api/agile/projects/{pid}/enable", json={}).status_code == 200
+    board_id = admin_client.get(f"/api/agile/projects/{pid}/settings").json()["board_id"]
+    huge = {"labels": ["x" * 100] * 200}
+    res = admin_client.post(f"/api/agile/boards/{board_id}/quick-filters", json={"name": "Huge", "filter_json": huge})
+    assert res.status_code == 422
+    assert "at most 16 KB" in res.json()["detail"][0]["msg"]

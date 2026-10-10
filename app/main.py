@@ -23,6 +23,7 @@ from fastapi import (
     Response,
     responses,
 )
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import (
@@ -52,6 +53,8 @@ from app.metrics import MetricsMiddleware
 from app.metrics import render as render_metrics
 from app.models import ROLE_ADMIN, Activity, Organization, User
 from app.models import Session as SessionRow
+from app.request_context import RequestIdMiddleware, current_request_id
+from app.request_context import install_log_filter as install_request_id_log_filter
 from app.routes import (
     agile,
     agile_board,
@@ -92,6 +95,7 @@ from app.tenancy import create_organization
 
 logger = logging.getLogger("bug_hunter")
 logging.basicConfig(level=get_settings().LOG_LEVEL)
+install_request_id_log_filter()
 # Console format (LOG_FORMAT) + OTLP traces/metrics/logs. No-op unless
 # OTEL_EXPORTER_OTLP_ENDPOINT is set; never replaces console output.
 setup_telemetry()
@@ -467,6 +471,7 @@ async def lifespan(app: FastAPI):
     # Optional email-digest scheduler. No-op unless EMAIL_DIGEST_CRON is set.
     from app import scheduler
     scheduler.start()
+    scheduler.start_retention()
 
     logger.info("%s started. asset_version=%s", settings.APP_NAME, app.state.asset_version)
     yield
@@ -582,44 +587,20 @@ elif "*" in _origins:
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 
 
-# Request body size limit
-# Rejects an oversized Content-Length with 413 before the body buffers into
-# RAM. Chunked requests are covered by StreamingBodyLimitMiddleware.
-class BodySizeLimitMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        cl_header = request.headers.get("content-length")
-        if cl_header:
-            try:
-                length = int(cl_header)
-            except ValueError:
-                # Malformed Content-Length; reject.
-                return JSONResponse(
-                    status_code=400,
-                    content={"detail": "We couldn't process this request. Please try again."},
-                )
-            if length > settings.MAX_REQUEST_BODY_BYTES:
-                logger.warning(
-                    "Body too large: %d bytes claimed (limit %d) on %s",
-                    length, settings.MAX_REQUEST_BODY_BYTES, request.url.path,
-                )
-                return JSONResponse(
-                    status_code=413,
-                    content={"detail": "This upload is too large. Please attach a smaller file."},
-                )
-        return await call_next(request)
-
-
-app.add_middleware(BodySizeLimitMiddleware)
-
-
 class _RequestBodyTooLarge(Exception):
     """Raised by the wrapped receive callable when the body exceeds the cap."""
 
 
-class StreamingBodyLimitMiddleware:
-    """Pure-ASGI backstop: counts actual body bytes so chunked requests
-    (no Content-Length) can't stream unbounded into RAM; 413 past the cap.
-    Raw ASGI because BaseHTTPMiddleware cannot wrap `receive`."""
+_UPLOAD_TOO_LARGE = "This upload is too large. Please attach a smaller file."
+_BODY_TOO_LARGE = "This request is too large."
+
+
+class BodyLimitMiddleware:
+    """Request-body ceilings, enforced before the body reaches memory: a declared
+    Content-Length over the cap is refused at once, and the bytes actually received are
+    counted, so a chunked body can't stream past it either. File uploads (multipart) get
+    MAX_REQUEST_BODY_BYTES; every other body (JSON) gets the much smaller
+    MAX_JSON_BODY_BYTES."""
 
     def __init__(self, app):
         self.app = app
@@ -628,47 +609,61 @@ class StreamingBodyLimitMiddleware:
         if scope.get("type") != "http":
             await self.app(scope, receive, send)
             return
+        headers = dict(scope.get("headers") or ())
+        is_upload = headers.get(b"content-type", b"").lower().startswith(b"multipart/")
+        max_bytes = settings.MAX_REQUEST_BODY_BYTES if is_upload else settings.MAX_JSON_BODY_BYTES
+        message = _UPLOAD_TOO_LARGE if is_upload else _BODY_TOO_LARGE
 
-        max_bytes = settings.MAX_REQUEST_BODY_BYTES
+        declared = headers.get(b"content-length")
+        if declared is not None:
+            try:
+                length = int(declared)
+            except ValueError:
+                await self._reply(scope, receive, send, 400,
+                                  "We couldn't process this request. Please try again.")
+                return
+            if length > max_bytes:
+                logger.warning("Body too large: %d bytes declared (limit %d) on %s",
+                               length, max_bytes, scope.get("path", ""))
+                await self._reply(scope, receive, send, 413, message)
+                return
+
         total = 0
 
         async def counting_receive():
             nonlocal total
-            message = await receive()
-            if message.get("type") == "http.request":
-                total += len(message.get("body", b"") or b"")
+            msg = await receive()
+            if msg.get("type") == "http.request":
+                total += len(msg.get("body", b"") or b"")
                 if total > max_bytes:
                     raise _RequestBodyTooLarge()
-            return message
+            return msg
 
         started = False
 
-        async def tracking_send(message):
+        async def tracking_send(msg):
             nonlocal started
-            if message.get("type") == "http.response.start":
+            if msg.get("type") == "http.response.start":
                 started = True
-            await send(message)
+            await send(msg)
 
         try:
             await self.app(scope, counting_receive, tracking_send)
         except _RequestBodyTooLarge:
             if started:
-                # Response already started; can't replace it cleanly.
-                raise
-            logger.warning(
-                "Streaming body exceeded %d bytes on %s",
-                max_bytes, scope.get("path", ""),
-            )
-            resp = JSONResponse(
-                status_code=413,
-                content={"detail": "This upload is too large. Please attach a smaller file."},
-            )
-            _apply_security_headers(resp.headers)
-            resp.headers.setdefault("Cache-Control", "no-store")
-            await resp(scope, receive, send)
+                raise  # The response already started; it can't be replaced cleanly.
+            logger.warning("Streaming body exceeded %d bytes on %s", max_bytes, scope.get("path", ""))
+            await self._reply(scope, receive, send, 413, message)
+
+    @staticmethod
+    async def _reply(scope, receive, send, status_code: int, detail: str) -> None:
+        resp = JSONResponse(status_code=status_code, content={"detail": detail})
+        _apply_security_headers(resp.headers)
+        resp.headers.setdefault("Cache-Control", "no-store")
+        await resp(scope, receive, send)
 
 
-app.add_middleware(StreamingBodyLimitMiddleware)
+app.add_middleware(BodyLimitMiddleware)
 
 
 # Cache-Control middleware — prevents stale HTML after redeploy.
@@ -940,8 +935,12 @@ if _origins:
         allow_credentials=_allow_credentials,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
+        expose_headers=["X-Request-ID"],
     )
 
+# Outermost: the request id must be set before any BaseHTTPMiddleware runs the rest of the
+# stack in a child task, so the error handler and every log line see it.
+app.add_middleware(RequestIdMiddleware)
 
 app.mount("/static", StaticFiles(directory=settings.STATIC_DIR), name="static")
 
@@ -1242,6 +1241,34 @@ async def http_exc_handler(request: Request, exc: HTTPException) -> JSONResponse
     )
 
 
+_VALIDATOR_PREFIXES = ("Value error, ", "Assertion failed, ")
+_LOC_SOURCES = {"body", "query", "path", "header", "cookie"}
+
+
+def _validation_error_out(err: dict) -> dict:
+    """One validation error without the submitted value (it can be a password) and with a
+    message a person can read: our own validators' text as written, and pydantic's built-in
+    messages prefixed with the field they are about."""
+    msg = str(err.get("msg", ""))
+    loc = list(err.get("loc", ()))
+    for prefix in _VALIDATOR_PREFIXES:
+        if msg.startswith(prefix):
+            msg = msg[len(prefix):]
+            break
+    else:
+        field = next((p for p in reversed(loc) if isinstance(p, str) and p not in _LOC_SOURCES), None)
+        if field:
+            msg = f"{field.replace('_', ' ').capitalize()}: {msg[:1].lower()}{msg[1:]}"
+    return {"type": err.get("type", "value_error"), "loc": loc, "msg": msg}
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    return JSONResponse(
+        status_code=422, content={"detail": [_validation_error_out(e) for e in exc.errors()]},
+    )
+
+
 @app.exception_handler(OverflowError)
 @app.exception_handler(DataError)
 async def out_of_range_handler(request: Request, exc: Exception) -> JSONResponse:
@@ -1267,9 +1294,13 @@ async def unhandled_exc_handler(request: Request, exc: Exception) -> JSONRespons
     # CSP or anti-clickjacking headers. Return a generic JSON response with the
     # full header set and no internal details.
     logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
-    resp = JSONResponse(status_code=500, content={"detail": "Internal server error."})
+    # The request id lets support find this exact failure in the server log.
+    resp = JSONResponse(status_code=500, content={
+        "detail": "Internal server error.", "request_id": current_request_id(),
+    })
     _apply_security_headers(resp.headers)
     resp.headers.setdefault("Cache-Control", "no-store")
+    resp.headers["X-Request-ID"] = current_request_id()
     return resp
 
 

@@ -43,8 +43,7 @@ from app.schemas import (
     MIN_TITLE_LENGTH,
     STATUSES_BY_TYPE,
     normalize_choice,
-    rich_text_to_plain,
-    sanitize_html,
+    plain_text,
     statuses_for_type,
 )
 
@@ -513,8 +512,8 @@ def _process_row(
     assert project is not None
     assert reporter is not None
 
-    # Plain text, like every other work-item create path.
-    description = rich_text_to_plain(sanitize_html(cells.get("description", "").strip()))
+    # Plain text, stored as written, like every other work-item create path.
+    description = plain_text(cells.get("description", ""))
     plan = _RowPlan(
         row_num=row_num,
         title=title, item_type=item_type, project=project, event=event,

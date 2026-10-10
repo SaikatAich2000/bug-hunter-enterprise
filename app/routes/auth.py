@@ -35,7 +35,7 @@ from app.auth import (
 )
 from app.config import get_settings
 from app.database import get_db
-from app.email_service import notify_email_change_code, notify_password_reset
+from app.email_service import mask_email, notify_email_change_code, notify_password_reset
 from app.metrics import record_event
 from app.models import (
     ROLE_ADMIN,
@@ -113,17 +113,6 @@ def _reject_if_breached(plain: str) -> None:
             detail="This password appears in a known breach corpus. "
                    "Please choose a different one.",
         )
-
-
-def _mask_email(email: str) -> str:
-    """Mask email local part for logs (``alice@x.com`` -> ``a***@x.com``); avoids PII in log stores."""
-    if not email or "@" not in email:
-        return "***"
-    local, _, domain = email.partition("@")
-    if not local:
-        return "@" + domain
-    head = local[0]
-    return f"{head}***@{domain}"
 
 
 def _client_ip(request: Request) -> str:
@@ -222,6 +211,21 @@ def _complete_login(
     return to_me(user)
 
 
+def _record_failed_login(db: Session, user: User | None, email: str, ip: str, reason: str) -> None:
+    """Log every failed sign-in (email masked) and audit those on real accounts, including the
+    one that locks the account. Unknown emails are logged only, so typos never fill the audit."""
+    locked = account_lockout.record_failure(email)
+    logger.warning("Sign-in failed (%s): %s from %s", reason, mask_email(email), ip)
+    if locked:
+        logger.warning("Sign-in locked after repeated failures: %s from %s", mask_email(email), ip)
+    if user is None:
+        return
+    _audit(db, user, "login_failed", f"Failed sign-in for {user.email} from {ip or 'unknown'} ({reason})")
+    if locked:
+        _audit(db, user, "login_locked", f"Sign-in for {user.email} locked after repeated failures (last from {ip or 'unknown'})")
+    db.commit()
+
+
 @router.post("/login", responses=AUTH_401)
 def login(
     payload: LoginIn, request: Request, response: Response, db: Session = Depends(get_db),
@@ -230,7 +234,11 @@ def login(
     ``pending_token`` to trade for a session at /login/totp. The cookie's `jti` maps back to
     the session row, enabling per-session admin revocation."""
     # Check lockout before bcrypt so a login flood doesn't become a CPU flood.
-    account_lockout.check_locked(payload.email)
+    try:
+        account_lockout.check_locked(payload.email)
+    except HTTPException:
+        logger.info("Sign-in refused while locked: %s from %s", mask_email(payload.email), _client_ip(request))
+        raise
 
     # LoginIn already lowercases the email.
     user = db.scalar(select(User).where(User.email == payload.email))
@@ -241,13 +249,10 @@ def login(
     else:
         password_ok = verify_password(payload.password, user.password_hash)
     # Same 401 for all failures so existence/disabled status doesn't leak.
-    if user is None or not password_ok:
+    if user is None or not password_ok or not user.is_active:
         record_event("login_failure")
-        account_lockout.record_failure(payload.email)
-        raise HTTPException(status_code=401, detail=_DETAIL_INVALID_LOGIN)
-    if not user.is_active:
-        logger.info("Login refused: inactive account %s", _mask_email(user.email))
-        account_lockout.record_failure(payload.email)
+        reason = "unknown account" if user is None else ("wrong password" if not password_ok else "inactive account")
+        _record_failed_login(db, user, payload.email, _client_ip(request), reason)
         raise HTTPException(status_code=401, detail=_DETAIL_INVALID_LOGIN)
 
     if get_settings().TOTP_ENABLED and user.totp_enabled and user.totp_secret:
@@ -502,11 +507,11 @@ def forgot_password(
             generate_token()
         if user is not None:
             _audit(db, user, "password_reset_no_account",
-                   f"Password reset attempted for inactive account {_mask_email(payload.email)}",
+                   f"Password reset attempted for inactive account {mask_email(payload.email)}",
                    as_system=True)
             db.commit()
         else:
-            logger.info("Password reset requested for unknown email %s", _mask_email(payload.email))
+            logger.info("Password reset requested for unknown email %s", mask_email(payload.email))
         if settings.FORGOT_PASSWORD_ENUMERATION_SAFE:
             return Response(status_code=204)
         raise HTTPException(

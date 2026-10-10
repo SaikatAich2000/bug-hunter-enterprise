@@ -182,11 +182,14 @@ class Settings:
     # fail-closed hardening checks (see is_production and app/main.py).
     APP_ENV: str = os.getenv("APP_ENV", "").strip().lower()
 
-    # Request-body ceiling; over-limit requests get 413 before the body is read,
-    # so a huge Content-Length can't exhaust RAM.
+    # Upload (multipart) body ceiling; over-limit requests get 413 before the body
+    # is read, so a huge Content-Length can't exhaust RAM.
     MAX_REQUEST_BODY_BYTES: int = _env_int(
         "MAX_REQUEST_BODY_BYTES", 60 * 1024 * 1024, minimum=1024
     )
+    # Ceiling for every non-upload body (JSON). The largest legitimate one is a
+    # description at its 1,000,000-character limit.
+    MAX_JSON_BODY_BYTES: int = _env_int("MAX_JSON_BODY_BYTES", 2 * 1024 * 1024, minimum=1024)
 
     APP_BASE_URL: str = os.getenv("APP_BASE_URL", "").strip() or _default_base_url()
 
@@ -358,6 +361,13 @@ class Settings:
     FIREBASE_MESSAGING_SENDER_ID: str = os.getenv("FIREBASE_MESSAGING_SENDER_ID", "")
     FIREBASE_APP_ID: str = os.getenv("FIREBASE_APP_ID", "")
     FIREBASE_VAPID_KEY: str = os.getenv("FIREBASE_VAPID_KEY", "")
+
+    # --- Retention (app/jobs/retention.py, run daily by the app) ---
+    # Days to keep notifications and Sleuth conversations (by last activity); 0 keeps them
+    # forever. Expired sessions, reset tokens and idempotency keys are always removed.
+    NOTIFICATION_RETENTION_DAYS: int = _env_int("NOTIFICATION_RETENTION_DAYS", 180, minimum=0)
+    CHAT_RETENTION_DAYS: int = _env_int("CHAT_RETENTION_DAYS", 180, minimum=0)
+    RETENTION_JOB_ENABLED: bool = _env_bool("RETENTION_JOB_ENABLED", True)
 
     # --- GitHub (optional; branch creation only) ---
     # PAT-only auth. Two credential sources, in this order: a per-project PAT

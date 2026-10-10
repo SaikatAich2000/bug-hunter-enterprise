@@ -171,7 +171,9 @@ def test_unhandled_exception_clean_500_with_headers(client):
     c2 = TestClient(app, raise_server_exceptions=False)
     r = c2.get("/api/_boom_v31")
     assert r.status_code == 500
-    assert r.json() == {"detail": "Internal server error."}
+    body = r.json()
+    assert body["detail"] == "Internal server error."
+    assert body["request_id"] and r.headers["X-Request-ID"] == body["request_id"]
     assert "kaboom-internal-detail" not in r.text   # no internal detail leaked
     assert "Content-Security-Policy" in r.headers    # security headers on 500
 

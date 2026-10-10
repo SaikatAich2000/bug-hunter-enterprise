@@ -27,7 +27,7 @@ from app.schemas import (
     ALLOWED_ENVIRONMENTS,
     ALLOWED_PRIORITIES,
     normalize_choice,
-    rich_text_to_plain,
+    plain_text,
     sanitize_html,
     statuses_for_type,
 )
@@ -482,7 +482,7 @@ def _apply_create_bug(db: Session, plan: ActionPlan, actor: User) -> Response:
     bug = Bug(
         title=title,
         # Plain-text description, same as the REST BugCreate validator.
-        description=rich_text_to_plain(sanitize_html((plan.new_description or "").strip())),
+        description=plain_text(plan.new_description),
         status="New",
         priority=priority,
         environment="DEV",

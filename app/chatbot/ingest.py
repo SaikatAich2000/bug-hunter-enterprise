@@ -24,7 +24,7 @@ from app.schemas import (
     ALLOWED_PRIORITIES,
     LEGACY_ITEM_TYPES,
     MIN_TITLE_LENGTH,
-    sanitize_html,
+    plain_text,
 )
 
 logger = logging.getLogger("bug_hunter.sleuth.ingest")
@@ -360,7 +360,7 @@ def create_bugs_from_specs(
             project_id=project.id,
             reporter_id=actor.id,
             title=spec["title"],
-            description=sanitize_html(spec.get("description", "")),
+            description=plain_text(spec.get("description", "")),
             item_type=spec.get("item_type", "Bug"),
             status="New",
             priority=spec.get("priority", "Medium"),

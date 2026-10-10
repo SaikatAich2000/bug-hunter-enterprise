@@ -637,6 +637,8 @@ class Notification(Base):
         Index("idx_notifications_emailed_at", "emailed_at"),
         # Composite lets the digest seek into the created_at window.
         Index("idx_notifications_emailed_created", "emailed_at", "created_at"),
+        # Retention purge (app/jobs/retention.py).
+        Index("idx_notifications_created_at", "created_at"),
     )
 
 
@@ -883,7 +885,11 @@ class ChatConversation(Base):
         order_by="ChatMessage.created_at, ChatMessage.id",
     )
 
-    __table_args__ = (Index("idx_chat_conv_user_id", "user_id"),)
+    __table_args__ = (
+        Index("idx_chat_conv_user_id", "user_id"),
+        # Retention purge (app/jobs/retention.py).
+        Index("idx_chat_conv_updated_at", "updated_at"),
+    )
 
 
 class ChatMessage(Base):
@@ -1666,3 +1672,11 @@ class WorkItemBranch(Base):
         Index("idx_work_item_branches_project_id", "project_id"),
     )
 
+
+
+class AppMigration(Base):
+    """One-time data migrations that have run. Schema changes are additive and safe to repeat
+    on every boot; a data rewrite must run exactly once, and its name lands here when it does."""
+    __tablename__ = "app_migrations"
+    name: Mapped[str] = mapped_column(String(100), primary_key=True)
+    applied_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)

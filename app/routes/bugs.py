@@ -111,7 +111,6 @@ from app.schemas import (
     CommentOut,
     display_id_for,
     normalize_choice,
-    rich_text_to_plain,
     statuses_for_type,
 )
 from app.webhooks_delivery import deliver_event
@@ -300,9 +299,7 @@ def _bug_to_out_dict(bug: Bug, attachment_count: int = 0, can_edit: bool = False
         "project_id": bug.project_id,
         "project_name": bug.project.name if bug.project else None,
         "title": bug.title,
-        # Flatten legacy editor HTML so every consumer reads plain text,
-        # even rows stored before the plain-text switch.
-        "description": rich_text_to_plain(bug.description or ""),
+        "description": bug.description or "",
         "reporter": _user_brief(bug.reporter) if bug.reporter else None,
         "assignees": [_user_brief(a) for a in bug.assignees],
         "item_type": _item_type(bug),
@@ -334,8 +331,7 @@ def _bug_snapshot(bug: Bug) -> BugSnapshot:
         id=bug.id, title=bug.title,
         project_name=bug.project.name if bug.project else "",
         status=bug.status, priority=bug.priority, environment=bug.environment,
-        # Notification snapshot also reads plain text (legacy HTML flattened).
-        description=rich_text_to_plain(bug.description or ""),
+        description=bug.description or "",
         reporter=(UserSnapshot(id=bug.reporter.id, name=bug.reporter.name, email=bug.reporter.email)
                   if bug.reporter else None),
         assignees=tuple(UserSnapshot(id=a.id, name=a.name, email=a.email) for a in bug.assignees),

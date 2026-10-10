@@ -21,7 +21,7 @@ from app.schemas import (
     ALLOWED_PRIORITIES,
     LEGACY_ITEM_TYPES,
     normalize_choice,
-    rich_text_to_plain,
+    plain_text,
     sanitize_html,
     statuses_for_type,
 )
@@ -204,7 +204,7 @@ def create_work_item(db: Session, actor: User, args: dict) -> dict:
     item_type = _choice(args.get("item_type") or "Bug", ALLOWED_ITEM_TYPES, "item_type")
     priority = _choice(args.get("priority") or "Medium", ALLOWED_PRIORITIES, "priority")
     # Plain-text descriptions, same as the REST create validators.
-    description = rich_text_to_plain(sanitize_html((args.get("description") or "").strip()))
+    description = plain_text(args.get("description"))
 
     if item_type in LEGACY_ITEM_TYPES:
         if not can_edit_bug(actor, actor.id, [], item_type=item_type):

@@ -1,10 +1,11 @@
-"""In-process scheduler: the optional daily email digest and the daily audit-log sweep.
+"""In-process scheduler: the daily retention run and the optional email digest.
 
-When ``EMAIL_DIGEST_CRON`` holds a standard 5-field cron expression the app
-runs ``app.jobs.email_digest`` on that schedule with no host cron or Task
-Scheduler needed. An empty expression (the default) leaves scheduling to an
-external runner. Independently, with AUDIT_RETENTION_DAYS > 0 a daily task
-deletes audit rows past the retention window (``app.jobs.audit_retention``).
+Retention runs a few minutes after boot and then daily: ``app.jobs.retention`` (unless
+RETENTION_JOB_ENABLED is off) and the audit-log sweep ``app.jobs.audit_retention`` (when
+AUDIT_RETENTION_DAYS > 0). Both apply one deployment-wide age cutoff to every organization's
+rows alike. When ``EMAIL_DIGEST_CRON`` holds a standard 5-field cron expression the app runs
+``app.jobs.email_digest`` on that schedule with no host cron or Task Scheduler needed. An empty
+expression (the default) leaves the digest to an external runner.
 
 No external dependencies: a small cron parser plus one asyncio task that
 wakes at the top of every minute. Errors (bad expression, unknown timezone,
@@ -186,6 +187,8 @@ async def _loop(schedule: CronSchedule, tz: tzinfo) -> None:
 
 _task: asyncio.Task | None = None
 _retention_task: asyncio.Task | None = None
+# First retention run a few minutes after boot (not during a rolling deploy's warm-up), then daily.
+_RETENTION_FIRST_DELAY_SECONDS = 300
 _RETENTION_INTERVAL_SECONDS = 24 * 3600
 
 
@@ -216,13 +219,32 @@ def _purge_audit_once() -> int:
 
 
 async def _retention_loop() -> None:
-    """Sweep at startup, then every 24 hours; a failed sweep only skips that round."""
+    from app.jobs.retention import run_once
+
+    await asyncio.sleep(_RETENTION_FIRST_DELAY_SECONDS)
     while True:
-        try:
-            await asyncio.to_thread(_purge_audit_once)
-        except Exception:  # noqa: BLE001 - keep the loop alive
-            logger.exception("Audit retention sweep failed; will retry next round.")
+        settings = get_settings()
+        if settings.AUDIT_RETENTION_DAYS > 0:
+            try:
+                await asyncio.to_thread(_purge_audit_once)
+            except Exception:  # noqa: BLE001 - a failed sweep must not kill the loop
+                logger.exception("Audit retention sweep failed; will retry tomorrow.")
+        if settings.RETENTION_JOB_ENABLED:
+            try:
+                await asyncio.to_thread(run_once)
+            except Exception:  # noqa: BLE001 - a failed run must not kill the loop
+                logger.exception("Retention run failed; will retry tomorrow.")
         await asyncio.sleep(_RETENTION_INTERVAL_SECONDS)
+
+
+def start_retention() -> None:
+    """Start the daily retention loop (from a running event loop, e.g. the FastAPI lifespan)."""
+    global _retention_task
+    settings = get_settings()
+    if not (settings.RETENTION_JOB_ENABLED or settings.AUDIT_RETENTION_DAYS > 0):
+        return
+    if _in_event_loop() and not _running_here(_retention_task):
+        _retention_task = asyncio.create_task(_retention_loop())
 
 
 def start() -> None:
@@ -232,7 +254,7 @@ def start() -> None:
     when digest mode is off, or when the expression is invalid. Must be called
     from a running event loop (e.g. inside the FastAPI lifespan).
     """
-    global _task, _retention_task
+    global _task
     if _task is not None and not _task.done():
         # A second start() call (e.g. accidental double lifespan) must not
         # orphan the first task: stop() only cancels whatever is in _task, so
@@ -240,9 +262,6 @@ def start() -> None:
         logger.debug("Scheduler already running; start() is a no-op.")
         return
     settings = get_settings()
-    if settings.AUDIT_RETENTION_DAYS > 0 and _in_event_loop() and not _running_here(_retention_task):
-        _retention_task = asyncio.create_task(_retention_loop())
-        logger.info("Audit retention sweep started (keeping %d days).", settings.AUDIT_RETENTION_DAYS)
     expr = settings.EMAIL_DIGEST_CRON
     if not expr:
         if settings.EMAIL_DIGEST_ENABLED:
@@ -277,15 +296,21 @@ def start() -> None:
 
 
 async def stop() -> None:
-    """Cancel the scheduler task on shutdown. Safe when never started."""
+    """Cancel this event loop's scheduler tasks on shutdown. Safe when never started."""
     global _task, _retention_task
-    tasks = [t for t in (_task, _retention_task) if t is not None]
-    for task in tasks:
-        task.cancel()
-    # A task of another, already closed loop cannot be awaited from here; cancelling suffices.
-    tasks = [t for t in tasks if t.get_loop() is asyncio.get_running_loop()]
-    # return_exceptions=True lets gather capture the task's CancelledError as
+    loop = asyncio.get_running_loop()
+
+    def _ours(task: asyncio.Task | None) -> bool:
+        return task is not None and getattr(task, "get_loop", lambda: loop)() is loop
+
+    tasks = [t for t in (_task, _retention_task) if _ours(t)]
+    for t in tasks:
+        t.cancel()
+    # return_exceptions=True lets gather capture the tasks' CancelledError as
     # a result rather than swallowing it, so a cancellation targeting stop()
     # itself still propagates normally.
     await asyncio.gather(*tasks, return_exceptions=True)
-    _task = _retention_task = None
+    if _ours(_task):
+        _task = None
+    if _ours(_retention_task):
+        _retention_task = None

@@ -60,16 +60,17 @@ _FALLBACK_SECRET = secrets.token_hex(32)
 
 # bcrypt cost used when hashing passwords: BCRYPT_ROUNDS (default 12, never below 10;
 # capped at 15). The test suite overrides BCRYPT_TEST_ROUNDS to 4 so CI does not burn most of
-# its wall-clock in password hashing (each rounds-12 hash costs ~0.3-0.6s and
-# the suite hashes/verify hundreds of times). The override can only lower the cost
-# (it is capped at the configured value), so production strength is never raised or
-# weakened through anything but BCRYPT_ROUNDS itself.
+# its wall-clock in password hashing. The override can only lower the cost (it is capped at the
+# configured value) and is ignored in production, so production strength is set by
+# BCRYPT_ROUNDS alone.
 _MAX_BCRYPT_ROUNDS = 15
 
 
 def _bcrypt_rounds() -> int:
     """Cost factor for new hashes; honour a test-only override, capped at the configured cost."""
     configured = min(get_settings().BCRYPT_ROUNDS, _MAX_BCRYPT_ROUNDS)
+    if get_settings().is_production:
+        return configured
     try:
         return max(1, min(int(os.getenv("BCRYPT_TEST_ROUNDS", "") or configured), configured))
     except ValueError:

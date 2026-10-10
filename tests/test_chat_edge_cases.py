@@ -31,6 +31,11 @@ def _seed_basic():
         proj = models.Project(org_id=default_org_id(), name="Apollo Cov", description="d")
         db.add(proj)
         db.commit()
+        # Alice and Bob work on the project, so either can be assigned there.
+        db.execute(models.user_projects.insert(), [
+            {"user_id": alice.id, "project_id": proj.id}, {"user_id": bob.id, "project_id": proj.id},
+        ])
+        db.commit()
         bug = models.Bug(title="Login broken on Safari", description="d",
                          status="New", priority="High", environment="PROD",
                          project_id=proj.id, reporter_id=alice.id)

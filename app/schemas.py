@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime
 from html.parser import HTMLParser
@@ -301,11 +302,54 @@ def _validate_email(value: str) -> str:
     return v
 
 
+# Control characters and the Unicode line/paragraph separators: never part of a name or a
+# title, and they break single-line consumers (spreadsheet cells, email headers, logs).
+_LINE_BREAKS_AND_CONTROLS = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]+")
+# Plain text keeps newlines and tabs; other control characters are dropped.
+_TEXT_CONTROLS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x84\x86-\x9f]")
+
+
+def single_line(value: str) -> str:
+    """A name or title on one line: control characters and line breaks become one space."""
+    return _LINE_BREAKS_AND_CONTROLS.sub(" ", value).strip()
+
+
+def plain_text(value: Optional[str]) -> str:
+    """User-written plain text (descriptions, goals, notes), stored as typed. It is never HTML:
+    every renderer escapes it, so ``a < b`` and ``<div>`` survive exactly as written."""
+    if not value:
+        return ""
+    text = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("\u2028", "\n").replace("\u2029", "\n").replace("\x85", "\n")
+    return _TEXT_CONTROLS.sub("", text).strip()
+
+
+def validate_timezone(value: str) -> str:
+    """An IANA timezone name (``Europe/Berlin``, ``UTC``); anything else is a clear error."""
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    name = value.strip()
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise ValueError(f"'{name}' is not a known timezone; use an IANA name such as Europe/Berlin") from None
+    return name
+
+
+def _reject_explicit_nulls(data, fields: tuple[str, ...]):
+    """A field that may be left out of an update but never set to null."""
+    if isinstance(data, dict):
+        nulls = [f for f in fields if f in data and data[f] is None]
+        if nulls:
+            raise ValueError(f"{', '.join(nulls)} cannot be null")
+    return data
+
+
 def _strip_and_check_min_length(v: str, min_len: int, label: str) -> str:
-    """Strip whitespace then enforce min length (Field(min_length) measures pre-strip)."""
+    """Single-line text, then the minimum length (Field(min_length) measures pre-strip)."""
     if not isinstance(v, str):
         raise ValueError(f"{label} must be a string")
-    v = v.strip()
+    v = single_line(v)
     if len(v) < min_len:
         if min_len == 1:
             raise ValueError(f"{label} cannot be empty")
@@ -836,7 +880,7 @@ class BugCreate(BaseModel):
         # then the allowlist sanitizer neutralizes any stray markup. Outer
         # whitespace is trimmed so empty-string checks behave.
         if not isinstance(v, str): return v
-        return rich_text_to_plain(sanitize_html(v.strip()))
+        return plain_text(v)
 
     @field_validator("item_type")
     @classmethod
@@ -912,6 +956,13 @@ class BugUpdate(BaseModel):
     # clock skew). Omit both fields for last-write-wins.
     expected_version: Optional[int] = Field(default=None, ge=0)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _no_nulls(cls, data):
+        return _reject_explicit_nulls(
+            data, ("project_id", "title", "item_type", "status", "priority", "environment"),
+        )
+
     @field_validator("title")
     @classmethod
     def _strip_title(cls, v: Optional[str]) -> Optional[str]:
@@ -921,10 +972,10 @@ class BugUpdate(BaseModel):
     @field_validator("description")
     @classmethod
     def _strip_desc(cls, v: Optional[str]) -> Optional[str]:
-        # Same plain-text conversion as BugCreate.description.
+        # Same plain-text policy as BugCreate.description.
         if v is None: return None
         if not isinstance(v, str): return v
-        return rich_text_to_plain(sanitize_html(v.strip()))
+        return plain_text(v)
 
     @field_validator("item_type")
     @classmethod
@@ -1299,6 +1350,11 @@ class EventUpdate(BaseModel):
     # Move to a different project; None/omit = unchanged. Route validates access.
     project_id: Optional[int] = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _no_nulls(cls, data):
+        return _reject_explicit_nulls(data, ("name",))
+
     @field_validator("name")
     @classmethod
     def _strip_name(cls, v: Optional[str]) -> Optional[str]:
@@ -1467,11 +1523,11 @@ class BoardUpdateIn(BaseModel):
     name: Optional[str] = Field(default=None, max_length=120)
     estimation_mode: Optional[str] = None
     swimlane_mode: Optional[str] = None
-    card_fields_json: Optional[list[Any]] = None
+    card_fields_json: Optional[list[Any]] = Field(default=None, max_length=50)
     wip_enforcement: Optional[str] = None
     card_color_scheme: Optional[str] = None
     timezone: Optional[str] = Field(default=None, max_length=64)
-    working_weekdays: Optional[list[int]] = None
+    working_weekdays: Optional[list[int]] = Field(default=None, max_length=7)
     working_hours_per_day: Optional[float] = Field(default=None, gt=0, le=24)
     version: int = Field(ge=0)
 
@@ -1502,6 +1558,11 @@ class BoardUpdateIn(BaseModel):
     def _check_color(cls, v: Optional[str]) -> Optional[str]:
         return None if v is None else normalize_choice(v, ALLOWED_CARD_COLOR_SCHEMES, "card_color_scheme")
 
+    @field_validator("timezone")
+    @classmethod
+    def _check_timezone(cls, v: Optional[str]) -> Optional[str]:
+        return None if v is None else validate_timezone(v)
+
     @field_validator("working_weekdays")
     @classmethod
     def _check_weekdays(cls, v: Optional[list[int]]) -> Optional[list[int]]:
@@ -1521,7 +1582,7 @@ class BoardColumnIn(BaseModel):
     min_cards: Optional[int] = Field(default=None, ge=1)
     wip_enforcement: str = "off"
     color: str = Field(default="", max_length=20)
-    statuses: list[str] = Field(default_factory=list)
+    statuses: list[str] = Field(default_factory=list, max_length=100)
 
     @field_validator("name")
     @classmethod
@@ -1592,7 +1653,7 @@ class SprintCreateIn(BaseModel):
     @field_validator("goal")
     @classmethod
     def _strip_goal(cls, v: str) -> str:
-        return sanitize_html(v.strip()) if isinstance(v, str) else v
+        return plain_text(v) if isinstance(v, str) else v
 
     @field_validator("cadence")
     @classmethod
@@ -1642,7 +1703,7 @@ class SprintUpdateIn(BaseModel):
     def _strip_goal(cls, v: Optional[str]) -> Optional[str]:
         if v is None:
             return None
-        return sanitize_html(v.strip()) if isinstance(v, str) else v
+        return plain_text(v) if isinstance(v, str) else v
 
     @field_validator("cadence")
     @classmethod
@@ -1758,7 +1819,7 @@ class SprintStartIn(BaseModel):
     def _strip_goal(cls, v: Optional[str]) -> Optional[str]:
         if v is None:
             return None
-        return sanitize_html(v.strip())
+        return plain_text(v)
 
     @field_validator("start_date", "end_date")
     @classmethod
@@ -1784,7 +1845,7 @@ class SprintCompleteIn(BaseModel):
     # Disposition for each still-incomplete item; a default applied to any
     # incomplete item not explicitly listed. "new_sprint" creates one future
     # sprint (named new_sprint_name, or the next default name) for them.
-    dispositions: list[SprintDispositionEntry] = Field(default_factory=list)
+    dispositions: list[SprintDispositionEntry] = Field(default_factory=list, max_length=5000)
     default_destination: str = "backlog"
     default_target_sprint_id: Optional[int] = None
     new_sprint_name: Optional[str] = Field(default=None, max_length=120)
@@ -1809,7 +1870,7 @@ class SprintCompleteIn(BaseModel):
 class SprintCancelIn(BaseModel):
     cancellation_note: str = Field(min_length=1, max_length=2000)
     version: int = Field(ge=0)
-    dispositions: list[SprintDispositionEntry] = Field(default_factory=list)
+    dispositions: list[SprintDispositionEntry] = Field(default_factory=list, max_length=5000)
     default_destination: str = "backlog"
     default_target_sprint_id: Optional[int] = None
 
@@ -1907,7 +1968,7 @@ class AgileWorkItemCreateIn(BaseModel):
     @classmethod
     def _strip_desc(cls, v: str) -> str:
         # Plain text in storage and responses (same as BugCreate).
-        return rich_text_to_plain(sanitize_html(v.strip())) if isinstance(v, str) else v
+        return plain_text(v) if isinstance(v, str) else v
 
     @field_validator("item_type")
     @classmethod
@@ -1985,7 +2046,7 @@ class WorkItemTaskFlagsIn(BaseModel):
     @field_validator("blocked_reason")
     @classmethod
     def _strip_reason(cls, v: Optional[str]) -> Optional[str]:
-        return sanitize_html(v.strip()) if isinstance(v, str) else v
+        return plain_text(v) if isinstance(v, str) else v
 
 
 # =====================================================================
@@ -2012,9 +2073,19 @@ class WorkItemFlagIn(BaseModel):
 
 
 class WorkItemTaxonomyIn(BaseModel):
-    component_ids: Optional[list[int]] = None
-    label_ids: Optional[list[int]] = None
+    component_ids: Optional[list[int]] = Field(default=None, max_length=200)
+    label_ids: Optional[list[int]] = Field(default=None, max_length=200)
     version: int = Field(ge=0)
+
+
+# A quick filter is a handful of ids and choices; it is stored and sent with every board load.
+_QUICK_FILTER_MAX_BYTES = 16 * 1024
+
+
+def _check_quick_filter_size(v: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    if v is not None and len(json.dumps(v, separators=(",", ":"))) > _QUICK_FILTER_MAX_BYTES:
+        raise ValueError(f"filter_json must be at most {_QUICK_FILTER_MAX_BYTES // 1024} KB")
+    return v
 
 
 class QuickFilterIn(BaseModel):
@@ -2027,6 +2098,11 @@ class QuickFilterIn(BaseModel):
     def _strip_name(cls, v: str) -> str:
         return _strip_and_check_min_length(v, _AGILE_NAME_MIN, "Quick filter name")
 
+    @field_validator("filter_json")
+    @classmethod
+    def _check_filter(cls, v: dict[str, Any]) -> dict[str, Any]:
+        return _check_quick_filter_size(v)
+
 
 class QuickFilterUpdateIn(BaseModel):
     name: Optional[str] = Field(default=None, max_length=120)
@@ -2034,6 +2110,11 @@ class QuickFilterUpdateIn(BaseModel):
     is_shared: Optional[bool] = None
     position: Optional[int] = None
     version: int = Field(ge=0)
+
+    @field_validator("filter_json")
+    @classmethod
+    def _check_filter(cls, v: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+        return _check_quick_filter_size(v)
 
 
 class QuickFilterOut(BaseModel):
@@ -2253,7 +2334,7 @@ class EpicUpdateIn(BaseModel):
     def _strip_description(cls, v: Optional[str]) -> Optional[str]:
         if v is None:
             return None
-        return rich_text_to_plain(sanitize_html(v.strip()))
+        return plain_text(v)
 
     @field_validator("health")
     @classmethod
@@ -2263,7 +2344,7 @@ class EpicUpdateIn(BaseModel):
     @field_validator("summary_note")
     @classmethod
     def _strip_note(cls, v: Optional[str]) -> Optional[str]:
-        return sanitize_html(v.strip()) if isinstance(v, str) else v
+        return plain_text(v) if isinstance(v, str) else v
 
     @field_validator("start_date", "target_date")
     @classmethod

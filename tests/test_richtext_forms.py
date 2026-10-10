@@ -1,6 +1,6 @@
 """Rich-text editor and form behavior: frontend-source markers for B/I/U, calendar nav,
-disabled Reporter caret, and image-as-attachment; plus server-side sanitiser round-trip
-(rich tags survive, unsafe payloads stripped) and admin-only mutation rules.
+disabled Reporter caret, and image-as-attachment; plain-text descriptions kept as typed;
+the comment sanitiser (rich tags survive, unsafe payloads stripped); admin-only mutation rules.
 """
 from __future__ import annotations
 
@@ -229,42 +229,26 @@ class TestImageInsertionAsAttachment:
         assert m, "bh-image branch must call pickFileAsAttachment"
 
 
-class TestRichHtmlRoundtrip:
-    """Rich formatting in descriptions/comments survives the sanitiser round-trip."""
+class TestDescriptionsArePlainText:
+    """Descriptions are plain text: markup characters are kept exactly as typed (the UI
+    escapes them when it renders), while comments keep their sanitized rich formatting."""
 
     @pytest.fixture
     def bug(self, admin_client):
         proj = _make_project(admin_client)
         return _make_bug(admin_client, proj["id"])
 
-    def _post_description(self, client, bug_id, body):
-        r = client.put(f"/api/bugs/{bug_id}", json={"description": body})
+    @pytest.mark.parametrize("text", [
+        "<p>This is <b>bold</b>, <i>italic</i> and <u>underline</u>.</p>",
+        "Use <div> wrappers when a < b && c > d",
+        "<script>alert(1)</script> stays inert text",
+        "line one\n\nline three",
+    ])
+    def test_description_is_stored_exactly_as_typed(self, admin_client, bug, text):
+        r = admin_client.put(f"/api/bugs/{bug['id']}", json={"description": text})
         assert r.status_code == 200, r.text
-        return r.json()
-
-    def test_bold_italic_underline_survive(self, admin_client, bug):
-        html = "<p>This is <b>bold</b>, <i>italic</i> and <u>underline</u>.</p>"
-        got = self._post_description(admin_client, bug["id"], html)["description"]
-        # Stored as plain text now: all words survive, formatting is gone.
-        assert got == "This is bold, italic and underline."
-        assert "<" not in got
-        assert ">" not in got
-
-    def test_lists_survive(self, admin_client, bug):
-        html = "<ul><li>one</li><li>two</li></ul><ol><li>a</li><li>b</li></ol>"
-        got = self._post_description(admin_client, bug["id"], html)["description"]
-        assert got == "one\ntwo\na\nb"
-
-    def test_blockquote_pre_code_survive(self, admin_client, bug):
-        html = "<blockquote>quoted</blockquote><pre>code block</pre>" \
-               "<p><code>inline</code></p>"
-        got = self._post_description(admin_client, bug["id"], html)["description"]
-        assert got == "quoted\ncode block\ninline"
-
-    def test_strikethrough_survives(self, admin_client, bug):
-        html = "<p>see <s>obsolete</s></p>"
-        got = self._post_description(admin_client, bug["id"], html)["description"]
-        assert got == "see obsolete"
+        assert r.json()["description"] == text
+        assert admin_client.get(f"/api/bugs/{bug['id']}").json()["description"] == text
 
     def test_comment_body_keeps_rich_formatting(self, admin_client, bug):
         body = "<p><b>Note:</b> please verify <i>before</i> ship.</p>"
@@ -275,43 +259,35 @@ class TestRichHtmlRoundtrip:
         assert "<i>before</i>" in got
 
 
-class TestSanitiserStillBlocksUnsafe:
-    """Rich-text support must not weaken the sanitiser."""
+class TestCommentSanitiserBlocksUnsafe:
+    """Comments are rich text, rendered as HTML, so the sanitiser strips anything unsafe."""
 
     @pytest.fixture
     def bug(self, admin_client):
         proj = _make_project(admin_client, name="Sec v2.6")
         return _make_bug(admin_client, proj["id"])
 
+    def _comment(self, client, bug_id, html):
+        r = client.post(f"/api/bugs/{bug_id}/comments", json={"body": html})
+        assert r.status_code == 201, r.text
+        return r.json()["body"]
+
     def test_script_tag_is_stripped(self, admin_client, bug):
-        html = "<p>before<script>alert(1)</script>after</p>"
-        r = admin_client.put(f"/api/bugs/{bug['id']}", json={"description": html})
-        assert r.status_code == 200
-        got = r.json()["description"]
-        # Tag dropped; inert text content may remain (no executable wrapper = no XSS).
-        assert "<script" not in got.lower()
-        assert "</script" not in got.lower()
-        assert "before" in got
-        assert "after" in got
+        got = self._comment(admin_client, bug["id"], "<p>before<script>alert(1)</script>after</p>")
+        assert "<script" not in got.lower() and "</script" not in got.lower()
+        assert "before" in got and "after" in got
 
     def test_javascript_url_in_anchor_is_stripped(self, admin_client, bug):
-        html = '<p><a href="javascript:alert(1)">x</a></p>'
-        r = admin_client.put(f"/api/bugs/{bug['id']}", json={"description": html})
-        got = r.json()["description"]
+        got = self._comment(admin_client, bug["id"], '<p><a href="javascript:alert(1)">x</a></p>')
         assert "javascript:" not in got.lower()
 
     def test_onerror_attr_is_stripped(self, admin_client, bug):
-        html = '<p><img src="x" onerror="alert(1)"></p>'
-        r = admin_client.put(f"/api/bugs/{bug['id']}", json={"description": html})
-        got = r.json()["description"]
+        got = self._comment(admin_client, bug["id"], '<p><img src="x" onerror="alert(1)">x</p>')
         assert "onerror" not in got.lower(), "event-handler attrs must die"
 
     def test_iframe_is_stripped(self, admin_client, bug):
-        html = '<p><iframe src="https://evil.example"></iframe>x</p>'
-        r = admin_client.put(f"/api/bugs/{bug['id']}", json={"description": html})
-        got = r.json()["description"]
+        got = self._comment(admin_client, bug["id"], '<p><iframe src="https://evil.example"></iframe>x</p>')
         assert "<iframe" not in got.lower()
-        assert got == "x"  # plain text now; only surviving text remains
 
 
 # Re-covers the admin-only rules so this suite stands alone.
@@ -533,29 +509,20 @@ class TestHardening:
 # ===========================================================================
 
 def test_bug_stores_and_returns_plain_text_description(admin_client):
-    """Legacy editor HTML in -> plain text out; description is the only field."""
+    """The description is one plain-text field, returned exactly as stored."""
     project = _make_project(admin_client, "Plain text story")
-    rich = (
-        "<div>As a user, I want a readable API.</div><div><br></div>"
-        "<div>Acceptance Criteria:</div><div><br></div>"
-        "<div>GET / returns <b>HTTP 200</b> &amp; docs.</div>"
-        "<div>The endpoint does not require authentication.</div>"
-    )
-    bug = _make_bug(admin_client, project["id"], description=rich)
-    detail = admin_client.get(f"/api/bugs/{bug['id']}")
-    assert detail.status_code == 200, detail.text
-    body = detail.json()
-    # Exactly one description field, readable plain text, no tags anywhere.
-    assert "description_text" not in body
-    assert body["description"] == (
+    text = (
         "As a user, I want a readable API.\n\n"
         "Acceptance Criteria:\n\n"
         "GET / returns HTTP 200 & docs.\n"
         "The endpoint does not require authentication."
     )
-    assert "<" not in body["description"]
-    assert ">" not in body["description"]
-    # Round trip: PUT with plain text keeps the exact same string.
+    bug = _make_bug(admin_client, project["id"], description=text)
+    detail = admin_client.get(f"/api/bugs/{bug['id']}")
+    assert detail.status_code == 200, detail.text
+    body = detail.json()
+    assert "description_text" not in body
+    assert body["description"] == text
     put = admin_client.put(
         f"/api/bugs/{bug['id']}",
         json={"description": body["description"], "expected_version": body["version"]},
