@@ -17,7 +17,7 @@
   font-style: normal;
   font-display: swap;
 }
-/* Asap (OFL-licensed) is our free stand-in for Steam's proprietary Motiva Sans in the font stack fallback. */
+/* Asap (OFL-licensed), self-hosted: the UI font. */
 @font-face {
   font-family: "Asap";
   src: url("/fonts/Asap.woff2") format("woff2");
@@ -43,7 +43,7 @@
 html, body {
   margin: 0; padding: 0;
   height: 100%;
-  font-family: "Motiva Sans", "Asap", Arial, Helvetica, sans-serif;
+  font-family: "Asap", Arial, Helvetica, sans-serif;
   font-size: 14px;
   line-height: 1.5;
   letter-spacing: 0;
@@ -79,30 +79,30 @@ body.viewport-fit #root > .chrome, body.viewport-fit #root > .supernav { flex-sh
 
 :root,
 [data-theme="dark"] {
-  /* Steam (dark) values captured live from store.steampowered.com; token NAMES stay 1:1 for JS hooks/backend tests, only VALUES change. */
-  --bg: #0f1924;                 /* Steam deepest base (mockup --base) */
+  /* Dark theme (the default). Token names are shared with the light theme and JS hooks; only the values differ. */
+  --bg: #0f1924;                 /* deepest base */
   /* Static aurora (no animation) so reduced-motion is respected by default. */
   --bg-grad:
     radial-gradient(60% 55% at 12% 0%, rgba(103, 193, 245, 0.10), transparent 60%),
     radial-gradient(55% 50% at 92% 8%, rgba(45, 115, 255, 0.08), transparent 60%),
     radial-gradient(50% 45% at 80% 100%, rgba(117, 176, 34, 0.05), transparent 60%),
     #0f1924;
-  --bg-elev: #1b2838;            /* Steam content blue — primary surface */
+  --bg-elev: #1b2838;            /* content blue — primary surface */
   --bg-elev-2: #141d28;          /* deeper panel / table head */
   --bg-elev-3: #233447;          /* steel field hover */
-  --surface-glass: rgba(20, 23, 29, 0.9);   /* Steam chrome glass (topbar) */
-  --border: #0b1117;            /* near-black Steam separator (etched) */
+  --surface-glass: rgba(20, 23, 29, 0.9);   /* chrome glass (topbar) */
+  --border: #0b1117;            /* near-black separator (etched) */
   --border-strong: #2a3f52;     /* steel — visible input/field edges */
   --border-soft: rgba(103,193,245,0.10);
 
-  --text: #c6d4df;              /* Steam body text */
-  /* Steam steel greys, lifted just enough for WCAG AA (4.5:1) on every surface. */
-  --text-muted: #9aa2aa;        /* Steam meta / labels */
+  --text: #c6d4df;              /* body text */
+  /* Steel greys, lifted just enough for WCAG AA (4.5:1) on every surface. */
+  --text-muted: #9aa2aa;        /* meta / labels */
   --text-faint: #949ba2;
 
-  --accent: #67c1f5;            /* iconic Steam blue */
+  --accent: #67c1f5;            /* accent blue */
   --accent-strong: #1a9fff;     /* bright interactive blue */
-  --accent-2: #e6a23c;          /* Steam gold */
+  --accent-2: #e6a23c;          /* gold */
   --accent-soft: rgba(103,193,245,0.12);
   --accent-glow: rgba(103,193,245,0.30);
   --accent-text: #ffffff;
@@ -120,7 +120,7 @@ body.viewport-fit #root > .chrome, body.viewport-fit #root > .supernav { flex-sh
   --danger-grad: linear-gradient(135deg, #cf463c, #e24a4a);
   --warn: #e6a23c;
   --warn-soft: rgba(230, 162, 60, 0.16);
-  --ok: #66c354;                /* Steam positive green */
+  --ok: #66c354;                /* positive green */
   --ok-soft: rgba(102, 195, 84, 0.16);
 
   --shadow-sm: 0 1px 2px rgba(0,0,0,0.40), 0 1px 3px rgba(0,0,0,0.28);
@@ -131,9 +131,9 @@ body.viewport-fit #root > .chrome, body.viewport-fit #root > .supernav { flex-sh
 
   --kpi-bg: linear-gradient(135deg, #1d2b3a 0%, #16222f 55%, #101924 100%);
 
-  --status-new: #67c1f5;       /* Steam blue */
+  --status-new: #67c1f5;       /* blue */
   --status-progress: #e6a23c;  /* gold */
-  --status-resolved: #66c354;  /* Steam positive green */
+  --status-resolved: #66c354;  /* positive green */
   --status-closed: #c08552;    /* walnut */
   --status-reopened: #e24a4a;  /* red */
   --status-not-bug: #8f98a0;   /* steel */
@@ -151,8 +151,8 @@ body.viewport-fit #root > .chrome, body.viewport-fit #root > .supernav { flex-sh
   --scrollbar-thumb: #2a3f55;
   --scrollbar-thumb-hover: #3a5675;
 
-  /* Additive Steam tokens — no existing name touched. */
-  --chrome: #171a21;            /* Steam global chrome bar */
+  /* Chrome, content and field tokens. */
+  --chrome: #171a21;            /* global chrome bar */
   /* Semantic tokens so chrome can flip to a light surface under [data-theme="light"] without hardcoding theme-specific hex. */
   --chrome-fg: #b8c6d4;         /* idle nav / type-tab text */
   --chrome-fg-strong: #ffffff;  /* wordmark + hover */
@@ -165,7 +165,7 @@ body.viewport-fit #root > .chrome, body.viewport-fit #root > .supernav { flex-sh
   --chrome-hover-bg: rgba(255, 255, 255, 0.07);
   --chrome-count-bg: rgba(255, 255, 255, 0.06);
   --chrome-count-fg: #8aa0b3;
-  --content: #1b2838;           /* Steam content surface */
+  --content: #1b2838;           /* content surface */
   --field-top: #2a475e;
   --field: #316282;
   --field-soft: #417a9b;
@@ -185,8 +185,8 @@ body.viewport-fit #root > .chrome, body.viewport-fit #root > .supernav { flex-sh
 }
 
 [data-theme="light"] {
-  /* Steam ships no light theme, so this keeps the Steam identity on light surfaces; accent + status hues are AA-darkened for text/white-on-fill. */
-  --bg: #dde7f0;                 /* cool Steam-grey base */
+  /* Light theme: the same identity on light surfaces; accent + status hues are AA-darkened for text/white-on-fill. */
+  --bg: #dde7f0;                 /* cool grey base */
   --bg-grad: radial-gradient(60% 55% at 12% 0%, rgba(47,143,190,0.14), transparent 60%),
              radial-gradient(55% 50% at 92% 8%, rgba(26,159,255,0.10), transparent 60%),
              radial-gradient(50% 45% at 80% 100%, rgba(117,176,34,0.07), transparent 60%),
@@ -203,7 +203,7 @@ body.viewport-fit #root > .chrome, body.viewport-fit #root > .supernav { flex-sh
   --text-muted: #4d5e6e;
   --text-faint: #5e6a78;
 
-  /* Steam iconic blue darkened for WCAG AA: 5.65:1 on white, >=4.5:1 on every light surface. */
+  /* Accent blue darkened for WCAG AA: 5.65:1 on white, >=4.5:1 on every light surface. */
   --accent: #166d9e;
   --accent-strong: #0f5e8f;
   --accent-2: #8a6010;
@@ -222,7 +222,7 @@ body.viewport-fit #root > .chrome, body.viewport-fit #root > .supernav { flex-sh
   --danger-grad: linear-gradient(135deg, #b93b32, #cf463c);
   --warn: #8a6010;
   --warn-soft: rgba(176, 125, 30, 0.12);
-  --ok: #2f8f2a;               /* Steam green, AA-darkened on white */
+  --ok: #2f8f2a;               /* green, AA-darkened on white */
   --ok-soft: rgba(102, 195, 84, 0.16);
 
   --shadow-sm: 0 1px 2px rgba(40,60,90,0.06), 0 1px 3px rgba(40,60,90,0.04);
@@ -233,7 +233,7 @@ body.viewport-fit #root > .chrome, body.viewport-fit #root > .supernav { flex-sh
 
   --kpi-bg: linear-gradient(135deg, #ffffff 0%, #eef3f8 100%);
 
-  --status-new: #1a7fb8;       /* Steam blue */
+  --status-new: #1a7fb8;       /* blue */
   --status-progress: #8a6010;  /* gold */
   --status-resolved: #2f8f2a;  /* green */
   --status-closed: #7a5530;    /* walnut */
@@ -253,10 +253,10 @@ body.viewport-fit #root > .chrome, body.viewport-fit #root > .supernav { flex-sh
   --scrollbar-thumb: #b8c6d6;
   --scrollbar-thumb-hover: #8fa1b5;
 
-  /* Content layer surface; additive --panel-field / --green-* stay Steam-constant by inheriting from :root. */
+  /* Content layer surface; --panel-field / --green-* stay constant by inheriting from :root. */
   --content: #ffffff;
 
-  /* Chrome + supernav follow the light theme (white steel band, dark text, AA-darkened Steam-blue accents) instead of staying dark. */
+  /* Chrome + supernav follow the light theme (white steel band, dark text, AA-darkened blue accents) instead of staying dark. */
   --chrome: linear-gradient(180deg, #ffffff 0%, #eef3f8 100%);
   --chrome-fg: #41515f;
   --chrome-fg-strong: #16222e;
@@ -272,7 +272,7 @@ body.viewport-fit #root > .chrome, body.viewport-fit #root > .supernav { flex-sh
 }
 
 body {
-  /* Flat, static Steam surface (no animated aurora — Steam's chrome is calm). */
+  /* Flat, static surface (no animated background — the chrome stays calm). */
   background: var(--bg-grad);
   background-attachment: fixed;
   color: var(--text);
@@ -334,7 +334,7 @@ body:not([data-theme="light"]) input[type="date"]::-webkit-calendar-picker-indic
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
 
-/* App shell: Steam two-tier chrome (top view-nav + supernav type-tabs/search) + frame (rail + main); chrome/supernav are fixed while rail/main scroll internally, the Steam client model. */
+/* App shell: two-tier chrome (top view-nav + supernav type-tabs/search) + frame (rail + main); chrome/supernav are fixed while rail/main scroll internally. */
 /* Global chrome bar — full-width top bar matching the mockup. */
 .chrome {
   position: relative;
@@ -399,7 +399,7 @@ body:not([data-theme="light"]) input[type="date"]::-webkit-calendar-picker-indic
 .chrome .nav-btn .nav-icon { font-size: 14px; opacity: 0.85; }
 .chrome .nav-btn:hover { background: none; color: var(--chrome-fg-strong); }
 .chrome .nav-btn:active { transform: none; }
-/* Active view — theme-aware Steam blue (bright on dark, AA-darkened on light). */
+/* Active view — theme-aware accent blue (bright on dark, AA-darkened on light). */
 .chrome .nav-btn.active { background: none; color: var(--chrome-accent); }
 .chrome .nav-btn.active::before { content: none; }
 .chrome .nav-btn.active::after {
@@ -481,7 +481,7 @@ body:not([data-theme="light"]) input[type="date"]::-webkit-calendar-picker-indic
   justify-content: flex-end;
 }
 .supernav .search-wrap input { height: 30px; padding: 0 14px; }
-/* Type tabs sit inline in the band; theme-aware chrome tokens keep text readable in both the dark Steam band and light steel band. */
+/* Type tabs sit inline in the band; theme-aware chrome tokens keep text readable in both the dark band and light steel band. */
 .supernav .type-tabs { border-bottom: 0; padding: 0; margin: 0; height: 100%; align-items: stretch; overflow: visible; }
 .supernav .type-tab { padding: 0 14px; border-radius: 0; color: var(--chrome-fg-muted); }
 .supernav .type-tab:hover { color: var(--chrome-fg-strong); background: var(--chrome-hover-bg); }
@@ -535,7 +535,7 @@ body:not([data-theme="light"]) input[type="date"]::-webkit-calendar-picker-indic
 @keyframes bh-head-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
 @keyframes bh-underline-in { from { transform: scaleX(0.2); opacity: 0; } to { transform: scaleX(1); opacity: 1; } }
 
-/* Steam table panel with a field-gradient header. */
+/* Table panel with a field-gradient header. */
 .panel {
   margin: 0;
   border-radius: var(--r-card);
@@ -565,7 +565,7 @@ body:not([data-theme="light"]) input[type="date"]::-webkit-calendar-picker-indic
 .panel .table-scroll { border: 0; border-radius: 0; box-shadow: none; background: transparent; }
 
 .sidebar {
-  /* Steam "library rail" gradient, fading to the deepest base (dark) / a soft tint (light). */
+  /* Rail gradient, fading to the deepest base (dark) / a soft tint (light). */
   background: linear-gradient(180deg, var(--bg-elev-2), var(--bg));
   border-right: 1px solid var(--border);
   display: flex;
@@ -646,7 +646,7 @@ body:not([data-theme="light"]) input[type="date"]::-webkit-calendar-picker-indic
   color: var(--accent);
   font-weight: 700;
 }
-/* Steam library-rail active marker — a glowing cyan bar on the left edge. */
+/* Rail active marker — a glowing cyan bar on the left edge. */
 .nav-btn.active::before {
   content: "";
   position: absolute;
@@ -834,7 +834,7 @@ body.sidebar-collapsed .sidebar-collapse-btn .collapse-icon { transform: rotate(
   font-size: 14px;
   outline: none;
   font-family: inherit;
-  /* Steam fields read as recessed steel — inset dark shadow, not a highlight. */
+  /* Fields read as recessed steel — inset dark shadow, not a highlight. */
   box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.28);
   transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
 }
@@ -1108,7 +1108,7 @@ body.sidebar-collapsed .sidebar-collapse-btn .collapse-icon { transform: rotate(
 .kpi[data-kpi="resolved"]      { --kc: #66c354; }
 .kpi[data-kpi="closed"]        { --kc: #c08552; }
 .kpi[data-kpi="resolve_later"] { --kc: #c9803a; }
-/* Steam capsule corner glow — a soft disc of the tile colour, top-right. */
+/* Tile corner glow — a soft disc of the tile colour, top-right. */
 .kpi::before {
   content: "";
   position: absolute;
@@ -1152,7 +1152,7 @@ body.sidebar-collapsed .sidebar-collapse-btn .collapse-icon { transform: rotate(
   background-clip: text;
   -webkit-text-fill-color: transparent;
 }
-/* Steam KPI colour-coding (Total=cyan, Open=gold, Resolved=green, Closed=walnut, Later=amber); mid-tones chosen to read on both dark and light-theme tiles. */
+/* KPI colour-coding (Total=cyan, Open=gold, Resolved=green, Closed=walnut, Later=amber); mid-tones chosen to read on both dark and light-theme tiles. */
 .kpi-num.kpi-open     { background-image: linear-gradient(135deg, #ecb455, #c9882a); }
 .kpi-num.kpi-resolved { background-image: linear-gradient(135deg, #84d271, #4f9a3f); }
 .kpi-num.kpi-closed   { background-image: linear-gradient(135deg, #cf9a66, #9c6f43); }
@@ -1163,7 +1163,7 @@ body.sidebar-collapsed .sidebar-collapse-btn .collapse-icon { transform: rotate(
 [data-theme="light"] .kpi-num.kpi-resolved { background-image: linear-gradient(135deg, #469a36, #2f8f2a); }
 [data-theme="light"] .kpi-num.kpi-closed   { background-image: linear-gradient(135deg, #a4754a, #7a5530); }
 [data-theme="light"] .kpi-num.kpi-later    { background-image: linear-gradient(135deg, #c0772f, #97551c); }
-/* Slim colour-coded spine on the left edge — Steam capsule signature. */
+/* Slim colour-coded spine on the left edge. */
 .kpi::after {
   content: "";
   position: absolute;
@@ -1314,7 +1314,7 @@ body.sidebar-collapsed .sidebar-collapse-btn .collapse-icon { transform: rotate(
 .btn:hover { border-color: var(--accent); background: var(--bg-elev-3); }
 .btn:active { transform: translateY(1px); }
 .btn:focus-visible { outline: none; box-shadow: var(--shadow-focus); }
-/* Primary = Steam green "Install/Play" button; the white shine is a second background layer (not an overlay) so it sweeps under the label, keeping text crisp. */
+/* Primary = green button; the white shine is a second background layer (not an overlay) so it sweeps under the label, keeping text crisp. */
 .btn.primary {
   background-color: transparent;
   background-image: linear-gradient(105deg, transparent 42%, rgba(255,255,255,0.22) 50%, transparent 58%), var(--green-face);
@@ -1442,7 +1442,7 @@ body.sidebar-collapsed .sidebar-collapse-btn .collapse-icon { transform: rotate(
   cursor: pointer;
   transition: background 0.12s ease;
 }
-/* Steam row hover: a cyan wash fading right + a glowing spine on the leading cell. */
+/* Row hover: a cyan wash fading right + a glowing spine on the leading cell. */
 .bug-table tbody tr:hover { background: linear-gradient(to right, var(--accent-soft), transparent 78%); }
 .bug-table tbody tr:hover td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 .bug-table tbody tr:last-child td { border-bottom: none; }
@@ -1559,7 +1559,7 @@ body.sidebar-collapsed .sidebar-collapse-btn .collapse-icon { transform: rotate(
   margin-top: 8px;
 }
 
-/* Sprints view (Jira-style Backlog + Board) */
+/* Sprints view (Backlog + Board) */
 #viewSprints { padding: 20px; }
 .sprints-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; flex-wrap: wrap; }
 .sprints-controls { display: flex; align-items: center; gap: 8px; }
@@ -1607,7 +1607,7 @@ body.sidebar-collapsed .sidebar-collapse-btn .collapse-icon { transform: rotate(
 }
 .agile-tab:hover { color: var(--text); }
 .agile-tab.active { background: var(--accent-fill); color: var(--on-accent-fill); box-shadow: var(--shadow-sm); }
-/* Custom web font (Motiva Sans/Asap) ships placeholder glyphs for these code points,
+/* The custom web font (Asap) ships placeholder glyphs for these code points,
    which blocks the browser's automatic fallback to the system emoji font — force it explicitly. */
 .tab-icon {
   font-family: "Segoe UI Emoji", "Noto Color Emoji", "Apple Color Emoji", "Twemoji Mozilla", sans-serif;

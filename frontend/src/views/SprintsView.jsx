@@ -1,4 +1,4 @@
-/** Sprints: the Jira Software (Scrum) workspace of a project. */
+/** Sprints: the Scrum workspace of a project. */
 import { useEffect, useState } from "react";
 import { useApp } from "../state/AppContext";
 import BhSelect from "../components/BhSelect";

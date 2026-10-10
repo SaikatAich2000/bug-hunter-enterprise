@@ -1,4 +1,4 @@
-"""Boot-time alignment of pre-existing agile data with the Jira hierarchy
+"""Boot-time alignment of pre-existing agile data with the work-item hierarchy
 (app/agile/upgrade.py). Rows are written with Core inserts, bypassing the
 flush-time rules, exactly as data from before the upgrade looks. The retired
 Collection and Feature tables are no longer part of the schema, so the tests

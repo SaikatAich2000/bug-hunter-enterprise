@@ -3,7 +3,7 @@
 import { initials } from "../../lib/format";
 import { itemTypeIcon } from "../../lib/itemTypes";
 
-/** Icon of a work-item type (Task and Sub-task differ, as in Jira). */
+/** Icon of a work-item type (Task and Sub-task differ). */
 export function typeEmoji(t) {
   return itemTypeIcon(t);
 }
@@ -77,4 +77,15 @@ export function localIsoDate(d) {
 /** Today as a local "YYYY-MM-DD". */
 export function localToday() {
   return localIsoDate(new Date());
+}
+
+/** Name for the next sprint, as the server picks it: "Mobile Board" -> "Mobile Sprint 3", the
+ * default "Sprint Board" -> "Sprint 3" (never "Sprint Sprint 3"), skipping names in use. */
+export function defaultSprintName(boardName, sprints) {
+  const base = (boardName || "").replace(/ Board$/, "").trim().replace(/\s*\bsprints?$/i, "").trim();
+  const prefix = base ? `${base} Sprint` : "Sprint";
+  const taken = new Set(sprints.map((s) => (s.name || "").trim().toLowerCase()));
+  let n = sprints.length + 1;
+  while (taken.has(`${prefix} ${n}`.toLowerCase())) n += 1;
+  return `${prefix} ${n}`;
 }

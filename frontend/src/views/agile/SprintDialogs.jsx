@@ -1,4 +1,4 @@
-/** Jira's sprint dialogs: create/edit, start and complete. */
+/** Sprint dialogs: create/edit, start and complete. */
 import { useEffect, useMemo, useState } from "react";
 import Modal from "../../components/Modal";
 import BhSelect from "../../components/BhSelect";
@@ -87,7 +87,7 @@ export function SprintFormDialog({ open, boardId, sprint, defaultName, onClose }
     setDates({ start, end, duration: start && end ? durationOf(start, end) : "custom" });
   }, [open, sprint, defaultName]);
 
-  // A future sprint may have no dates yet (as in Jira); a running one keeps them.
+  // A future sprint may have no dates yet; a running one keeps them.
   const error = sprint?.state === "active" && !(dates.start && dates.end)
     ? "An active sprint needs a start and an end date."
     : validDates(dates.start, dates.end);
@@ -201,7 +201,7 @@ export function StartSprintDialog({ open, sprint, issues, mode, onClose }) {
   );
 }
 
-/** Jira's completion rule, as far as the client can see it: the issue and all
+/** The completion rule, as far as the client can see it: the issue and all
  * its Sub-tasks are done. The server applies the exact rule. */
 function isCompleteIssue(issue) {
   return issue.status_category === "done" && (issue.subtasks_done ?? 0) >= (issue.subtask_count ?? 0);

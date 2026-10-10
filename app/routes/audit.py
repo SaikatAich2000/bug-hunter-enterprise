@@ -110,7 +110,7 @@ def list_audit(
     entity_type: Optional[str] = None,
     actor_user_id: Optional[int] = None,
     q: Optional[str] = Query(default=None, max_length=200),
-    limit: int = Query(default=5000, le=10000),
+    limit: int = Query(default=200, ge=1, le=10000),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     user: User = Depends(require_manager_or_admin),

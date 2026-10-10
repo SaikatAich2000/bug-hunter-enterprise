@@ -409,11 +409,6 @@ class _FakeReq:
         self.cookies = {}
 
 
-async def _ok_no_cache(_request):
-    from starlette.responses import Response
-    return Response("ok")
-
-
 def test_main_asset_version_large_file_uses_size(tmp_path, monkeypatch):
     # Over-cap files are hashed by size (not read); shrink the cap to trip the branch.
     import app.main as main
@@ -427,11 +422,16 @@ def test_main_asset_version_large_file_uses_size(tmp_path, monkeypatch):
 
 def test_main_cache_control_static_non_fingerprinted(monkeypatch):
     # Non-assets /static/ paths get the 1-hour header, not the immutable one.
+    from starlette.datastructures import MutableHeaders
+
     import app.main as main
-    mw = main.CacheControlMiddleware(app=None)
-    req = _FakeReq(path="/static/firebase-messaging-sw.js", method="GET")
-    resp = asyncio.run(mw.dispatch(req, _ok_no_cache))
-    assert resp.headers["Cache-Control"] == "public, max-age=3600"
+
+    headers = MutableHeaders()
+    main._apply_cache_headers(headers, "/static/firebase-messaging-sw.js")
+    assert headers["Cache-Control"] == "public, max-age=3600"
+    kept = MutableHeaders({"Cache-Control": "private"})
+    main._apply_cache_headers(kept, "/api/x")
+    assert kept["Cache-Control"] == "private"
 
 
 def test_main_body_limit_skips_non_request_messages():
@@ -532,11 +532,9 @@ def test_main_csrf_origin_present_not_allowed_blocks(monkeypatch):
     # Unknown Origin is 403. ('elif referer:' false is unreachable: the earlier guard returns first.)
     import app.main as main
     monkeypatch.setattr(main, "_allowed_origins", lambda: set())
-    mw = main.CsrfOriginMiddleware(app=None)
     req = _FakeReq(path="/api/projects", method="POST",
                    headers={"origin": "https://evil.example.com"})  # no host/referer
-    resp = asyncio.run(mw.dispatch(req, _ok_no_cache))
-    assert resp.status_code == 403
+    assert main.csrf_check(req).status_code == 403
 
 
 def test_main_has_valid_session_missing_row_returns_false(client):

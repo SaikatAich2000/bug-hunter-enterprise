@@ -138,10 +138,33 @@ describe("api() error handling", () => {
     expect(replaceSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("does not redirect when fetch itself rejects", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("network down"); }));
-    await expect(apiMod.api("/x")).rejects.toBeInstanceOf(TypeError);
+  it("turns a network failure into a readable error and does not redirect", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("Failed to fetch"); }));
+    const err = await apiMod.api("/x").catch((e) => e);
+    expect(err).toBeInstanceOf(apiMod.ApiError);
+    expect(err.status).toBe(0);
+    expect(err.message).toBe(apiMod.OFFLINE_MESSAGE);
     expect(replaceSpy).not.toHaveBeenCalled();
+  });
+
+  it("gives up on a request that never answers", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (_url, init) => {
+      init.signal.throwIfAborted();
+      const reason = new DOMException("timed out", "TimeoutError");
+      throw reason;
+    }));
+    const err = await apiMod.api("/slow", { timeoutMs: 5 }).catch((e) => e);
+    expect(err.message).toBe(apiMod.TIMEOUT_MESSAGE);
+  });
+
+  it("passes a signal to fetch and keeps the caller's own cancellation", async () => {
+    const seen = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url, init) => {
+      seen.push(init.signal);
+      return new Response("{}", { status: 200 });
+    }));
+    await apiMod.api("/x");
+    expect(seen[0]).toBeInstanceOf(AbortSignal);
   });
 });
 

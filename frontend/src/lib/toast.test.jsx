@@ -44,6 +44,16 @@ afterEach(() => {
 });
 
 describe("toast()", () => {
+  it("keeps one toast up for a repeated message instead of re-showing it", () => {
+    toast("Can't reach the server", "error");
+    vi.advanceTimersByTime(3000);
+    toast("Can't reach the server", "error");
+    vi.advanceTimersByTime(3000);
+    expect(host.hidden).toBe(false); // the repeat extended it
+    vi.advanceTimersByTime(600);
+    expect(host.hidden).toBe(true);
+  });
+
   it("shows the message with an optional type class", () => {
     toast("Saved");
     expect(host.textContent).toBe("Saved");

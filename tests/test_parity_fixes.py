@@ -247,7 +247,7 @@ def test_project_move_detaches_project_scoped_links(admin_client):
 
 
 def test_project_move_takes_subtasks_along_but_not_epic_children(admin_client):
-    """Jira moves an issue together with its Sub-tasks. A Sub-task cannot move
+    """An issue moves together with its Sub-tasks. A Sub-task cannot move
     on its own, and an Epic that still has issues is refused."""
     project, _board = _project(admin_client, "Parent Suite")
     other, _ = _project(admin_client, "Elsewhere")

@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   AssigneeStack,
   StoryPointBadge,
+  defaultSprintName,
   epicColor,
   epicTitle,
   formatDateRange,
@@ -162,3 +163,15 @@ describe("date range + story points", () => {
   });
 });
 
+
+describe("defaultSprintName", () => {
+  it("never doubles the word Sprint", () => {
+    expect(defaultSprintName("Sprint Board", [{ name: "Sprint 1" }])).toBe("Sprint 2");
+    expect(defaultSprintName("", [])).toBe("Sprint 1");
+  });
+
+  it("keeps a board's own name and skips names in use", () => {
+    expect(defaultSprintName("Mobile Board", [])).toBe("Mobile Sprint 1");
+    expect(defaultSprintName("Mobile Board", [{ name: "x" }, { name: "Mobile Sprint 3" }])).toBe("Mobile Sprint 4");
+  });
+});

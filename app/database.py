@@ -524,7 +524,7 @@ def _backfill_bug_display_id(conn) -> None:
 
 
 def _align_agile_hierarchy(conn) -> None:
-    """Align existing agile data with the Jira hierarchy (app/agile/upgrade.py)."""
+    """Align existing agile data with the work-item hierarchy (app/agile/upgrade.py)."""
     from app.agile.upgrade import align_agile_hierarchy
 
     align_agile_hierarchy(conn)

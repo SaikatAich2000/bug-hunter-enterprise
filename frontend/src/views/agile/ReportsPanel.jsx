@@ -1,4 +1,4 @@
-/** Reports (Jira Software): burndown, burnup, sprint report, velocity,
+/** Reports: burndown, burnup, sprint report, velocity,
  * cumulative flow, control chart, epic report, daily summary, workload. */
 import { useEffect, useMemo, useState } from "react";
 import { useApp } from "../../state/AppContext";

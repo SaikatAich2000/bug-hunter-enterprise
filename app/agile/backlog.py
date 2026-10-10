@@ -26,7 +26,7 @@ def sprint_scope(sprint_id: int) -> str:
 
 
 def list_backlog(db: Session, project_id: int, limit: int = 500, offset: int = 0) -> list[Bug]:
-    """Jira's backlog for ``project_id``, in rank order: standard issues in no
+    """The backlog for ``project_id``, in rank order: standard issues in no
     sprint whose status is not in the board's right-most (done) column."""
     from app.agile.boards import done_status_values, get_default_board
 
@@ -65,7 +65,7 @@ def rank_item(
             raise BacklogError("Issues in a closed sprint keep their order")
     scope = item.rank_scope or backlog_scope(project_id)
     try:
-        # Neither neighbour given: top of the list (Jira's "Top of backlog").
+        # Neither neighbour given: top of the list ("Top of backlog").
         _place(db, [item], scope, project_id, before_id, after_id, "top")
     except SprintLifecycleError as exc:
         raise BacklogError(str(exc)) from exc

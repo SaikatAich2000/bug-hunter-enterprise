@@ -8,7 +8,8 @@ import {
   useRef,
   useState,
 } from "react";
-import { api } from "../lib/api";
+import { ApiError, api } from "../lib/api";
+import { startPoller } from "../lib/poller";
 import { getAppName } from "../lib/branding";
 import { applyOrgAccent } from "../lib/orgBranding";
 import { toast, toastError } from "../lib/toast";
@@ -76,9 +77,21 @@ export function useApp() {
 }
 
 const PAGE_SIZE = 20;
-const SESSION_POLL_MS = 15_000;
-/** Shared poll interval for list, stats, directory, open modal, and per-view pollers. */
-export const DATA_POLL_MS = 10_000;
+// Background refresh cadence. An idle tab costs about nine requests a minute; anything the
+// user changes refreshes at once, and other people's changes show within these intervals.
+const SESSION_POLL_MS = 30_000;
+/** Shared poll interval for list, stats, open modal, and per-view pollers. */
+export const DATA_POLL_MS = 30_000;
+/** Users and projects change rarely; edits made here update the lists immediately. */
+const DIRECTORY_POLL_MS = 120_000;
+const POLL_FAILED_NOTICE = "Can't reach the server. Retrying…";
+// Background polls tell the user once per outage (a 401 has already redirected to sign-in).
+const pollNotices = {
+  onError: (err, failures) => {
+    if (failures === 1 && !(err instanceof ApiError && err.silent)) toast(POLL_FAILED_NOTICE, "error");
+  },
+  onRecover: () => toast("Connection restored", "success"),
+};
 const VERSION_POLL_MS = 5 * 60_000;
 /** Cap desktop popups per poll so a bulk import can't flood the notification centre. */
 const MAX_DESKTOP_NOTIFS_PER_POLL = 3;
@@ -199,7 +212,8 @@ export function AppProvider({
     return params;
   }, []);
 
-  const refreshBugs = useCallback(async () => {
+  // `quiet` (background polls) rethrows instead of toasting; the poller reports failures once.
+  const refreshBugs = useCallback(async ({ quiet = false } = {}) => {
     try {
       const res = await api(`/bugs?${buildBugParams()}`);
       const sig = `${res.total}|${res.pages}|${JSON.stringify(res.items)}`;
@@ -209,11 +223,12 @@ export function AppProvider({
       setTotal(res.total);
       setTotalPages(Math.max(1, res.pages));
     } catch (err) {
+      if (quiet) throw err;
       toastError(err);
     }
   }, [buildBugParams]);
 
-  const refreshStats = useCallback(async () => {
+  const refreshStats = useCallback(async ({ quiet = false } = {}) => {
     try {
       const tab = tabRef.current;
       const params = new URLSearchParams();
@@ -228,6 +243,7 @@ export function AppProvider({
       lastStatsSig.current = sig;
       setStats(res);
     } catch (err) {
+      if (quiet) throw err;
       toastError(err);
     }
   }, []);
@@ -246,7 +262,7 @@ export function AppProvider({
     await Promise.all([refreshBugs(), refreshStats(), refreshUnread()]);
   }, [refreshBugs, refreshStats, refreshUnread]);
 
-  const loadUsers = useCallback(async () => {
+  const loadUsers = useCallback(async ({ quiet = false } = {}) => {
     try {
       const res = await api("/users");
       const sig = JSON.stringify(res);
@@ -254,6 +270,7 @@ export function AppProvider({
       lastUsersSig.current = sig;
       setUsers(res);
     } catch (err) {
+      if (quiet) throw err;
       toastError(err);
     }
   }, []);
@@ -267,7 +284,7 @@ export function AppProvider({
   const projectLoadSeq = useRef(0);
   const projectMutationSeq = useRef(0);
 
-  const loadProjects = useCallback(async () => {
+  const loadProjects = useCallback(async ({ quiet = false } = {}) => {
     const seq = ++projectLoadSeq.current;
     const mutated = projectMutationSeq.current;
     try {
@@ -290,6 +307,7 @@ export function AppProvider({
       setProjects(next);
       return next;
     } catch (err) {
+      if (quiet) throw err;
       toastError(err);
       return null;
     }
@@ -413,54 +431,36 @@ export function AppProvider({
   }, []);
 
   useEffect(() => {
-    // Session poll every 15s + on tab focus; unread count rides the same tick.
+    // Session poll + on tab focus; the unread count rides the same tick. A 401 has already
+    // bounced to the login page, and network errors never sign the user out.
     const tick = async () => {
-      try {
-        const m = await api("/auth/me", { cache: "no-store" });
-        setCurrentUser((prev) => (sameMe(prev, m) ? prev : m));
-      } catch {
-        /* 401 already bounced; network errors don't kick the user out */
-      }
-      try {
-        const c = await api("/notifications/unread_count");
-        setUnreadCount((prev) => {
-          // A rise means something new arrived; pull the list so it can be
-          // surfaced as a desktop notification even if FCM never delivered.
-          if (c.unread > prev) void loadNotificationsRef.current();
-          return c.unread;
-        });
-      } catch {
-        /* transient — keep the last known count */
-      }
+      const m = await api("/auth/me", { cache: "no-store" });
+      setCurrentUser((prev) => (sameMe(prev, m) ? prev : m));
+      const c = await api("/notifications/unread_count");
+      setUnreadCount((prev) => {
+        // A rise means something new arrived; pull the list so it can be
+        // surfaced as a desktop notification even if FCM never delivered.
+        if (c.unread > prev) void loadNotificationsRef.current();
+        return c.unread;
+      });
     };
-    const id = setInterval(tick, SESSION_POLL_MS);
-    const onVis = () => {
-      if (!document.hidden) void tick();
-    };
-    document.addEventListener("visibilitychange", onVis);
-    return () => {
-      clearInterval(id);
-      document.removeEventListener("visibilitychange", onVis);
-    };
+    return startPoller(tick, SESSION_POLL_MS, pollNotices);
   }, []);
 
-  // Live ref so the interval calls the latest refreshAll without re-registering.
-  const refreshAllRef = useRef(refreshAll);
+  // Live refs so the pollers call the latest callbacks without re-registering.
+  const refreshBugsRef = useRef(refreshBugs);
+  const refreshStatsRef = useRef(refreshStats);
   useEffect(() => {
-    refreshAllRef.current = refreshAll;
-  }, [refreshAll]);
+    refreshBugsRef.current = refreshBugs;
+    refreshStatsRef.current = refreshStats;
+  }, [refreshBugs, refreshStats]);
 
   useEffect(() => {
-    // Poll list + stats; paused while hidden, fires on refocus.
-    const refresh = () => {
-      if (!document.hidden) void refreshAllRef.current();
-    };
-    const id = setInterval(refresh, DATA_POLL_MS);
-    document.addEventListener("visibilitychange", refresh);
-    return () => {
-      clearInterval(id);
-      document.removeEventListener("visibilitychange", refresh);
-    };
+    // Poll list + stats (the unread count rides the session poll).
+    const refresh = () => Promise.all([
+      refreshBugsRef.current({ quiet: true }), refreshStatsRef.current({ quiet: true }),
+    ]);
+    return startPoller(refresh, DATA_POLL_MS, pollNotices);
   }, []);
 
   // Directory polls separately so bug saves don't double-fetch users/projects.
@@ -469,17 +469,10 @@ export function AppProvider({
     loadDirRef.current = { loadUsers, loadProjects };
   }, [loadUsers, loadProjects]);
   useEffect(() => {
-    const refresh = () => {
-      if (document.hidden) return;
-      void loadDirRef.current.loadUsers();
-      void loadDirRef.current.loadProjects();
-    };
-    const id = setInterval(refresh, DATA_POLL_MS);
-    document.addEventListener("visibilitychange", refresh);
-    return () => {
-      clearInterval(id);
-      document.removeEventListener("visibilitychange", refresh);
-    };
+    const refresh = () => Promise.all([
+      loadDirRef.current.loadUsers({ quiet: true }), loadDirRef.current.loadProjects({ quiet: true }),
+    ]);
+    return startPoller(refresh, DIRECTORY_POLL_MS, pollNotices);
   }, []);
 
   useEffect(() => {

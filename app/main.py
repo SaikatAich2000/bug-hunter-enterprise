@@ -9,6 +9,7 @@ import os
 import secrets
 import time
 from collections import deque
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -36,7 +37,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, text
 from sqlalchemy.exc import DataError, SQLAlchemyError
 from sqlalchemy.orm import Session as OrmSession
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.datastructures import MutableHeaders
 
 from app.auth import (
     COOKIE_NAME,
@@ -669,29 +670,22 @@ app.add_middleware(BodyLimitMiddleware)
 # Cache-Control middleware — prevents stale HTML after redeploy.
 #   HTML / api -> no-store; /static/assets/ -> immutable 1y (content-hashed);
 #   /static/ -> 1h.
-class CacheControlMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        response: Response = await call_next(request)
-        path = request.url.path
-        # Don't override if the route already set Cache-Control (e.g. downloads).
-        if response.headers.get("Cache-Control"):
-            return response
-        if path.startswith("/api/"):
-            response.headers["Cache-Control"] = "no-store"
-        elif path.startswith("/static/assets/"):
-            # Vite content-hashed filenames — safe to cache for a year.
-            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
-        elif path.startswith("/static/"):
-            # Not fingerprinted; shorter cache.
-            response.headers["Cache-Control"] = "public, max-age=3600"
-        else:
-            # HTML uncached so a redeploy shows immediately.
-            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-            response.headers["Pragma"] = "no-cache"
-        return response
-
-
-app.add_middleware(CacheControlMiddleware)
+def _apply_cache_headers(h, path: str) -> None:
+    """Cache policy by path, unless the route already chose one (e.g. downloads)."""
+    if "cache-control" in h:
+        return
+    if path.startswith("/api/"):
+        h["Cache-Control"] = "no-store"
+    elif path.startswith("/static/assets/"):
+        # Vite content-hashed filenames — safe to cache for a year.
+        h["Cache-Control"] = "public, max-age=31536000, immutable"
+    elif path.startswith("/static/"):
+        # Not fingerprinted; shorter cache.
+        h["Cache-Control"] = "public, max-age=3600"
+    else:
+        # HTML uncached so a redeploy shows immediately.
+        h["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        h["Pragma"] = "no-cache"
 
 
 # Security headers — applied to every response.
@@ -750,14 +744,53 @@ def _apply_security_headers(h) -> None:
                      "max-age=63072000; includeSubDomains")
 
 
-class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        response: Response = await call_next(request)
-        _apply_security_headers(response.headers)
-        return response
+class ResponseHeadersMiddleware:
+    """Pure ASGI: security and cache headers on every response, set as it starts."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        path = scope.get("path", "")
+
+        async def send_with_headers(message):
+            if message.get("type") == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                _apply_security_headers(headers)
+                _apply_cache_headers(headers, path)
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
 
 
-app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(ResponseHeadersMiddleware)
+
+
+class _GateMiddleware:
+    """Pure ASGI: answer a request early (``check`` returns a response) or pass it on."""
+
+    check: Callable[[Request], Optional[Response]]
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http":
+            early = type(self).check(Request(scope))
+            if early is not None:
+                await early(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+def _blocked(status_code: int, detail: str, headers: Optional[dict] = None) -> JSONResponse:
+    resp = JSONResponse(status_code=status_code, content={"detail": detail}, headers=headers)
+    _apply_security_headers(resp.headers)
+    resp.headers.setdefault("Cache-Control", "no-store")
+    return resp
 
 
 # Rate limiting on auth-sensitive endpoints
@@ -814,45 +847,37 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-class RateLimitMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        path = request.url.path
-        rule = _RATE_RULES.get(path)
-        if rule is None or request.method.upper() != "POST":
-            return await call_next(request)
+def rate_limit_check(request: Request) -> Optional[Response]:
+    """429 when this IP has used up the endpoint's window; None lets it through."""
+    path = request.url.path
+    rule = _RATE_RULES.get(path)
+    if rule is None or request.method.upper() != "POST":
+        return None
+    max_req, window = rule
+    ip = _client_ip(request)
+    now = time.monotonic()
+    cutoff = now - window
+    with _rate_lock:
+        bucket = _rate_buckets.get((path, ip))
+        if bucket is None:
+            # Evict idle buckets first; only fall back to least-recently-active.
+            if len(_rate_buckets) >= _RATE_BUCKETS_MAX:
+                _evict_one_rate_bucket(now)
+            bucket = deque()
+            _rate_buckets[(path, ip)] = bucket
+        # Drop timestamps outside the window.
+        while bucket and bucket[0] < cutoff:
+            bucket.popleft()
+        if len(bucket) >= max_req:
+            retry_after = max(1, int(window - (now - bucket[0])))
+            logger.warning("Rate limit hit: %s from %s (%d/%d in %ss)", path, ip, len(bucket), max_req, window)
+            return _blocked(429, "Too many attempts. Please try again later.", {"Retry-After": str(retry_after)})
+        bucket.append(now)
+    return None
 
-        max_req, window = rule
-        ip = _client_ip(request)
-        now = time.monotonic()
-        cutoff = now - window
 
-        with _rate_lock:
-            bucket = _rate_buckets.get((path, ip))
-            if bucket is None:
-                # Evict idle buckets first; only fall back to least-recently-active.
-                if len(_rate_buckets) >= _RATE_BUCKETS_MAX:
-                    _evict_one_rate_bucket(now)
-                bucket = deque()
-                _rate_buckets[(path, ip)] = bucket
-            # Drop timestamps outside the window.
-            while bucket and bucket[0] < cutoff:
-                bucket.popleft()
-            if len(bucket) >= max_req:
-                retry_after = max(1, int(window - (now - bucket[0])))
-                logger.warning(
-                    "Rate limit hit: %s from %s (%d/%d in %ss)",
-                    path, ip, len(bucket), max_req, window,
-                )
-                resp = JSONResponse(
-                    status_code=429,
-                    content={"detail": "Too many attempts. Please try again later."},
-                    headers={"Retry-After": str(retry_after)},
-                )
-                _apply_security_headers(resp.headers)
-                resp.headers.setdefault("Cache-Control", "no-store")
-                return resp
-            bucket.append(now)
-        return await call_next(request)
+class RateLimitMiddleware(_GateMiddleware):
+    check = staticmethod(rate_limit_check)
 
 
 app.add_middleware(RateLimitMiddleware)
@@ -874,54 +899,38 @@ _CSRF_UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _CSRF_EXEMPT_PATHS: frozenset[str] = frozenset()
 
 
-class CsrfOriginMiddleware(BaseHTTPMiddleware):
+def csrf_check(request: Request) -> Optional[Response]:
+    """403 for a mutating /api/ request whose Origin (or Referer) isn't this app's."""
+    method = request.method.upper()
+    path = request.url.path
+    if method not in _CSRF_UNSAFE_METHODS or not path.startswith("/api/") or path in _CSRF_EXEMPT_PATHS:
+        return None
+    origin = request.headers.get("origin", "").rstrip("/")
+    referer = request.headers.get("referer", "")
+    # No browser fingerprint: not a browser, cannot be CSRF.
+    if not origin and not referer:
+        return None
+    # Same-origin URLs from the request Host. Schemes are concatenated
+    # (not literal "http://") to dodge static-analyzer hardcoded-URL warnings.
+    host = request.headers.get("host", "")
+    allowed = _allowed_origins()
+    if host:
+        sep = "://"
+        for scheme in ("http", "https"):
+            allowed.add(scheme + sep + host)
+    if origin:
+        if origin in allowed:
+            return None
+    # Origin absent means referer is present (see the guard above); match by URL prefix.
+    elif any(referer.startswith(a + "/") or referer == a for a in allowed if a):
+        return None
+    logger.warning("CSRF check failed: method=%s path=%s origin=%r referer=%r", method, path, origin, referer)
+    return _blocked(403, "Cross-origin request blocked.")
+
+
+class CsrfOriginMiddleware(_GateMiddleware):
     """Block mutating requests whose Origin doesn't match the app's host."""
-    async def dispatch(self, request: Request, call_next):
-        method = request.method.upper()
-        path = request.url.path
-        if (
-            method not in _CSRF_UNSAFE_METHODS
-            or not path.startswith("/api/")
-            or path in _CSRF_EXEMPT_PATHS
-        ):
-            return await call_next(request)
-
-        origin = request.headers.get("origin", "").rstrip("/")
-        referer = request.headers.get("referer", "")
-
-        # No browser fingerprint: not a browser, cannot be CSRF.
-        if not origin and not referer:
-            return await call_next(request)
-
-        # Same-origin URLs from the request Host. Schemes are concatenated
-        # (not literal "http://") to dodge static-analyzer hardcoded-URL warnings.
-        host = request.headers.get("host", "")
-        allowed = _allowed_origins()
-        if host:
-            sep = "://"
-            for scheme in ("http", "https"):
-                allowed.add(scheme + sep + host)
-
-        if origin:
-            if origin in allowed:
-                return await call_next(request)
-        else:
-            # Origin absent means referer is present (see the guard above);
-            # match by URL prefix.
-            if any(referer.startswith(a + "/") or referer == a for a in allowed if a):
-                return await call_next(request)
-
-        logger.warning(
-            "CSRF check failed: method=%s path=%s origin=%r referer=%r",
-            method, path, origin, referer,
-        )
-        resp = JSONResponse(
-            status_code=403,
-            content={"detail": "Cross-origin request blocked."},
-        )
-        _apply_security_headers(resp.headers)
-        resp.headers.setdefault("Cache-Control", "no-store")
-        return resp
+    check = staticmethod(csrf_check)
 
 
 app.add_middleware(CsrfOriginMiddleware)
@@ -938,8 +947,8 @@ if _origins:
         expose_headers=["X-Request-ID"],
     )
 
-# Outermost: the request id must be set before any BaseHTTPMiddleware runs the rest of the
-# stack in a child task, so the error handler and every log line see it.
+# Outermost, so the request id is set before anything else runs: the error handler and every
+# log line see it.
 app.add_middleware(RequestIdMiddleware)
 
 app.mount("/static", StaticFiles(directory=settings.STATIC_DIR), name="static")
@@ -958,7 +967,9 @@ def _serve_html(filename: str) -> HTMLResponse:
     if body is None:
         body = (settings.STATIC_DIR / filename).read_text(encoding="utf-8")
         body = body.replace(ASSET_VERSION_PLACEHOLDER, app.state.asset_version)
-        body = body.replace(APP_NAME_PLACEHOLDER, settings.APP_NAME)
+        # The name lands in <title> and attribute values: escaped, an operator-set name like
+        # "R&D <Tracker>" renders as written instead of becoming markup.
+        body = body.replace(APP_NAME_PLACEHOLDER, html.escape(settings.APP_NAME))
         body = body.replace(APP_VERSION_PLACEHOLDER, DISPLAY_VERSION)
         if len(_html_cache) > 32:  # only a few pages exist; clear if somehow large
             _html_cache.clear()
@@ -1105,7 +1116,7 @@ const messaging = firebase.messaging();
 messaging.onBackgroundMessage(function (payload) {
   const n = payload.notification || {};
   const d = payload.data || {};
-    self.registration.showNotification(n.title || '__APP_NAME__', {
+    self.registration.showNotification(n.title || __APP_NAME__, {
     body: n.body || '',
     icon: '/static/icon.png?v=__ASSET_VERSION__',
     badge: '/static/icon.png?v=__ASSET_VERSION__',
@@ -1144,7 +1155,8 @@ def firebase_messaging_sw() -> Response:
     })
     return Response(
         _FIREBASE_SW.replace("__FIREBASE_CONFIG__", cfg)
-        .replace("__APP_NAME__", settings.APP_NAME)
+        # A JSON string literal: quotes or a newline in the name can't break out of it.
+        .replace("__APP_NAME__", json.dumps(settings.APP_NAME))
         .replace("__ASSET_VERSION__", app.state.asset_version),
         media_type=media,
         headers=headers,

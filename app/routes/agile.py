@@ -289,7 +289,7 @@ def replace_board_columns(
     board_id: int, payload: BoardColumnsReplaceIn,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
 ) -> dict:
-    """Board configuration > Columns (Jira): the ordered columns and the
+    """Board configuration > Columns: the ordered columns and the
     statuses each one shows. Existing columns are updated in place when their
     id is sent; the rest are created, and columns left out are removed. A
     status may sit in one column only; the right-most column is the one that

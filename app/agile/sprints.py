@@ -1,4 +1,4 @@
-"""Sprint lifecycle (Jira Software Scrum rules).
+"""Sprint lifecycle (Scrum rules).
 
 * Only standard issues (Story, Task, Bug, Requirement) are planned. Sub-tasks
   follow their parent (app.agile.integrity); Epics are never in a sprint.
@@ -13,6 +13,7 @@ Every mutation flushes within the caller's transaction; the route commits.
 """
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -93,14 +94,17 @@ def _check_dates(start_date: str | None, end_date: str | None) -> None:
 
 
 def next_sprint_name(db: Session, board: Board) -> str:
-    """Jira-style default name: "<board> Sprint <n>" with the next free number."""
+    """Default name: "<board> Sprint <n>" with the next free number."""
     count = db.scalar(select(func.count(Sprint.id)).where(Sprint.board_id == board.id)) or 0
-    base = (board.name or "Board").removesuffix(" Board").strip() or "Board"
+    # "Mobile Board" -> "Mobile Sprint 3"; the default "Sprint Board" -> "Sprint 3", never
+    # "Sprint Sprint 3".
+    base = re.sub(r"\s*\bsprints?$", "", (board.name or "").removesuffix(" Board").strip(), flags=re.I)
+    prefix = f"{base} Sprint" if base else "Sprint"
     taken = set(db.scalars(select(Sprint.name_normalized).where(Sprint.board_id == board.id)).all())
     n = count + 1
-    while normalize_name(f"{base} Sprint {n}") in taken:
+    while normalize_name(f"{prefix} {n}") in taken:
         n += 1
-    return f"{base} Sprint {n}"
+    return f"{prefix} {n}"
 
 
 def create_sprint(
@@ -139,7 +143,7 @@ def update_sprint(
     *, clear_start: bool = False, clear_end: bool = False,
 ) -> Sprint:
     """Edit a sprint; ``None`` leaves a field as it is, ``clear_*`` empties a
-    date (a future sprint may have none, as in Jira; a running one keeps them)."""
+    date (a future sprint may have none; a running one keeps them)."""
     if sprint.state in CLOSED_STATES:
         raise SprintLifecycleError("A closed or deleted sprint cannot be edited")
     if (clear_start or clear_end) and sprint.state == "active":
@@ -301,7 +305,7 @@ def move_items(
     before_id: int | None = None, after_id: int | None = None,
 ) -> list[Bug]:
     """Move issues into ``target`` (a sprint, or the backlog when None) at a
-    position: the backlog/sprint drag-and-drop of Jira's Backlog view."""
+    position: the backlog/sprint drag-and-drop of the Backlog view."""
     if target is not None and target.project_id != project_id:
         raise SprintLifecycleError("That sprint belongs to another project")
     items = _plannable_items(db, project_id, item_ids)
@@ -409,7 +413,7 @@ def _subtasks_by_parent(db: Session, parent_ids: list[int]) -> dict[int, list[Bu
 
 
 def completion_split(db: Session, sprint: Sprint, board: Board) -> tuple[list[Bug], list[Bug]]:
-    """(complete, incomplete) issues of ``sprint`` by Jira's rule: the issue and
+    """(complete, incomplete) issues of ``sprint`` by the completion rule: the issue and
     all of its Sub-tasks are in the board's right-most column."""
     done = done_status_values(db, board)
     issues = sprint_issues(db, sprint.id)

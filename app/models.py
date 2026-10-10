@@ -1033,9 +1033,11 @@ class Board(Base):
     updated_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
     )
+    # selectin: a board is always read with its columns, their statuses and those statuses'
+    # workflow rows; batching keeps that at three queries instead of one per mapping.
     columns: Mapped[list["BoardColumn"]] = relationship(
         "BoardColumn", back_populates="board", cascade=_CASCADE_ALL_DELETE_ORPHAN,
-        order_by="BoardColumn.position",
+        order_by="BoardColumn.position", lazy="selectin",
     )
 
     __table_args__ = (
@@ -1060,6 +1062,7 @@ class BoardColumn(Base):
     board: Mapped[Board] = relationship("Board", back_populates="columns")
     statuses: Mapped[list["BoardColumnStatus"]] = relationship(
         "BoardColumnStatus", back_populates="column", cascade=_CASCADE_ALL_DELETE_ORPHAN,
+        lazy="selectin",
     )
 
     __table_args__ = (
@@ -1080,7 +1083,7 @@ class BoardColumnStatus(Base):
         Integer, ForeignKey(_FK_WORKFLOW_STATUSES_ID, ondelete="CASCADE"), primary_key=True
     )
     column: Mapped[BoardColumn] = relationship("BoardColumn", back_populates="statuses")
-    workflow_status: Mapped[WorkflowStatus] = relationship("WorkflowStatus")
+    workflow_status: Mapped[WorkflowStatus] = relationship("WorkflowStatus", lazy="selectin")
 
     __table_args__ = (
         Index("idx_board_column_statuses_status", "workflow_status_id"),
@@ -1200,7 +1203,7 @@ def _utcnow_precise() -> datetime:
 
 
 # Append-only change log of the work-item fields that agile reports replay
-# (Jira's issue changelog). Rows are written by app.agile.integrity on every
+# (the issue changelog). Rows are written by app.agile.integrity on every
 # flush that changes a tracked field, whatever the write path; nothing else
 # inserts, updates or deletes them.
 class WorkItemChange(Base):

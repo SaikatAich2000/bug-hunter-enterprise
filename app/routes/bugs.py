@@ -2249,7 +2249,7 @@ def _bulk_set_field(db: Session, bug: Bug, actor: User, field_name: str,
 
 
 def _delete_item(db: Session, bug: Bug, actor: User, note: str = "") -> int:
-    """Delete ``bug`` the way Jira does and record it in the audit trail.
+    """Delete ``bug`` and record it in the audit trail.
 
     Its Sub-tasks go with it (a Sub-task cannot exist without its parent; the
     FK alone would leave them parentless), and an Epic's issues are unlinked

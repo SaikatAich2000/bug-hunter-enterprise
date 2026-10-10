@@ -148,13 +148,21 @@ describe("local notifications", () => {
 });
 
 describe("boot subscription", () => {
-  it("bails out on a browser without service worker / push support", async () => {
+  it("bails out quietly on a browser without service worker / push support", async () => {
+    const debugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
     await push.initPushOnBoot();
     expect(apiMock).not.toHaveBeenCalled();
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("no service worker / push support"),
-      "",
-    );
+    expect(debugSpy).toHaveBeenCalledWith(expect.stringContaining("no service worker / push support"));
+    expect(warnSpy).not.toHaveBeenCalled();
+    debugSpy.mockRestore();
+  });
+
+  it("does not warn on every load when push is simply turned off", async () => {
+    enablePushSupport();
+    grantNotifications("granted");
+    apiMock.mockResolvedValueOnce({ enabled: false });
+    await push.initPushOnBoot();
+    expect(warnSpy).not.toHaveBeenCalled();
   });
 
   it("bails out when the server reports push disabled", async () => {

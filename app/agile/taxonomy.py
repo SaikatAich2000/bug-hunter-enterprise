@@ -70,7 +70,7 @@ def _empty_progress() -> dict:
 
 def epic_progress_many(db: Session, epic_ids: list[int]) -> dict[int, dict]:
     """Progress of each epic from its standard issues, by status category
-    (Jira's epic progress). Explicit counts and estimates, never an average
+    (epic progress). Explicit counts and estimates, never an average
     of child percentages. Sub-tasks are part of their parent, not counted."""
     out = {eid: _empty_progress() for eid in epic_ids}
     categories = status_categories(db) if epic_ids else {}

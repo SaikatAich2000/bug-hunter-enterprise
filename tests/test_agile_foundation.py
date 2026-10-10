@@ -33,7 +33,7 @@ def test_enable_agile_creates_default_board(admin_client):
     board = board_res.json()
     assert board["is_default"] is True
     categories = {c["category"] for c in board["columns"]}
-    # Simplified-Jira contract mandates Testing between In Progress and Done.
+    # The board contract puts Testing between In Progress and Done.
     assert categories == {"todo", "in_progress", "testing", "done"}
     # Every column has at least one mapped status.
     for col in board["columns"]:

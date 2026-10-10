@@ -234,3 +234,19 @@ def test_database_refuses_values_the_app_could_never_read(admin_client):
         with SessionLocal() as db, pytest.raises(IntegrityError):
             db.execute(text(statement), {"i": bug["id"]})
             db.commit()
+
+
+def test_app_name_cannot_inject_markup_or_script(client, monkeypatch):
+    import json
+
+    import app.main as main
+
+    monkeypatch.setattr(main.settings, "APP_NAME", 'R&D </title><script>x()</script> "Q\'s"')
+    main._html_cache.clear()
+    page = client.get("/login.html").text
+    assert "<script>x()</script>" not in page and "R&amp;D &lt;/title&gt;" in page
+    monkeypatch.setattr(main.settings, "WEB_PUSH_ENABLED", True)
+    monkeypatch.setattr(main.settings, "FIREBASE_API_KEY", "k")
+    sw = client.get("/firebase-messaging-sw.js").text
+    assert "n.title || " + json.dumps(main.settings.APP_NAME) + "," in sw
+    main._html_cache.clear()

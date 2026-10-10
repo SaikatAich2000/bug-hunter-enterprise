@@ -1,4 +1,4 @@
-"""Jira Software (Scrum) rules for sprints, the backlog, the board and the
+"""Scrum rules for sprints, the backlog, the board and the
 issue hierarchy. Each test states the rule it pins."""
 from __future__ import annotations
 
@@ -83,7 +83,7 @@ def _backlog_ids(client, board_id):
 # --- starting a sprint ----------------------------------------------------------
 
 def test_start_sprint_sets_dates_and_the_exact_start_instant(admin_client):
-    """Jira's Start Sprint dialog: name, goal and dates may be set; without an
+    """The Start Sprint dialog: name, goal and dates may be set; without an
     end date the sprint runs two weeks."""
     project, board_id = _project(admin_client, "Start Suite")
     story = _issue(admin_client, project["id"], "Work")
@@ -123,7 +123,7 @@ def test_start_rejects_an_end_before_the_start(admin_client):
 # --- completing a sprint --------------------------------------------------------
 
 def test_completed_issues_stay_in_the_closed_sprint(admin_client):
-    """Jira keeps finished issues in the sprint they were finished in (the
+    """Finished issues stay in the sprint they were finished in (the
     sprint report and velocity read them there); unfinished ones move."""
     project, board_id = _project(admin_client, "Complete Suite")
     done = _issue(admin_client, project["id"], "Finished", story_points=3)
@@ -220,7 +220,7 @@ def test_carry_over_is_tagged_so_reports_do_not_count_it_as_removal(admin_client
 # --- the backlog ----------------------------------------------------------------
 
 def test_backlog_holds_open_standard_issues_only(admin_client):
-    """Jira's backlog: issues in no open sprint and not in the Done column;
+    """The backlog: issues in no open sprint and not in the Done column;
     never Epics and never Sub-tasks (they sit under their parent)."""
     project, board_id = _project(admin_client, "Backlog Suite")
     story = _issue(admin_client, project["id"], "Open story")
@@ -346,8 +346,8 @@ def test_board_columns_update_in_place_and_validate(admin_client):
 
 
 def test_unmapped_status_is_reported_not_lost(admin_client):
-    """An issue whose status sits in no column is hidden from the columns, as in
-    Jira, but the board lists it so it is not silently lost."""
+    """An issue whose status sits in no column is hidden from the columns, but the
+    board lists it so it is not silently lost."""
     project, board_id = _project(admin_client, "Unmapped Suite")
     board, cols = _columns(admin_client, board_id)
     cols[0]["statuses"] = [s for s in cols[0]["statuses"] if s != "Deferred"]

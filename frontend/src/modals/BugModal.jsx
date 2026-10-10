@@ -143,7 +143,7 @@ export default function BugModal() {
   const [availableEpics, setAvailableEpics] = useState([]);
   const [sprintPick, setSprintPick] = useState("");
   const [sprintBusy, setSprintBusy] = useState(false);
-  // Jira hierarchy links: a Sub-task's parent issue (required) and a standard
+  // Hierarchy links: a Sub-task's parent issue (required) and a standard
   // issue's Epic (optional).
   const [parentPick, setParentPick] = useState("");
   const [parentOptions, setParentOptions] = useState([]);
@@ -320,7 +320,7 @@ export default function BugModal() {
         setAvailableSprints(open_);
         setAvailableEpics(epicRows);
         // New issues go to the backlog unless the caller (a sprint's
-        // "Create issue") asked for a sprint, as in Jira.
+        // "Create issue") asked for a sprint.
       } catch {
         if (!cancelled) setAvailableSprints([]);
       }
@@ -801,7 +801,7 @@ export default function BugModal() {
     return `${p.display_id || `#${p.id}`} ${p.title}`;
   }
 
-  /** Jira's hierarchy fields: Parent for a Sub-task, Epic for a standard issue. */
+  /** Hierarchy fields: Parent for a Sub-task, Epic for a standard issue. */
   function renderParentField() {
     if (itemType === "Epic") return null;
     if (itemType === "Sub-task") {

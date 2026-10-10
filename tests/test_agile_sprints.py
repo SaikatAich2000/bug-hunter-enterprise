@@ -197,7 +197,7 @@ def test_epic_update_includes_target_date(admin_client):
 
 
 def test_epics_are_never_planned_into_sprints(admin_client):
-    """Jira plans issues, not Epics: an Epic cannot be created in, added to,
+    """Sprints plan issues, not Epics: an Epic cannot be created in, added to,
     or updated into a sprint, whatever the route."""
     project, board_id = _setup_project_with_board(admin_client, "Epic Sprint Suite")
     sprint = admin_client.post(f"/api/agile/sprints?board_id={board_id}", json={"name": "Sprint A"}).json()

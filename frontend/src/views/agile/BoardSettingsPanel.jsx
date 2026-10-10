@@ -1,4 +1,4 @@
-/** Board settings (Jira's board configuration): general, columns & statuses,
+/** Board settings: general, columns & statuses,
  * quick filters. */
 import { useEffect, useMemo, useState } from "react";
 import { useApp } from "../../state/AppContext";

@@ -105,7 +105,7 @@ def get_board_view(
     board_id: int, sprint_id: int | None = None,
     db: Session = Depends(get_db), user: User = Depends(get_current_user),
 ) -> dict:
-    """The active sprint's board (Jira's "Active sprints"). ``sprint_id`` picks
+    """The active sprint's board ("Active sprints"). ``sprint_id`` picks
     one of several active sprints, or previews a future or closed one."""
     board = _get_board_or_404(db, board_id, user)
     sprint = None
@@ -122,7 +122,7 @@ def get_planning_view(
     backlog_limit: int = Query(default=views_svc.BACKLOG_DEFAULT_LIMIT, ge=1, le=5000),
     db: Session = Depends(get_db), user: User = Depends(get_current_user),
 ) -> dict:
-    """Jira's Backlog view: open sprints with their issues, then the backlog."""
+    """The Backlog view: open sprints with their issues, then the backlog."""
     board = _get_board_or_404(db, board_id, user)
     return views_svc.planning_view(db, board, user, backlog_limit)
 

@@ -1800,7 +1800,7 @@ class SprintMoveIn(BaseModel):
 
 
 class SprintStartIn(BaseModel):
-    """Jira's Start Sprint dialog: name, goal and dates may be set on start."""
+    """The Start Sprint dialog: name, goal and dates may be set on start."""
     version: int = Field(ge=0)
     acknowledged_warnings: bool = False
     name: Optional[str] = Field(default=None, max_length=120)
@@ -1979,7 +1979,7 @@ class AgileWorkItemCreateIn(BaseModel):
 
     @model_validator(mode="after")
     def _estimate_only_on_standard_issues(self):
-        # As in Jira (and PUT /api/agile/work-items/{id}/estimate): Epics and
+        # As in PUT /api/agile/work-items/{id}/estimate: Epics and
         # Sub-tasks carry no story points of their own.
         if self.story_points is not None and self.item_type in ("Epic", "Sub-task"):
             raise ValueError(f"A {self.item_type} has no story points; estimate its issues instead")
@@ -2217,7 +2217,7 @@ class BoardViewOut(BaseModel):
     active_sprints: list[SprintBriefOut] = Field(default_factory=list)
     columns: list[BoardViewColumnOut] = Field(default_factory=list)
     # Sprint issues whose status is in no column (hidden from the columns, as
-    # in Jira) so the board can say so instead of losing them silently.
+    # on the board) so the board can say so instead of losing them silently.
     unmapped: list[AgileIssueOut] = Field(default_factory=list)
     epics: list[EpicBriefOut] = Field(default_factory=list)
 
@@ -2239,7 +2239,7 @@ class PlanningSprintOut(SprintBriefOut):
 
 
 class PlanningViewOut(BaseModel):
-    """Jira's Backlog view: open sprints with their issues, then the backlog."""
+    """The Backlog view: open sprints with their issues, then the backlog."""
     board_id: int
     estimation_mode: str = "story_points"
     parallel_sprints: bool = False
@@ -2537,7 +2537,7 @@ class ReportIssueOut(BaseModel):
 
 
 class SprintReportOut(BaseModel):
-    """Jira's Sprint Report. Estimates use the board's statistic."""
+    """The Sprint Report. Estimates use the board's statistic."""
     sprint_id: int
     sprint_name: str
     state: str
@@ -2606,7 +2606,7 @@ class BoardDayOut(BaseModel):
 
 
 class BurndownReportOut(BaseModel):
-    """Jira's Burndown and Burnup charts: remaining work, total scope and
+    """The Burndown and Burnup charts: remaining work, total scope and
     completed work as step series, the ideal guideline, and the events."""
     sprint_id: int
     sprint_name: str = ""
@@ -2661,7 +2661,7 @@ class EpicSprintRowOut(BaseModel):
 
 
 class EpicReportOut(BaseModel):
-    """Jira's Epic Report: progress, work per sprint and the issue lists."""
+    """The Epic Report: progress, work per sprint and the issue lists."""
     epic_id: int
     display_id: str = ""
     title: str
@@ -2794,7 +2794,7 @@ class VelocityPointOut(BaseModel):
 
 
 class VelocityReportOut(BaseModel):
-    """Jira's Velocity Chart: commitment vs completed for recent closed sprints."""
+    """The Velocity Chart: commitment vs completed for recent closed sprints."""
     board_id: int
     estimation_mode: str
     statistic_label: str = "Story points"
@@ -2816,7 +2816,7 @@ class CumulativeFlowPointOut(BaseModel):
 
 
 class CumulativeFlowReportOut(BaseModel):
-    """Jira's Cumulative Flow Diagram: issues per board column per day."""
+    """The Cumulative Flow Diagram: issues per board column per day."""
     board_id: int
     project_id: int
     columns: list[FlowColumnOut] = Field(default_factory=list)
@@ -2840,7 +2840,7 @@ class ControlChartPointOut(BaseModel):
 
 
 class ControlChartReportOut(BaseModel):
-    """Jira's Control Chart: cycle time (time spent in the board's working
+    """The Control Chart: cycle time (time spent in the board's working
     columns) of every issue completed in the range, with statistics."""
     board_id: int
     work_columns: list[str] = Field(default_factory=list)

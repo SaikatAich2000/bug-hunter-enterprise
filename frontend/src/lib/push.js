@@ -12,6 +12,12 @@ function warn(reason, err = "") {
   console.warn(`[push] ${reason}`, err ?? "");
 }
 
+// Expected states (push off, no browser support, permission declined) are not problems:
+// they stay out of the console unless verbose logging is on.
+function note(reason) {
+  console.debug(`[push] ${reason}`);
+}
+
 function supported() {
   return (
     typeof window !== "undefined" &&
@@ -188,12 +194,12 @@ export async function showLocalNotification(title, body, url) {
 export async function initPushOnBoot() {
   try {
     if (!supported()) {
-      warn("this browser has no service worker / push support");
+      note("this browser has no service worker / push support");
       return;
     }
     const cfg = await getConfig();
     if (!cfg?.enabled) {
-      warn("web push is not enabled on the server");
+      note("web push is not enabled on the server");
       return;
     }
     let permission = Notification.permission;
@@ -206,7 +212,7 @@ export async function initPushOnBoot() {
       }
     }
     if (permission !== "granted") {
-      warn(`notification permission is "${permission}" — allow it in the browser's site settings`);
+      note(`notification permission is "${permission}" — allow it in the browser's site settings`);
       return;
     }
     await subscribeWithRetry(cfg);

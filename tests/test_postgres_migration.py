@@ -102,7 +102,7 @@ def test_upgrade_adds_every_missing_column_and_index(scratch_db):
 
 
 # Legacy agile data (Collections, Features, sub-tasks without a valid parent,
-# epics in sprints) written before the Jira-hierarchy upgrade, then two full
+# epics in sprints) written before the hierarchy upgrade, then two full
 # boots: the upgrade SQL must run on PostgreSQL and change nothing the second
 # time.
 AGILE_LEGACY = r"""

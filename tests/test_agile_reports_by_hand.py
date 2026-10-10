@@ -1,4 +1,4 @@
-"""Agile reports against hand-computed Jira numbers.
+"""Agile reports against hand-computed numbers.
 
 Each scenario performs real API actions and then pins every recorded change
 to a known instant (the change log is the reports' only input), so the
@@ -155,7 +155,7 @@ def two_week_sprint(admin_client):
             "a": a, "b": b, "c": c, "d": d}
 
 
-def test_burndown_series_matches_jira(two_week_sprint):
+def test_burndown_series_matches_the_hand_computed_one(two_week_sprint):
     s = two_week_sprint
     report = s["client"].get(f"/api/agile/reports/burndown?sprint_id={s['sprint']['id']}").json()
     remaining = [p["remaining"] for p in report["points"]]
@@ -189,7 +189,7 @@ def test_guideline_is_flat_over_the_weekend(two_week_sprint):
     assert guide["2026-03-03T00:00:00"] == pytest.approx(16 - per_day * 15 / 24, abs=0.01)
 
 
-def test_sprint_report_lists_match_jira(two_week_sprint):
+def test_sprint_report_lists_match_the_hand_computed_ones(two_week_sprint):
     s = two_week_sprint
     report = s["client"].get(f"/api/agile/reports/sprint/{s['sprint']['id']}").json()
     assert (report["committed_count"], report["committed_estimate"]) == (3, 16)

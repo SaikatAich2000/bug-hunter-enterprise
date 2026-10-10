@@ -6,25 +6,21 @@ import ConfirmHost from "./components/ConfirmHost";
 const SleuthPanel = lazy(() => import("./sleuth/SleuthPanel"));
 
 export default function App() {
-  // Close the topmost open modal on Escape, but not when focus is in a field.
+  // Escape closes the topmost open modal. From inside a field the first Escape only leaves
+  // the field (so a stray key never throws away what was typed); the next one closes.
   useEffect(() => {
     const onKey = (e) => {
-      if (e.key !== "Escape") return;
-      const t = e.target;
-      if (
-        t &&
-        (t.tagName === "INPUT" ||
-          t.tagName === "TEXTAREA" ||
-          t.tagName === "SELECT" ||
-          t.isContentEditable)
-      ) {
-        return;
-      }
+      if (e.key !== "Escape" || e.defaultPrevented || e.isComposing) return;
       const open = document.querySelectorAll(".modal:not([hidden])");
       const top = open[open.length - 1];
       if (!top) return;
-      const close = top.querySelector(".modal-close");
-      close?.click();
+      const t = e.target;
+      const inField = t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable);
+      if (inField && top.contains(t)) {
+        top.querySelector("[role='dialog']")?.focus({ preventScroll: true });
+        return;
+      }
+      top.querySelector(".modal-close")?.click();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);

@@ -1216,25 +1216,29 @@ class _FakeRequest:
         self.cookies = {}
 
 
-async def _passthrough(_request):
-    from starlette.responses import Response
-    return Response("ok")
-
-
 def test_cov_main_security_headers_strip_server(client):
     from starlette.responses import Response
 
     import app.main as main
 
-    async def call_next_with_server(_request):
+    async def inner(scope, receive, send):
         resp = Response("ok")
         resp.headers["server"] = "uvicorn"
-        return resp
+        await resp(scope, receive, send)
 
-    mw = main.SecurityHeadersMiddleware(app=None)
-    req = _FakeRequest(path="/api/health", method="GET")
-    resp = asyncio.run(mw.dispatch(req, call_next_with_server))
-    assert "server" not in {k.lower() for k in resp.headers}
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    async def receive():
+        return {"type": "http.request", "body": b""}
+
+    scope = {"type": "http", "method": "GET", "path": "/api/health", "headers": []}
+    asyncio.run(main.ResponseHeadersMiddleware(inner)(scope, receive, send))
+    names = {k.decode().lower() for k, _ in sent[0]["headers"]}
+    assert "server" not in names
+    assert {"content-security-policy", "x-frame-options", "cache-control"} <= names
 
 
 def test_cov_main_client_ip_trust_proxy_without_xff(monkeypatch):
@@ -1259,11 +1263,9 @@ def test_cov_main_rate_limit_evicts_oldest_bucket_at_cap(monkeypatch):
     main._rate_buckets.clear()
     main._rate_buckets[("/seed", "ip0")] = main.deque([_time.monotonic()])
 
-    mw = main.RateLimitMiddleware(app=None)
     req = _FakeRequest(path="/api/auth/login", method="POST",
                        headers={}, client_host="5.5.5.5")
-    resp = asyncio.run(mw.dispatch(req, _passthrough))
-    assert resp.status_code == 200
+    assert main.rate_limit_check(req) is None
     assert len(main._rate_buckets) <= 2
     main._rate_buckets.clear()
 
@@ -1280,11 +1282,9 @@ def test_cov_main_rate_limit_popleft_expired(monkeypatch):
     key = ("/api/auth/login", "7.7.7.7")
     main._rate_buckets[key] = main.deque([stale])
 
-    mw = main.RateLimitMiddleware(app=None)
     req = _FakeRequest(path="/api/auth/login", method="POST",
                        headers={}, client_host="7.7.7.7")
-    resp = asyncio.run(mw.dispatch(req, _passthrough))
-    assert resp.status_code == 200
+    assert main.rate_limit_check(req) is None
     assert len(main._rate_buckets[key]) == 1
     main._rate_buckets.clear()
 
@@ -1294,36 +1294,30 @@ def test_cov_main_csrf_no_host_header_blocks(monkeypatch):
     # and, with no configured CORS origins, the request is rejected 403.
     import app.main as main
     monkeypatch.setattr(main, "_allowed_origins", lambda: set())
-    mw = main.CsrfOriginMiddleware(app=None)
     req = _FakeRequest(
         path="/api/projects", method="POST",
         headers={"origin": "https://evil.example.com"},  # no "host"
     )
-    resp = asyncio.run(mw.dispatch(req, _passthrough))
-    assert resp.status_code == 403
+    assert main.csrf_check(req).status_code == 403
 
 
 def test_cov_main_csrf_referer_mismatch_blocks(monkeypatch):
     # Referer present but not starting with any allowed origin prefix → 403.
     import app.main as main
     monkeypatch.setattr(main, "_allowed_origins", lambda: set())
-    mw = main.CsrfOriginMiddleware(app=None)
     req = _FakeRequest(
         path="/api/projects", method="POST",
         headers={"referer": "https://evil.example.com/page", "host": "testserver"},
     )
-    resp = asyncio.run(mw.dispatch(req, _passthrough))
-    assert resp.status_code == 403
+    assert main.csrf_check(req).status_code == 403
 
 
 def test_cov_main_csrf_safe_method_skips(client):
     # GET is a safe method; the CSRF check is skipped entirely.
     import app.main as main
-    mw = main.CsrfOriginMiddleware(app=None)
     req = _FakeRequest(path="/api/projects", method="GET",
                        headers={"origin": "https://evil.example.com"})
-    resp = asyncio.run(mw.dispatch(req, _passthrough))
-    assert resp.status_code == 200
+    assert main.csrf_check(req) is None
 
 
 def test_cov_main_serve_html_cache_overflow_clears(client):

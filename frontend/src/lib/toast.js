@@ -6,9 +6,13 @@ let toastTimer;
 export function toast(msg, type = "") {
   const el = document.getElementById("toast");
   if (!el) return;
-  el.textContent = msg;
-  el.className = `toast ${type}`;
-  el.hidden = false;
+  // The same message again while it is showing just stays up longer (no flicker storm).
+  const className = `toast ${type}`;
+  if (!(el.textContent === msg && el.className === className && !el.hidden)) {
+    el.textContent = msg;
+    el.className = className;
+    el.hidden = false;
+  }
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => {
     el.hidden = true;

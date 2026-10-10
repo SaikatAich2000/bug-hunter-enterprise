@@ -1,4 +1,4 @@
-"""Boot-time alignment of existing agile data with the Jira hierarchy.
+"""Boot-time alignment of existing agile data with the work-item hierarchy.
 
 Runs under init_db's migration lock, inside a SAVEPOINT, on every boot.
 Every step is idempotent: once the data is aligned nothing matches again.
@@ -7,12 +7,12 @@ Every step is idempotent: once the data is aligned nothing matches again.
    mistaken for Tasks (TASK-). Ids frozen by a type conversion are kept.
 2. Standard issues parented to something (only Sub-tasks have parents) and
    links to "epics" that are not Epics are cleared.
-3. Sub-tasks without a valid parent become Tasks (Jira has no orphan
-   Sub-tasks); the others take their parent's epic and sprint.
+3. Sub-tasks without a valid parent become Tasks (a Sub-task always has a
+   parent); the others take their parent's epic and sprint.
 4. Epics leave sprints (Epics are not planned into sprints).
 5. Every standard issue is ranked in the list it sits in (sprint or backlog),
    Epics in their project's Epic list; Sub-tasks carry no rank.
-6. Databases from before the Jira rebuild may still hold the retired
+6. Databases from before the hierarchy rebuild may still hold the retired
    Collection and Feature tables. Those levels become labels on the items they
    grouped (a Story also takes its Feature's Epic), then the old links are
    cleared so a label removed later is not re-added. The tables are no longer
