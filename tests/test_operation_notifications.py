@@ -38,7 +38,7 @@ def _setup(admin_client, suffix: str):
     proj = admin_client.post("/api/projects", json={"name": f"Op Proj {suffix}"}).json()
     bob = admin_client.post("/api/users", json={
         "name": "Bob", "email": f"bob_{suffix}@op.test",
-        "role": "user", "password": _PW,
+        "role": "user", "password": _PW, "project_ids": [proj["id"]],
     }).json()
     bug = admin_client.post("/api/bugs", json={
         "project_id": proj["id"], "title": f"Op bug {suffix}",
@@ -202,7 +202,7 @@ def test_link_add_notifies_both_endpoint_assignees(admin_client):
     proj, bob, bug = _setup(admin_client, "linkboth")
     carol = admin_client.post("/api/users", json={
         "name": "Carol", "email": "carol_linkboth@op.test",
-        "role": "user", "password": _PW,
+        "role": "user", "password": _PW, "project_ids": [proj["id"]],
     }).json()
     target = admin_client.post("/api/bugs", json={
         "project_id": proj["id"], "title": "Target with owner",

@@ -40,6 +40,7 @@ from app.api_docs import (
 from app.auth import get_current_user
 from app.database import get_db
 from app.models import AcceptanceCriterion, Activity, Board, Bug, Project, Sprint, User
+from app.people import reject_inactive, require_project_members, resolve_users
 from app.schemas import (
     AcceptanceCriterionIn,
     AcceptanceCriterionOut,
@@ -482,60 +483,21 @@ def list_sprints_route(
     return [_sprint_out(db, s, counts.get(s.id, 0)) for s in sprints]
 
 
-@router.post("/sprints", status_code=status.HTTP_201_CREATED, responses=NOT_FOUND_CONFLICT_409)
+@router.post("/sprints", response_model=SprintOut, status_code=status.HTTP_201_CREATED,
+             responses=NOT_FOUND_CONFLICT_409)
 def create_sprint_route(
     payload: SprintCreateIn,
     board_id: int = Query(...),
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
 ) -> dict:
-    """Create one sprint, or many from a pre-computed period list.
-
-    Single-sprint mode (default) returns a SprintOut dict exactly as before.
-    Bulk mode (``generate=True``) returns ``{"created": [SprintOut, ...]}``
-    so the caller can distinguish the two shapes without an envelope guess.
-    """
     board = _get_board_or_404(db, board_id, actor)
     require_permission(actor, CREATE_SPRINT)
 
-    if payload.generate and payload.periods:
-        # Bulk generation: every period becomes one sprint. All-or-nothing —
-        # a single IntegrityError after any successful insert rolls the whole
-        # batch back so we never leave a partial series.
-        created: list[Sprint] = []
-        try:
-            from app.routes.bugs import _reject_inactive, _resolve_users
-            assignees = []
-            if payload.assignee_ids:
-                assignees = _resolve_users(db, payload.assignee_ids, actor.org_id)
-                _reject_inactive(assignees)
-            for idx, period in enumerate(payload.periods, start=1):
-                sprint = sprints_svc.create_sprint(
-                    db, board, actor,
-                    name=f"{payload.name} {idx}",
-                    goal=payload.goal,
-                    start_date=period.start_date,
-                    end_date=period.end_date,
-                    cadence=payload.cadence,
-                )
-                sprint.assignees = list(assignees)
-                created.append(sprint)
-            db.flush()
-        except IntegrityError as exc:
-            db.rollback()
-            raise HTTPException(status_code=409, detail=_DETAIL_SPRINT_NAME_TAKEN) from exc
-        for sprint in created:
-            _audit(db, actor, "sprint", sprint.id, "sprint_created",
-                   f"Created sprint '{sprint.name}'")
-        db.commit()
-        for sprint in created:
-            db.refresh(sprint)
-        return {"created": [_sprint_out(db, s) for s in created]}
-
     assignees = None
     if payload.assignee_ids:
-        from app.routes.bugs import _reject_inactive, _resolve_users
-        assignees = _resolve_users(db, payload.assignee_ids, actor.org_id)
-        _reject_inactive(assignees)
+        assignees = resolve_users(db, payload.assignee_ids, actor.org_id)
+        reject_inactive(assignees)
+        require_project_members(db, assignees, board.project_id)
     try:
         # create_sprint flushes, so the unique (board, name) check fires here.
         sprint = sprints_svc.create_sprint(
@@ -572,9 +534,10 @@ def update_sprint_route(
     if sprint.version != payload.version:
         raise HTTPException(status_code=409, detail=_DETAIL_VERSION_CONFLICT)
     if payload.assignee_ids is not None:
-        from app.routes.bugs import _reject_inactive, _resolve_users
-        assignees = _resolve_users(db, payload.assignee_ids, actor.org_id)
-        _reject_inactive(assignees)
+        assignees = resolve_users(db, payload.assignee_ids, actor.org_id)
+        added = [u for u in assignees if u not in sprint.assignees]
+        reject_inactive(added)
+        require_project_members(db, added, sprint.project_id)
         sprint.assignees = assignees
     try:
         sprints_svc.update_sprint(
@@ -802,13 +765,7 @@ def create_agile_work_item(
 ) -> dict:
     from app import notification_service
     from app.email_service import UserSnapshot, notify_assignment
-    from app.routes.bugs import (
-        _bug_snapshot,
-        _bug_to_out_dict,
-        _reject_inactive,
-        _resolve_users,
-        _user_brief,
-    )
+    from app.routes.bugs import _bug_snapshot, _bug_to_out_dict, _user_brief
     from app.webhooks_delivery import deliver_event
 
     project = _get_agile_project_or_404(db, payload.project_id, actor)
@@ -825,10 +782,11 @@ def create_agile_work_item(
         sprint = db.get(Sprint, payload.sprint_id)
         if sprint is None or sprint.project_id != project.id or sprint.state in ("closed", "cancelled"):
             raise HTTPException(status_code=422, detail="sprint_id must reference an open Sprint in this project")
-    # Same assignee rules as /api/bugs: unknown ids are an error (never
-    # silently dropped) and deactivated accounts cannot be assigned.
-    assignees = _resolve_users(db, payload.assignee_ids, actor.org_id)
-    _reject_inactive(assignees)
+    # Same assignee rules as /api/bugs: unknown ids are an error (never silently dropped),
+    # and deactivated accounts and people outside the project cannot be assigned.
+    assignees = resolve_users(db, payload.assignee_ids, actor.org_id)
+    reject_inactive(assignees)
+    require_project_members(db, assignees, project.id)
 
     item = Bug(
         project_id=project.id,

@@ -22,6 +22,7 @@ from app.auth import (
 )
 from app.chatbot.executor import Block, Response
 from app.models import PROJECT_ROLE_LEAD, Activity, Bug, Comment, Project, User
+from app.people import non_members
 from app.schemas import (
     ALLOWED_ENVIRONMENTS,
     ALLOWED_PRIORITIES,
@@ -248,6 +249,16 @@ def _resolve_targets(
     return users, None
 
 
+def _outsider_error(db: Session, users: list[User], project_id: int) -> Optional[str]:
+    """Assignees are notified, so each must be able to open the item (as in REST)."""
+    outsiders = non_members(db, users, project_id)
+    if not outsiders:
+        return None
+    names = ", ".join(sorted(u.name for u in outsiders))
+    return (f"{names} can't be assigned: not a member of this item's project. "
+            "Add them to the project first, or choose someone else.")
+
+
 def _apply_assign(db: Session, plan: ActionPlan, actor: User,
                   notify: bool = True, commit: bool = True) -> Response:
     bug = _load_bug(db, actor, plan.bug_id) if plan.bug_id else None
@@ -263,6 +274,9 @@ def _apply_assign(db: Session, plan: ActionPlan, actor: User,
     before = sorted(a.name for a in bug.assignees)
     already = {a.id for a in bug.assignees}
     added = [t for t in targets if t.id not in already]
+    oerr = _outsider_error(db, added, bug.project_id)
+    if oerr:
+        return _error_response(oerr)
     if not added:
         # No-op — signal "skipped" to the bulk caller; no audit/version bump.
         return _success_response(
@@ -462,6 +476,7 @@ def _apply_create_bug(db: Session, plan: ActionPlan, actor: User) -> Response:
     assignees: list[User] = []
     if plan.target_user_ids:
         assignees, terr = _resolve_targets(db, actor, plan.target_user_ids)
+        terr = terr or _outsider_error(db, assignees, project_id)
         if terr:
             return _error_response(terr)
     bug = Bug(

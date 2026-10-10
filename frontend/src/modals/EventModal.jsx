@@ -1,12 +1,13 @@
 /**
  * EventModal — create/edit form for an Event (create defaults scheduled_for to today).
- * Manager picker is limited to active admin/manager users (backend rejects others).
+ * Manager picker offers active admins, plus managers who belong to the event's project.
  */
 import { useEffect, useRef, useState } from "react";
 import Modal from "../components/Modal";
 import BhDateInput from "../components/BhDateInput";
 import ChipPicker from "../components/ChipPicker";
 import { api } from "../lib/api";
+import { canSeeProject } from "../lib/people";
 import { withLoader } from "../lib/loader";
 import { toast, toastError } from "../lib/toast";
 import { useApp } from "../state/AppContext";
@@ -43,9 +44,10 @@ export default function EventModal({ open, event, onClose, onSaved }) {
     return () => clearTimeout(t);
   }, [open, event, projects]);
 
-  // Backend rejects non-admin/manager users  managers, so exclude them.
+  // The server refuses other roles as managers, so they are not offered.
+  // Managers must also be able to open the event: members of its project, or admins when it has none.
   const eligibleManagers = users.filter(
-    (u) => u.is_active && (u.role === "admin" || u.role === "manager"),
+    (u) => u.is_active && (u.role === "admin" || (u.role === "manager" && projectId !== "" && canSeeProject(u, projectId))),
   );
   // Keep already-assigned-but-now-ineligible managers so they can be deselected (else silently re-submitted).
   const managerPickerItems = eligibleManagers.map((u) => ({ id: u.id, label: u.name, title: u.role }));
@@ -159,7 +161,8 @@ export default function EventModal({ open, event, onClose, onSaved }) {
           />
           <small className="hint">
             Managers get notified when the event is created, edited or deleted — but not for
-            individual tasks inside it. Only admin/manager users can be event managers
+            individual tasks inside it. Admins, and managers in the event&apos;s project, can be
+            event managers.
           </small>
         </fieldset>
         <label className="field">

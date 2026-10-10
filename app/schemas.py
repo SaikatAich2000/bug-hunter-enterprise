@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from html.parser import HTMLParser
 from typing import Any, Optional
 from urllib.parse import urlsplit
@@ -1576,33 +1576,6 @@ class BacklogRankIn(BaseModel):
 
 
 # --- Sprints ---
-class SprintIntervalPeriod(BaseModel):
-    """One pre-computed period for bulk sprint generation.
-    The frontend computes these from an inclusive start date, an inclusive end
-    date, and a frequency so the preview exactly matches what gets created.
-    The backend only validates the shape and normalizes the name.
-    """
-    start_date: str
-    end_date: str
-
-    @field_validator("start_date", "end_date")
-    @classmethod
-    def _check_date(cls, v: Optional[str]) -> Optional[str]:
-        if v in (None, ""):
-            raise ValueError("period start_date and end_date are required")
-        try:
-            datetime.strptime(v, "%Y-%m-%d")
-        except ValueError as exc:
-            raise ValueError(_DATE_FORMAT_ERROR) from exc
-        return v
-
-    @model_validator(mode="after")
-    def _check_order(self) -> "SprintIntervalPeriod":
-        if self.end_date < self.start_date:
-            raise ValueError("period end_date must be on or after start_date")
-        return self
-
-
 class SprintCreateIn(BaseModel):
     name: str = Field(max_length=120)
     goal: str = Field(default="", max_length=2000)
@@ -1610,8 +1583,6 @@ class SprintCreateIn(BaseModel):
     end_date: Optional[str] = None
     cadence: Optional[str] = None
     assignee_ids: list[int] = Field(default_factory=list, max_length=200)
-    generate: bool = False
-    periods: list[SprintIntervalPeriod] = Field(default_factory=list)
 
     @field_validator("name")
     @classmethod
@@ -1647,51 +1618,7 @@ class SprintCreateIn(BaseModel):
     def _normalize(self) -> "SprintCreateIn":
         if self.start_date and self.end_date and self.end_date < self.start_date:
             raise ValueError("end_date cannot be before start_date")
-        if self.generate and not self.periods:
-            raise ValueError("periods are required when generate is True")
-        if self.generate and self.periods and (self.start_date or self.end_date):
-            # Periods are authoritative; clear single-sprint dates to avoid confusion.
-            self.start_date = None
-            self.end_date = None
         return self
-
-    @staticmethod
-    def generate_intervals(
-        start_date: datetime,
-        end_date: datetime,
-        cadence: str,
-        count: int,
-    ) -> list[tuple[datetime, datetime]]:
-        """Calculate ``count`` contiguous intervals spanning [start_date, end_date].
-        Boundaries are inclusive on both ends. The cadence selects the step size
-        used to *estimate* count when the caller passes only a range; when the
-        caller supplies an explicit count, that count wins. The last interval is
-        clamped to ``end_date`` so partial final periods never overshoot.
-        Returns a list of (period_start, period_end) datetime tuples in
-        ascending order. Pure date arithmetic — no timezone assumptions beyond
-        the naive datetimes the caller passes in.
-        """
-        if not start_date or not end_date:
-            raise ValueError("start_date and end_date are required for interval generation")
-        if count <= 0:
-            raise ValueError("interval_count must be a positive integer")
-        if end_date < start_date:
-            raise ValueError("end_date must be on or after start_date")
-        if count == 1:
-            return [(start_date, end_date)]
-        total_seconds = (end_date - start_date).total_seconds()
-        delta = total_seconds / count
-        sprints: list[tuple[datetime, datetime]] = []
-        for i in range(count):
-            period_start = start_date + timedelta(seconds=delta * i)
-            period_end = start_date + timedelta(seconds=delta * (i + 1))
-            if period_end > end_date:
-                period_end = end_date
-            if i == count - 1:
-                # Guarantee the final interval lands exactly on end_date.
-                period_end = end_date
-            sprints.append((period_start, period_end))
-        return sprints
 
 
 class SprintUpdateIn(BaseModel):

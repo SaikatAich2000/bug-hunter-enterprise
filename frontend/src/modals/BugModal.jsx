@@ -30,6 +30,7 @@ import BugCustomFields, { missingRequiredFields, saveCustomValues } from "../com
 import ChipPicker from "../components/ChipPicker";
 import ItemPicker from "../components/ItemPicker";
 import { useFileDrop } from "../lib/useFileDrop";
+import { projectPeopleItems } from "../lib/people";
 import RichEditor from "../components/RichEditor";
 import GitBranchesPanel from "../components/GitBranchesPanel";
 import {
@@ -489,9 +490,8 @@ export default function BugModal() {
       : { id: me.id, name: me.name, email: me.email };
   const reporterId = isEdit && bug.reporter ? bug.reporter.id : me.id;
 
-  const assigneeItems = users
-    .filter((u) => u.is_active)
-    .map((u) => ({ id: u.id, label: u.name, title: u.role }));
+  // Only people who can open the item's project can be assigned (the server refuses others).
+  const assigneeItems = projectPeopleItems(users, projectId, assigneeIds);
 
   const headType = isEdit ? bug.item_type || "Bug" : defaultType || defaultNewType || "Bug";
   const headTitle = isEdit

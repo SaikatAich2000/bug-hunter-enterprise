@@ -28,9 +28,10 @@ def _mk_project(c: TestClient, name: str, color: str = "#c9764f") -> dict:
 
 
 def _mk_user(c: TestClient, name: str, email: str, role: str = "user",
-             password: str = "User12345") -> dict:
+             password: str = "User12345", project_ids=()) -> dict:
     r = c.post("/api/users", json={
         "name": name, "email": email, "role": role, "password": password,
+        "project_ids": list(project_ids),
     })
     assert r.status_code == 201, r.text
     return r.json()
@@ -351,7 +352,7 @@ def test_cov_audit_query_with_hash_and_offset(admin_client):
 def test_cov_mark_read_already_read_skips_commit(admin_client):
     """Mark-read on an already-read notification short-circuits (read_at set) and still returns {'ok': True}."""
     p = _mk_project(admin_client, "Cov Notif Proj")
-    bob = _mk_user(admin_client, "Cov Notif Bob", "cov.notif.bob@example.com")
+    bob = _mk_user(admin_client, "Cov Notif Bob", "cov.notif.bob@example.com", project_ids=[p["id"]])
     _mk_bug(admin_client, p["id"], title="Cov Notif Bug", assignee_ids=[bob["id"]])
 
     bob_c = _new_client()

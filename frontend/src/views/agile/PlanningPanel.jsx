@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useApp } from "../../state/AppContext";
 import { api } from "../../lib/api";
 import { toast, toastError } from "../../lib/toast";
+import { canSeeProject } from "../../lib/people";
 import BhSelect from "../../components/BhSelect";
 
 const READINESS_MARK = { passed: "✓", warning: "⚠", failed: "✕" };
@@ -165,7 +166,7 @@ export default function PlanningPanel({ projectId, canManage }) {
                 <tr><th>Person</th><th>Capacity ({unit})</th><th>Notes</th></tr>
               </thead>
               <tbody>
-                {users.filter((u) => u.is_active).map((u) => (
+                {users.filter((u) => u.id in capacityDraft.entries || (u.is_active && canSeeProject(u, projectId))).map((u) => (
                   <tr key={u.id}>
                     <td>{u.name}</td>
                     <td>

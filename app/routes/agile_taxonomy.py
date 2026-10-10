@@ -35,6 +35,7 @@ from app.models import (
     User,
     Version,
 )
+from app.people import reject_inactive, require_project_members, resolve_user
 from app.schemas import (
     ComponentCreateIn,
     ComponentOut,
@@ -75,10 +76,29 @@ def _audit(db: Session, actor: User, entity_type: str, entity_id: int, action: s
 _CLEARABLE_EPIC_FIELDS = frozenset({"start_date", "target_date", "owner_id"})
 
 
+_RELEASE_PEOPLE = {"owner_id": "owner"}
+_COMPONENT_PEOPLE = {"lead_id": "component lead", "default_assignee_id": "default assignee"}
+
+
+def _changed(entity, fields: dict) -> dict:
+    """The fields whose value differs from the entity's (an unchanged person is not re-checked)."""
+    return {k: v for k, v in fields.items() if getattr(entity, k, None) != v}
+
+
 def _apply_fields(entity, fields: dict, clearable: frozenset[str]) -> None:
     for key, value in fields.items():
         if value is not None or key in clearable:
             setattr(entity, key, value)
+
+
+def _check_people(db: Session, org_id: int, fields: dict, project_id: int, nouns: dict[str, str]) -> None:
+    """Each person a write names (owner, lead, default assignee) must exist, be active and be
+    able to see the project."""
+    for key, noun in nouns.items():
+        person = resolve_user(db, fields.get(key), org_id)
+        if person is not None:
+            reject_inactive([person], noun)
+            require_project_members(db, [person], project_id, noun)
 
 
 def _get_project_or_404(db: Session, project_id: int, user: User) -> Project:
@@ -167,6 +187,8 @@ def update_epic(
     target = fields.get("target_date", detail.target_date)
     if start and target and target < start:
         raise HTTPException(status_code=422, detail="The target date cannot be before the start date")
+    if fields.get("owner_id") != detail.owner_id:
+        _check_people(db, actor.org_id, fields, epic.project_id, {"owner_id": "owner"})
     _apply_fields(detail, fields, _CLEARABLE_EPIC_FIELDS)
     detail.version += 1
     _audit(db, actor, "bug", epic.id, "epic_updated", f"Updated epic #{epic.id} '{epic.title}'")
@@ -205,6 +227,7 @@ def create_version(
     _get_project_or_404(db, payload.project_id, actor)
     require_permission(actor, MANAGE_RELEASES)
     fields = payload.model_dump(exclude={"project_id"})
+    _check_people(db, actor.org_id, fields, payload.project_id, _RELEASE_PEOPLE)
     try:
         v = taxonomy_svc.create_version(db, payload.project_id, **fields)
     except IntegrityError as exc:
@@ -238,6 +261,7 @@ def update_version(
     if v.version != payload.version:
         raise HTTPException(status_code=409, detail=_DETAIL_VERSION_CONFLICT)
     fields = payload.model_dump(exclude_unset=True, exclude={"version"})
+    _check_people(db, actor.org_id, _changed(v, fields), v.project_id, _RELEASE_PEOPLE)
     for key, value in fields.items():
         if key == "name" and value is not None:
             v.name_normalized = taxonomy_svc.normalize_name(value)
@@ -326,6 +350,7 @@ def create_component(
     _get_project_or_404(db, payload.project_id, actor)
     require_permission(actor, MANAGE_COMPONENTS)
     fields = payload.model_dump(exclude={"project_id"})
+    _check_people(db, actor.org_id, fields, payload.project_id, _COMPONENT_PEOPLE)
     try:
         c = taxonomy_svc.create_component(db, payload.project_id, **fields)
     except IntegrityError as exc:
@@ -359,6 +384,7 @@ def update_component(
     if c.version != payload.version:
         raise HTTPException(status_code=409, detail=_DETAIL_VERSION_CONFLICT)
     fields = payload.model_dump(exclude_unset=True, exclude={"version"})
+    _check_people(db, actor.org_id, _changed(c, fields), c.project_id, _COMPONENT_PEOPLE)
     for key, value in fields.items():
         if key == "name" and value is not None:
             c.name_normalized = taxonomy_svc.normalize_name(value)

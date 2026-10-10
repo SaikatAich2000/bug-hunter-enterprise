@@ -954,18 +954,18 @@ def test_bugs_dangerous_ext_no_extension_returns_none(client):
     assert _dangerous_upload_ext("evil.exe") == "exe"
 
 
-def test_bugs_resolve_user_unknown_raises_400(client):
+def test_people_resolve_user_unknown_raises_400(client):
     # None is allowed (no filter); a non-existent id is a hard 400.
     from fastapi import HTTPException
 
     from app.database import SessionLocal
-    from app.routes.bugs import _resolve_user
+    from app.people import resolve_user
     db = SessionLocal()
     try:
         org_id = default_org_id()
-        assert _resolve_user(db, None, org_id) is None
+        assert resolve_user(db, None, org_id) is None
         with pytest.raises(HTTPException) as ei:
-            _resolve_user(db, 999999, org_id)
+            resolve_user(db, 999999, org_id)
         assert ei.value.status_code == 400
     finally:
         db.close()
@@ -1095,9 +1095,10 @@ def test_bugs_attachment_dangerous_ext_rejected(admin_client):
     assert "exe" in r.json()["detail"].lower()
 
 
-def _mk_user_via_api(admin_client, name, email):
+def _mk_user_via_api(admin_client, name, email, project_ids=()):
     r = admin_client.post("/api/users", json={
         "name": name, "email": email, "role": "user", "password": "User12345",
+        "project_ids": list(project_ids),
     })
     assert r.status_code == 201, r.text
     return r.json()["id"]
@@ -1105,8 +1106,8 @@ def _mk_user_via_api(admin_client, name, email):
 
 def test_bugs_update_changes_reporter_and_notifies(admin_client):
     # Reporter change is recorded; a tracked-field update stages 'updated' notifications.
-    uid = _mk_user_via_api(admin_client, "Redo", "redo@test.local")
     proj = admin_client.post("/api/projects", json={"name": "UpdProj"}).json()
+    uid = _mk_user_via_api(admin_client, "Redo", "redo@test.local", [proj["id"]])
     bug = admin_client.post("/api/bugs", json={
         "project_id": proj["id"], "title": "orig", "priority": "Low",
         "environment": "DEV", "assignee_ids": [uid],
@@ -1124,9 +1125,9 @@ def test_bugs_update_reporter_change_same_display_name_not_tracked(admin_client)
     # changes, and even though the plain display-name label is identical, the
     # write must not be silently rolled back as a no-op — the audit entry
     # disambiguates via email instead.
-    uid1 = _mk_user_via_api(admin_client, "Same Name", "same1@test.local")
-    uid2 = _mk_user_via_api(admin_client, "Same Name", "same2@test.local")
     proj = admin_client.post("/api/projects", json={"name": "SameNameProj"}).json()
+    uid1 = _mk_user_via_api(admin_client, "Same Name", "same1@test.local", [proj["id"]])
+    uid2 = _mk_user_via_api(admin_client, "Same Name", "same2@test.local", [proj["id"]])
     bug = admin_client.post("/api/bugs", json={
         "project_id": proj["id"], "title": "orig", "priority": "Low",
         "environment": "DEV", "reporter_id": uid1,
@@ -1373,8 +1374,8 @@ def test_bugs_download_range_row_vanished_404(admin_client):
 
 def test_bugs_update_assignee_only_skips_changes_notify(admin_client):
     # Assignee-only update: empty changes but newly_assigned set, so only the assign-notify block runs.
-    uid = _mk_user_via_api(admin_client, "Assignee Only", "assignonly@test.local")
     proj = admin_client.post("/api/projects", json={"name": "AssignOnly"}).json()
+    uid = _mk_user_via_api(admin_client, "Assignee Only", "assignonly@test.local", [proj["id"]])
     bug = admin_client.post("/api/bugs", json={
         "project_id": proj["id"], "title": "assignee only", "priority": "Low",
         "environment": "DEV",

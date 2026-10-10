@@ -45,6 +45,7 @@ from app.models import (
     User,
     bug_assignees,
 )
+from app.people import require_project_members
 from app.schemas import (
     EventCreate,
     EventDetail,
@@ -187,7 +188,22 @@ def _resolve_managers(db: Session, ids: list[int], org_id: int) -> list[User]:
             status_code=400,
             detail=f"Only admin or manager users can be event managers ({names} is not)",
         )
-    return [found[i] for i in ids if i in found]
+    return [found[i] for i in dict.fromkeys(ids) if i in found]
+
+
+def _require_managers_can_see(db: Session, managers: list[User], project_id: Optional[int]) -> None:
+    """Managers are notified about the event, so each must be able to open it: a member of its
+    project, or an admin for a project-less (admin-only) event."""
+    if project_id is not None:
+        require_project_members(db, managers, project_id, noun="manager")
+        return
+    outsiders = sorted(m.name for m in managers if m.role != ROLE_ADMIN)
+    if outsiders:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"{', '.join(outsiders)} cannot see an event without a project (only admins can). "
+                    "Pick a project for the event, or choose an admin as manager."),
+        )
 
 
 def _event_snapshot(ev: Event) -> EventSnapshot:
@@ -321,6 +337,7 @@ def create_event(
     if payload.project_id is not None:
         _validate_event_project(db, accessible_project_ids(db, actor), payload.project_id)
     managers = _resolve_managers(db, payload.manager_ids or [], actor.org_id)
+    _require_managers_can_see(db, managers, payload.project_id)
     ev = Event(
         org_id=actor.org_id,
         name=payload.name,
@@ -427,7 +444,11 @@ def update_event(
     if new_project_id is not None and ev.project_id != new_project_id:
         changes.append(("project", str(ev.project_id or ""), str(new_project_id)))
         ev.project_id = new_project_id
+    old_managers = list(ev.managers)
     _apply_event_manager_diff(ev, db, new_manager_ids, changes)
+    project_moved = any(field == "project" for field, _, _ in changes)
+    added = [m for m in ev.managers if project_moved or m not in old_managers]
+    _require_managers_can_see(db, added, ev.project_id)
     recipient_ids = sorted({*old_manager_ids, *(m.id for m in ev.managers)})
     if changes and recipient_ids:
         _summary = ", ".join(f for f, _, _ in changes)

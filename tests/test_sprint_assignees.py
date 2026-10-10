@@ -9,8 +9,11 @@ def _make_project(admin_client, name="Apollo"):
 
 
 def _make_user(admin_client, name, email, role="user"):
+    # A member of every project, so they can be planned into any sprint.
+    project_ids = [p["id"] for p in admin_client.get("/api/projects").json()]
     res = admin_client.post("/api/users", json={
         "name": name, "email": email, "role": role, "password": "Pass12345",
+        "project_ids": project_ids,
     })
     assert res.status_code == 201, res.text
     return res.json()

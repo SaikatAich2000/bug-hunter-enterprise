@@ -101,6 +101,12 @@ def seed():
         proj_c = models.Project(org_id=default_org_id(), name="Comet", description="Mobile app")
         db.add_all([proj_a, proj_b, proj_c])
         db.commit()
+        # Everyone works on every project, so any of them can be assigned to any item.
+        db.execute(models.user_projects.insert(), [
+            {"user_id": u.id, "project_id": p.id}
+            for u in (alice, bob, carol) for p in (proj_a, proj_b, proj_c)
+        ])
+        db.commit()
         now = datetime.now(timezone.utc)
         bugs = []
         for _i, (status, prio, env, proj, age_days, title) in enumerate([

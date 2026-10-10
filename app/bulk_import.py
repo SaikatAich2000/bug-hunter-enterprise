@@ -9,7 +9,7 @@ recognized but ignored on import.
 Two-pass design: every row is parsed and validated in memory first (no DB
 writes), then only the rows that passed validation are inserted in one
 transaction. A row with a hard error (bad project, invalid enum, etc.) is
-skipped and reported; an unresolved/deactivated assignee is a soft warning
+skipped and reported; an unresolved, deactivated or out-of-project assignee is a soft warning
 that just drops that one assignee, not the whole row.
 
 Notifications are written in-app only (``background=None``) — a 500-row
@@ -33,7 +33,7 @@ from sqlalchemy.orm import Session
 from app import notification_service
 from app.access import accessible_project_ids, can_access_project, scope_event_query
 from app.config import get_settings
-from app.models import Activity, Bug, Event, Project, User
+from app.models import ROLE_ADMIN, Activity, Bug, Event, Project, User, user_projects
 from app.schemas import (
     ALLOWED_ENVIRONMENTS,
     ALLOWED_ITEM_TYPES,
@@ -192,6 +192,10 @@ class _Lookups:
     events_by_name: dict[str, list[Event]]
     users_by_email: dict[str, User]
     users_by_name: dict[str, list[User]]
+    members_by_project: dict[int, set[int]]
+
+    def can_see(self, user: User, project: Project) -> bool:
+        return user.role == ROLE_ADMIN or user.id in self.members_by_project.get(project.id, set())
 
 
 def _load_lookups(db: Session, actor: User, accessible: set[int]) -> _Lookups:
@@ -212,7 +216,18 @@ def _load_lookups(db: Session, actor: User, accessible: set[int]) -> _Lookups:
     for u in users:
         users_by_name.setdefault(u.name.lower(), []).append(u)
 
-    return _Lookups(projects_by_name, events_by_name, users_by_email, users_by_name)
+    members_by_project: dict[int, set[int]] = {}
+    # Only the importer's accessible (hence same-org) projects, and only this org's users.
+    member_rows = db.execute(
+        select(user_projects.c.user_id, user_projects.c.project_id).where(
+            user_projects.c.project_id.in_(accessible),
+            user_projects.c.user_id.in_([u.id for u in users]),
+        )
+    )
+    for user_id, project_id in member_rows:
+        members_by_project.setdefault(project_id, set()).add(user_id)
+
+    return _Lookups(projects_by_name, events_by_name, users_by_email, users_by_name, members_by_project)
 
 
 @dataclass
@@ -485,6 +500,13 @@ def _process_row(
     due_date = _resolve_row_due_date(cells, errors)
     reporter = _resolve_row_reporter(cells, lookups, actor, errors)
     assignees, warn_parts = _resolve_row_assignees(cells, lookups)
+    if project is not None:
+        # Assigned people and the reporter are notified, so each must be able to open the item.
+        for user in [a for a in assignees if not lookups.can_see(a, project)]:
+            assignees.remove(user)
+            warn_parts.append(f"assignee '{user.name}' is not a member of project '{project.name}' — skipped")
+        if reporter is not None and not lookups.can_see(reporter, project):
+            errors.append(f"Reporter '{reporter.name}' is not a member of project '{project.name}'")
 
     if errors:
         return None, errors

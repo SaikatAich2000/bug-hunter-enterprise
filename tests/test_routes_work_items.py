@@ -41,10 +41,11 @@ def _make_item(client, project_id, item_type="Bug", **extra):
     return r.json()
 
 
-def _make_user(client, name, role="user", email=None, password="User12345Aa"):
+def _make_user(client, name, role="user", email=None, password="User12345Aa", project_ids=()):
     email = email or f"{name.lower()}@cov.test"
     r = client.post("/api/users", json={
         "name": name, "email": email, "role": role, "password": password,
+        "project_ids": list(project_ids),
     })
     assert r.status_code == 201, r.text
     return r.json()
@@ -81,9 +82,10 @@ def test_cov_events_create_unknown_manager_id_400(admin_client):
 
 # --- _apply_event_manager_diff: manager set changes ----------------------
 def test_cov_events_update_changes_manager_set(admin_client):
-    m1 = _make_user(admin_client, "MgrA", role="manager", email="mgra@cov.test")
-    m2 = _make_user(admin_client, "MgrB", role="manager", email="mgrb@cov.test")
-    ev = _make_event(admin_client, name="mgr-swap", manager_ids=[m1["id"]])
+    p = _make_project(admin_client)
+    m1 = _make_user(admin_client, "MgrA", role="manager", email="mgra@cov.test", project_ids=[p["id"]])
+    m2 = _make_user(admin_client, "MgrB", role="manager", email="mgrb@cov.test", project_ids=[p["id"]])
+    ev = _make_event(admin_client, name="mgr-swap", project_id=p["id"], manager_ids=[m1["id"]])
     assert [m["id"] for m in ev["managers"]] == [m1["id"]]
     # old != new triggers the diff branch
     r = admin_client.put(f"/api/events/{ev['id']}", json={"manager_ids": [m2["id"]]})
@@ -95,9 +97,10 @@ def test_cov_events_update_changes_manager_set(admin_client):
 
 def test_cov_events_update_same_manager_set_is_noop(admin_client):
     """Re-sending the same manager set in different order is a no-op (early-return in _apply_event_manager_diff)."""
-    m1 = _make_user(admin_client, "MgrC", role="manager", email="mgrc@cov.test")
-    m2 = _make_user(admin_client, "MgrD", role="manager", email="mgrd@cov.test")
-    ev = _make_event(admin_client, name="mgr-same", manager_ids=[m1["id"], m2["id"]])
+    p = _make_project(admin_client)
+    m1 = _make_user(admin_client, "MgrC", role="manager", email="mgrc@cov.test", project_ids=[p["id"]])
+    m2 = _make_user(admin_client, "MgrD", role="manager", email="mgrd@cov.test", project_ids=[p["id"]])
+    ev = _make_event(admin_client, name="mgr-same", project_id=p["id"], manager_ids=[m1["id"], m2["id"]])
     r = admin_client.put(f"/api/events/{ev['id']}", json={
         "manager_ids": [m2["id"], m1["id"]],  # reversed order, same set
     })
@@ -197,11 +200,11 @@ def test_cov_bugs_rate_guard_cap_eviction_and_expiry(client):
     assert len(buckets2[7]) == 1  # stale entry popped, one fresh entry remains
 
 
-# --- _resolve_user: 400 for a non-existent reporter -----------------------
+# --- resolve_user: 400 for a non-existent reporter -----------------------
 def test_cov_bugs_update_unknown_reporter_400(admin_client):
     p = _make_project(admin_client, name="ReporterProj")
     bug = _make_item(admin_client, p["id"], item_type="Bug")
-    # Admin clears the reporter-change gate; _resolve_user(999999) then raises 400.
+    # Admin clears the reporter-change gate; resolve_user(999999) then raises 400.
     r = admin_client.put(f"/api/bugs/{bug['id']}", json={"reporter_id": 999999})
     assert r.status_code == 400, r.text
     assert "does not exist" in r.json()["detail"].lower()
@@ -220,8 +223,8 @@ def test_cov_bugs_list_q_only_hash_returns_all(admin_client):
 # --- list bugs: filter by reporter_id -------------------------------------
 def test_cov_bugs_list_filter_by_reporter_id(admin_client):
     me = admin_client.get("/api/auth/me").json()
-    u = _make_user(admin_client, "Reporter1", role="manager", email="rep1@cov.test")
     p = _make_project(admin_client, name="RepFilterProj")
+    u = _make_user(admin_client, "Reporter1", role="manager", email="rep1@cov.test", project_ids=[p["id"]])
     _make_item(admin_client, p["id"], item_type="Bug", title="admins")
     _make_item(admin_client, p["id"], item_type="Bug", title="theirs",
                reporter_id=u["id"])

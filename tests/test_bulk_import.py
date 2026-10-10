@@ -20,9 +20,10 @@ def _make_project(client, name="Import Proj"):
     return r.json()
 
 
-def _make_user(client, name, email, role="user", password="UserPass99"):
+def _make_user(client, name, email, role="user", password="UserPass99", project_ids=()):
     r = client.post("/api/users", json={
         "name": name, "email": email, "role": role, "password": password,
+        "project_ids": list(project_ids),
     })
     assert r.status_code == 201, r.text
     return r.json()
@@ -144,7 +145,7 @@ def test_import_creates_bugs_csv(admin_client):
 
 def test_import_resolves_reporter_and_assignees_by_email(admin_client):
     proj = _make_project(admin_client, "Import Proj B")
-    dev = _make_user(admin_client, "Dana Dev", "dana@test.local")
+    dev = _make_user(admin_client, "Dana Dev", "dana@test.local", project_ids=[proj["id"]])
     data = _xlsx_bytes([{
         "Title": "Assigned row", "Project": proj["name"],
         "Reporter Email": dev["email"], "Assignees": dev["email"],
@@ -328,7 +329,7 @@ def test_import_deactivated_assignee_is_a_warning(admin_client):
 
 def test_import_reporter_by_name_resolved_not_found_ambiguous_deactivated(admin_client):
     proj = _make_project(admin_client, "Import Proj Reporter")
-    solo = _make_user(admin_client, "Solo Reporter", "solo@test.local")
+    solo = _make_user(admin_client, "Solo Reporter", "solo@test.local", project_ids=[proj["id"]])
     _make_user(admin_client, "Dup Reporter", "dup1@test.local")
     _make_user(admin_client, "Dup Reporter", "dup2@test.local")
     inactive = _make_user(admin_client, "Inactive Reporter", "inactive-rep@test.local")
@@ -366,7 +367,7 @@ def test_import_reporter_by_name_resolved_not_found_ambiguous_deactivated(admin_
 
 def test_import_assignees_ambiguous_blank_token_and_duplicate(admin_client):
     proj = _make_project(admin_client, "Import Proj Assignees")
-    solo = _make_user(admin_client, "Solo Assignee", "solo-assignee@test.local")
+    solo = _make_user(admin_client, "Solo Assignee", "solo-assignee@test.local", project_ids=[proj["id"]])
     _make_user(admin_client, "Dup Assignee", "dupassign1@test.local")
     _make_user(admin_client, "Dup Assignee", "dupassign2@test.local")
 
