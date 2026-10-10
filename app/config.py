@@ -201,9 +201,6 @@ class Settings:
     SESSION_TTL_SECONDS: int = _env_int("SESSION_TTL_SECONDS", 86400, minimum=60)
     # Set true behind HTTPS so the cookie is TLS-only.
     COOKIE_SECURE: bool = _env_bool("COOKIE_SECURE", False)
-    # Reject legacy jti-less cookies (not revocable per-device); flip on after
-    # a migration window.
-    SESSION_REQUIRE_JTI: bool = _env_bool("SESSION_REQUIRE_JTI", False)
     # /docs, /redoc, /openapi.json are always on in development; a production
     # deploy (see is_production) turns them off unless this is true.
     ENABLE_API_DOCS: bool = _env_bool("ENABLE_API_DOCS", False)

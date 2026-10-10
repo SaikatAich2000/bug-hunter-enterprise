@@ -327,11 +327,8 @@ def logout(request: Request, db: Session = Depends(get_db)) -> Response:
         user = db.get(User, user_id)
         if user:
             _audit(db, user, "logout", f"{user.email} logged out")
-        if jti:
-            # Only this session; the user's other sessions remain.
-            db.execute(
-                SessionRow.__table__.delete().where(SessionRow.jti == jti)
-            )
+        # Only this session; the user's other sessions remain.
+        db.execute(SessionRow.__table__.delete().where(SessionRow.jti == jti))
         db.commit()
     response = Response(status_code=204)
     clear_session_cookie(response)

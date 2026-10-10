@@ -284,55 +284,22 @@ def test_email_digest_skips_already_claimed_rows(client, monkeypatch):
     assert uid  # user existed
 
 
-# app/auth.py — SESSION_REQUIRE_JTI legacy jti-less path
-def test_auth_legacy_jtiless_session_accepted_when_not_required(client):
-    # A jti-less cookie is accepted when SESSION_REQUIRE_JTI is False.
+# app/auth.py — a cookie without a session id can't be revoked, so it is refused
+def test_auth_jtiless_session_cookie_is_rejected(client):
     from sqlalchemy import select
 
-    from app.auth import COOKIE_NAME, make_session_token
-    from app.config import get_settings
+    from app.auth import COOKIE_NAME, _signer
     from app.database import SessionLocal
     from app.models import User
-
-    s = get_settings()
-    s.__class__.SESSION_REQUIRE_JTI = False
 
     db = SessionLocal()
     try:
         admin = db.scalar(select(User).where(User.email == BOOTSTRAP_EMAIL))
-        token = make_session_token(admin.id, admin.session_version or 0, jti=None)
+        legacy = _signer().sign(f"{admin.id}:{admin.session_version or 0}".encode()).decode()
     finally:
         db.close()
-
-    client.cookies.set(COOKIE_NAME, token)
-    r = client.get("/api/auth/me")
-    assert r.status_code == 200
-    assert r.json()["email"] == BOOTSTRAP_EMAIL
-
-
-def test_auth_legacy_jtiless_session_rejected_when_required(client):
-    # A jti-less cookie is rejected (401) when SESSION_REQUIRE_JTI is True.
-    from sqlalchemy import select
-
-    from app.auth import COOKIE_NAME, make_session_token
-    from app.config import get_settings
-    from app.database import SessionLocal
-    from app.models import User
-
-    s = get_settings()
-    s.__class__.SESSION_REQUIRE_JTI = True
-    try:
-        db = SessionLocal()
-        try:
-            admin = db.scalar(select(User).where(User.email == BOOTSTRAP_EMAIL))
-            token = make_session_token(admin.id, admin.session_version or 0, jti=None)
-        finally:
-            db.close()
-        client.cookies.set(COOKIE_NAME, token)
-        r = client.get("/api/auth/me")
-        assert r.status_code == 401
-    finally:
-        s.__class__.SESSION_REQUIRE_JTI = False
+    client.cookies.set(COOKIE_NAME, legacy)
+    assert client.get("/api/auth/me").status_code == 401
 
 
 # app/routes/auth.py - change-password same-pw reject + tz-aware reset expiry.
@@ -400,32 +367,26 @@ def test_push_subscribe_conflict_returns_409(admin_client):
     assert "another account" in r.json()["detail"].lower()
 
 
-# app/routes/sessions.py — empty list + sweep error rollback
+# app/routes/sessions.py — empty list skips the user prefetch
 def test_sessions_list_empty_skips_user_prefetch(client):
-    # Empty sessions table skips user-prefetch; a legacy jti-less cookie lets us wipe the table and stay admin.
+    from types import SimpleNamespace
+
     from sqlalchemy import select
 
-    from app.auth import COOKIE_NAME, make_session_token
-    from app.config import get_settings
     from app.database import SessionLocal
     from app.models import Session as SessionRow
     from app.models import User
-
-    get_settings().__class__.SESSION_REQUIRE_JTI = False
+    from app.routes.sessions import list_sessions
 
     db = SessionLocal()
     try:
         admin = db.scalar(select(User).where(User.email == BOOTSTRAP_EMAIL))
-        token = make_session_token(admin.id, admin.session_version or 0, jti=None)
         db.query(SessionRow).delete()
         db.commit()
+        request = SimpleNamespace(cookies={}, headers={})
+        assert list_sessions(request, db=db, actor=admin) == []
     finally:
         db.close()
-
-    client.cookies.set(COOKIE_NAME, token)
-    r = client.get("/api/sessions")
-    assert r.status_code == 200
-    assert r.json() == []
 
 
 # app/main.py - asset hash, body-limit ASGI, cache headers, rate buckets, IP, CSRF.

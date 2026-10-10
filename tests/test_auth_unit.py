@@ -40,9 +40,12 @@ def test_session_token_roundtrip_with_jti():
     assert auth.parse_session_token(tok) == (42, 3, jti)
 
 
-def test_session_token_roundtrip_without_jti():
-    tok = auth.make_session_token(7, 1)
-    assert auth.parse_session_token(tok) == (7, 1, None)
+def test_session_token_without_jti_is_refused():
+    # Cookies from before per-device sessions can't be revoked one by one.
+    signed = auth._signer().sign(b"7:1").decode("utf-8")
+    assert auth.parse_session_token(signed) is None
+    signed = auth._signer().sign(b"7:1:").decode("utf-8")
+    assert auth.parse_session_token(signed) is None
 
 
 def test_parse_session_token_rejects_garbage():
@@ -50,10 +53,9 @@ def test_parse_session_token_rejects_garbage():
     assert auth.parse_session_token("not.a.valid.token") is None
 
 
-def test_parse_session_token_legacy_single_int():
-    # Pre-versioned cookies carried a bare int; the parser treats them as v0.
+def test_parse_session_token_legacy_single_int_is_refused():
     signed = auth._signer().sign(b"99").decode("utf-8")
-    assert auth.parse_session_token(signed) == (99, 0, None)
+    assert auth.parse_session_token(signed) is None
 
 
 def test_parse_session_token_non_int_payload_is_none():
