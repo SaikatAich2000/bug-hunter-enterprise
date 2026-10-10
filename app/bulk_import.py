@@ -33,7 +33,8 @@ from sqlalchemy.orm import Session
 from app import notification_service
 from app.access import accessible_project_ids, can_access_project, scope_event_query
 from app.config import get_settings
-from app.models import ROLE_ADMIN, Activity, Bug, Event, Project, User, user_projects
+from app.custom_values import check_value, required_message
+from app.models import ROLE_ADMIN, Activity, Bug, BugCustomValue, CustomField, Event, Project, User, user_projects
 from app.schemas import (
     ALLOWED_ENVIRONMENTS,
     ALLOWED_ITEM_TYPES,
@@ -177,6 +178,11 @@ def _find_header(rows: list[list[str]]) -> tuple[int, dict[int, str]]:
             if field_name:
                 col_map[col_idx] = field_name
         if _REQUIRED_HEADER_TOKENS.issubset(found_labels):
+            # Any other header may name a custom field of the row's project.
+            for col_idx, raw in enumerate(row):
+                label = raw.strip().lower()
+                if label and label not in _LABEL_TO_FIELD:
+                    col_map[col_idx] = "custom:" + label
             return i, col_map
     raise BulkImportError(
         "Could not find a header row with the expected columns (needs at "
@@ -192,6 +198,8 @@ class _Lookups:
     users_by_email: dict[str, User]
     users_by_name: dict[str, list[User]]
     members_by_project: dict[int, set[int]]
+    # project id -> lower-cased field name -> field (only the importer's accessible projects)
+    custom_fields: dict[int, dict[str, CustomField]] = field(default_factory=dict)
 
     def can_see(self, user: User, project: Project) -> bool:
         return user.role == ROLE_ADMIN or user.id in self.members_by_project.get(project.id, set())
@@ -226,7 +234,11 @@ def _load_lookups(db: Session, actor: User, accessible: set[int]) -> _Lookups:
     for user_id, project_id in member_rows:
         members_by_project.setdefault(project_id, set()).add(user_id)
 
-    return _Lookups(projects_by_name, events_by_name, users_by_email, users_by_name, members_by_project)
+    custom_fields: dict[int, dict[str, CustomField]] = {}
+    for f in db.scalars(select(CustomField).where(CustomField.project_id.in_(accessible))).all():
+        custom_fields.setdefault(f.project_id, {})[f.name.lower()] = f
+    return _Lookups(projects_by_name, events_by_name, users_by_email, users_by_name,
+                    members_by_project, custom_fields)
 
 
 @dataclass
@@ -244,6 +256,7 @@ class _RowPlan:
     reporter: User
     assignees: list[User] = field(default_factory=list)
     warning: str = ""
+    custom_values: dict[int, str] = field(default_factory=dict)
 
 
 def _resolve_row_title(cells: dict[str, str], row_num: int, errors: list[str]) -> str:
@@ -507,6 +520,19 @@ def _process_row(
         if reporter is not None and not lookups.can_see(reporter, project):
             errors.append(f"Reporter '{reporter.name}' is not a member of project '{project.name}'")
 
+    custom_values: dict[int, str] = {}
+    if project is not None:
+        by_name = lookups.custom_fields.get(project.id, {})
+        for key, raw in cells.items():
+            if key.startswith("custom:") and key[7:] in by_name:
+                try:
+                    custom_values[by_name[key[7:]].id] = check_value(by_name[key[7:]], raw)
+                except ValueError as exc:
+                    errors.append(str(exc))
+        missing = sorted(f.name for f in by_name.values() if f.is_required and not custom_values.get(f.id))
+        if missing:
+            errors.append(required_message(missing))
+
     if errors:
         return None, errors
     assert project is not None
@@ -519,7 +545,7 @@ def _process_row(
         title=title, item_type=item_type, project=project, event=event,
         status=status_val, priority=priority, environment=environment,
         due_date=due_date, description=description, reporter=reporter,
-        assignees=assignees, warning="; ".join(warn_parts),
+        assignees=assignees, warning="; ".join(warn_parts), custom_values=custom_values,
     )
     return plan, []
 
@@ -575,6 +601,9 @@ def _create_validated_rows(
     created_ids: list[int] = []
     for bug, plan in bug_plan_pairs:
         created_ids.append(bug.id)
+        for fid, value in plan.custom_values.items():
+            if value:
+                db.add(BugCustomValue(bug_id=bug.id, field_id=fid, value=value))
         db.add(Activity(
             org_id=actor.org_id, bug_id=bug.id, entity_type="bug", entity_id=bug.id,
             actor_user_id=actor.id, actor_name=actor.name, action="bug_created",

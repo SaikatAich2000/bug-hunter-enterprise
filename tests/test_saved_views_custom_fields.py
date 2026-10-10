@@ -119,12 +119,12 @@ def test_values_are_type_checked_and_required_fields_enforced(client):
     owner, _ = sign_up("Acme Corp", "owner@acme.test")
     pid = _project_id(owner)
     base = f"/api/projects/{pid}/custom-fields"
+    bug_id = _bug(owner, pid)  # created before the required field exists
     number = owner.post(base, json={"name": "Cost", "field_type": "number"}).json()["id"]
     when = owner.post(base, json={"name": "Due", "field_type": "date"}).json()["id"]
     pick = owner.post(base, json={"name": "Tier", "field_type": "select", "options": ["Gold", "Silver"],
                                   "is_required": True}).json()
     assert pick["options"] == ["Gold", "Silver"]
-    bug_id = _bug(owner, pid)
     url = f"/api/bugs/{bug_id}/custom-values"
 
     assert owner.put(url, json=[{"field_id": number, "value": "12.5"}]).status_code == 422  # Tier missing

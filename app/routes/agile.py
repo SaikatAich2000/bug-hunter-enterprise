@@ -38,6 +38,7 @@ from app.api_docs import (
     NOT_FOUND_VALIDATION_422,
 )
 from app.auth import get_current_user
+from app import custom_values as cv
 from app.database import get_db
 from app.models import AcceptanceCriterion, Activity, Board, Bug, Project, Sprint, User
 from app.people import reject_inactive, require_project_members, resolve_users
@@ -783,6 +784,15 @@ def create_agile_work_item(
     reject_inactive(assignees)
     require_project_members(db, assignees, project.id)
 
+    cfields = cv.project_fields(db, project.id)
+    try:
+        cvalues = cv.clean_incoming(cfields, payload.custom_values)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    missing = cv.missing_required(cfields, cvalues)
+    if missing:
+        raise HTTPException(status_code=422, detail=cv.required_message(missing))
+
     item = Bug(
         project_id=project.id,
         reporter_id=actor.id,
@@ -798,6 +808,7 @@ def create_agile_work_item(
     item.assignees = list(assignees)
     db.add(item)
     db.flush()
+    cv.write_values(db, item.id, cfields, cvalues)
 
     try:
         assign_hierarchy(db, item, payload.parent_id, payload.epic_id)

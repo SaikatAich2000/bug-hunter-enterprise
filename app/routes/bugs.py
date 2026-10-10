@@ -74,6 +74,7 @@ from app.email_service import (
     notify_comment_added,
 )
 from app.image_strip import ImageTooLarge, strip_image_metadata
+from app import custom_values as cv
 from app.models import (
     Activity,
     Attachment,
@@ -816,6 +817,15 @@ def create_bug(
     if payload.event_id is not None:
         _assert_event_accessible(db, actor, accessible, payload.event_id)
 
+    cfields = cv.project_fields(db, payload.project_id)
+    try:
+        cvalues = cv.clean_incoming(cfields, payload.custom_values)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    missing = cv.missing_required(cfields, cvalues)
+    if missing:
+        raise HTTPException(status_code=422, detail=cv.required_message(missing))
+
     bug = Bug(
         project_id=payload.project_id,
         title=payload.title,
@@ -833,6 +843,7 @@ def create_bug(
     bug.assignees = list(assignees)
     db.add(bug)
     db.flush()
+    cv.write_values(db, bug.id, cfields, cvalues)
     _log(
         db, bug.id, actor, "bug_created",
         f"{bug.item_type} #{bug.id} '{bug.title}' created with status '{bug.status}'.",
@@ -1407,6 +1418,8 @@ def update_bug(
     fields = payload.model_dump(exclude_unset=True)
     expected_version = fields.pop("expected_version", None)
     expected_updated_at = fields.pop("expected_updated_at", None)
+    fields.pop("custom_values", None)
+    custom_in = payload.custom_values
 
     bug = db.scalar(_eager_bug().where(Bug.id == bug_id))
     if bug is None:
@@ -1421,6 +1434,16 @@ def update_bug(
     _validate_update_authorization(bug, actor)
     _enforce_optimistic_concurrency(db, bug_id, expected_version, expected_updated_at)
     _validate_update_payload(fields, bug, db, actor, accessible)
+    cfields = cv.project_fields(db, fields.get("project_id") or bug.project_id)
+    try:
+        cvalues = cv.clean_incoming(cfields, custom_in) if custom_in is not None else {
+            fid: row.value for fid, row in cv.existing_values(db, bug_id).items() if fid in cfields
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    missing = cv.missing_required(cfields, cvalues)
+    if missing:
+        raise HTTPException(status_code=422, detail=cv.required_message(missing))
     # Reclassification: same table, same row id, common fields and relations
     # preserved. The guards run before any attribute is applied so a refused
     # conversion leaves the item completely untouched.
@@ -1452,6 +1475,8 @@ def update_bug(
     # freeze the pre-conversion id before the new item_type is applied.
     _preserve_display_id_on_type_change(fields, bug)
     changes = _compute_tracked_changes(bug, fields)
+    if custom_in is not None:
+        changes += [(f"custom_{n[:40]}", o, v) for n, o, v in cv.write_values(db, bug_id, cfields, cvalues)]
     old_status = bug.status
     if "sprint_id" in fields and fields["sprint_id"] != bug.sprint_id:
         # Planning work into or out of a sprint is backlog management, the

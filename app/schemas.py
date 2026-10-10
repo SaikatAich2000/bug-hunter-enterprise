@@ -854,6 +854,11 @@ class ProjectMembershipOut(BaseModel):
 
 
 # --- Bug ---
+class CustomValueIn(BaseModel):
+    field_id: int
+    value: str = Field(default="", max_length=2000)
+
+
 class BugCreate(BaseModel):
     project_id: int
     title: str = Field(max_length=200)
@@ -868,6 +873,7 @@ class BugCreate(BaseModel):
     due_date: Optional[str] = None
     # Link to an event at creation time.
     event_id: Optional[int] = None
+    custom_values: list[CustomValueIn] = Field(default_factory=list, max_length=200)
 
     @field_validator("title")
     @classmethod
@@ -935,6 +941,8 @@ class BugCreate(BaseModel):
 
 
 class BugUpdate(BaseModel):
+    # Replaces the item's custom-field values when given (same as PUT /custom-values).
+    custom_values: Optional[list[CustomValueIn]] = Field(default=None, max_length=200)
     project_id: Optional[int] = None
     title: Optional[str] = Field(default=None, max_length=200)
     description: Optional[str] = Field(default=None, max_length=1_000_000)
@@ -1949,6 +1957,7 @@ class AgileWorkItemCreateIn(BaseModel):
     title: str = Field(max_length=200)
     description: str = Field(default="", max_length=1_000_000)
     item_type: str
+    custom_values: list[CustomValueIn] = Field(default_factory=list, max_length=200)
     # Initial workflow status (e.g. the board's To Do column); "New" by default.
     status: str = Field(default="New")
     priority: str = Field(default="Medium")
