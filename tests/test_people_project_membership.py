@@ -240,6 +240,35 @@ def test_bulk_import_skips_outsider_assignees_and_rejects_outsider_reporters(adm
     assert [a["id"] for a in items[0]["assignees"]] == [member["id"]]
 
 
+def test_bulk_import_never_resolves_another_organizations_people(admin_client):
+    """Tenancy: a foreign user's email in the file resolves to nobody, so the assignee is
+    dropped with a warning and a foreign reporter fails the row."""
+    from tests.conftest import sign_up
+
+    home, _other, member, _outsider, _ = _setup(admin_client)
+    foreign_client, _me = sign_up("Org Three", "owner@three.test")
+    foreign_email = foreign_client.post("/api/users", json={
+        "name": "Foreign Finn", "email": "finn@three.test", "role": "user", "password": _PASSWORD,
+    }).json()["email"]
+    headers = {h.lower(): h for h in TEMPLATE_HEADERS}
+    project_col, title_col = headers["project"], headers["title"]
+    assignee_col = next(h for h in TEMPLATE_HEADERS if h.lower().startswith("assignee"))
+    reporter_col = next(h for h in TEMPLATE_HEADERS if h.lower() == "reporter email")
+    data = _xlsx([
+        {project_col: home["name"], title_col: "Cross import",
+         assignee_col: f"{member['email']}; {foreign_email}"},
+        {project_col: home["name"], title_col: "Cross reporter", reporter_col: foreign_email},
+    ])
+    res = admin_client.post("/api/bugs/import", files={
+        "file": ("items.xlsx", io.BytesIO(data), "application/octet-stream"),
+    })
+    assert res.status_code == 200, res.text
+    assert res.json()["created"] == 1, res.text
+    items = admin_client.get("/api/bugs?q=Cross import").json()["items"]
+    assert [a["id"] for a in items[0]["assignees"]] == [member["id"]]
+    assert foreign_client.get("/api/bugs?q=Cross").json()["items"] == []
+
+
 def test_people_of_another_organization_are_never_attachable(admin_client):
     """Tenancy: another org's user id is "unknown" on every write path, and never a member."""
     from app.database import SessionLocal
