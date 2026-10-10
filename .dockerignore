@@ -83,3 +83,6 @@ Thumbs.db
 # API fuzzing / property-testing caches (Schemathesis, Hypothesis)
 .schemathesis/
 .hypothesis/
+
+# Database dumps (scripts/backup.sh)
+backups/

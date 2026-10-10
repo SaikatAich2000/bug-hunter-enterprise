@@ -189,6 +189,7 @@ def sanitize_html(value: Optional[str]) -> str:
 # create/update. ALLOWED_STATUSES is the union for type-agnostic filters.
 _IN_PROGRESS = "In Progress"
 _END_DATE_CANNOT_PRECEDE_START = "End date cannot precede start date"
+_RELEASE_BEFORE_START = "The release date cannot be before the start date"
 _ACCEPTANCE_CRITERION_NOT_FOUND = "Acceptance criterion not found"
 _NOT_SET = "(not set)"
 
@@ -2409,6 +2410,12 @@ class VersionCreateIn(BaseModel):
         except ValueError as exc:
             raise ValueError(_DATE_FORMAT_ERROR) from exc
         return v
+
+    @model_validator(mode="after")
+    def _check_order(self) -> "VersionCreateIn":
+        if self.start_date and self.release_date and self.release_date < self.start_date:
+            raise ValueError(_RELEASE_BEFORE_START)
+        return self
 
 
 class VersionUpdateIn(BaseModel):

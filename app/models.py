@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     ForeignKey,
@@ -111,6 +112,20 @@ Index("idx_user_projects_project_id", user_projects.c.project_id)
 
 # Roles are enforced in app code, not DB constraints. Authoritative rules:
 # app/auth.py (can_edit_bug / can_delete_bug).
+def _one_of(column: str, values: tuple[str, ...]) -> str:
+    return f"{column} IN ({', '.join(repr(v) for v in values)})"
+
+
+# Database-level guards for values the API already validates, so a script, a bad migration
+# or a direct SQL edit can't store what the app could never read back. Added to existing
+# PostgreSQL databases as NOT VALID and then validated (app/database.py).
+ROLES = ("admin", "manager", "user")
+PRIORITIES = ("Low", "Medium", "High", "Critical")
+ENVIRONMENTS = ("DEV", "UAT", "PROD")
+ITEM_TYPES = ("Bug", "Requirement", "Task", "Epic", "Story", "Sub-task")
+SPRINT_STATES = ("future", "active", "closed", "cancelled")
+
+
 ROLE_ADMIN = "admin"
 ROLE_MANAGER = "manager"
 ROLE_USER = "user"
@@ -183,6 +198,7 @@ class User(Base):
     __table_args__ = (
         Index("idx_users_email", "email"),
         Index("idx_users_org_id", "org_id"),
+        CheckConstraint(_one_of("role", ROLES), name="ck_users_role"),
     )
 
 
@@ -419,6 +435,10 @@ class Bug(Base):
     )
 
     __table_args__ = (
+        CheckConstraint(_one_of("priority", PRIORITIES), name="ck_bugs_priority"),
+        CheckConstraint(_one_of("environment", ENVIRONMENTS), name="ck_bugs_environment"),
+        CheckConstraint(_one_of("item_type", ITEM_TYPES), name="ck_bugs_item_type"),
+        CheckConstraint("story_points IS NULL OR story_points >= 0", name="ck_bugs_story_points"),
         Index("idx_bugs_project_id", "project_id"),
         Index("idx_bugs_reporter_id", "reporter_id"),
         Index("idx_bugs_status", "status"),
@@ -1121,6 +1141,9 @@ class Sprint(Base):
     )
 
     __table_args__ = (
+        CheckConstraint(_one_of("state", SPRINT_STATES), name="ck_sprints_state"),
+        CheckConstraint("start_date IS NULL OR end_date IS NULL OR end_date >= start_date",
+                        name="ck_sprints_dates"),
         Index("idx_sprints_unique_name", "board_id", "name_normalized", unique=True),
         Index("idx_sprints_board_id", "board_id"),
         Index("idx_sprints_project_id", "project_id"),
@@ -1310,6 +1333,7 @@ class SprintCapacity(Base):
     )
 
     __table_args__ = (
+        CheckConstraint("capacity_value >= 0", name="ck_sprint_capacity_value"),
         Index("idx_sprint_capacity_unique", "sprint_id", "user_id", unique=True),
     )
 
@@ -1382,6 +1406,8 @@ class Version(Base):
     )
 
     __table_args__ = (
+        CheckConstraint("start_date IS NULL OR release_date IS NULL OR release_date >= start_date",
+                        name="ck_versions_dates"),
         Index("idx_versions_unique_name", "project_id", "name_normalized", unique=True),
         Index("idx_versions_project_id", "project_id"),
     )

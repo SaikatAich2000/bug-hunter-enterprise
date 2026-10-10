@@ -262,6 +262,10 @@ def update_version(
         raise HTTPException(status_code=409, detail=_DETAIL_VERSION_CONFLICT)
     fields = payload.model_dump(exclude_unset=True, exclude={"version"})
     _check_people(db, actor.org_id, _changed(v, fields), v.project_id, _RELEASE_PEOPLE)
+    start = fields.get("start_date") or v.start_date
+    release = fields.get("release_date") or v.release_date
+    if start and release and release < start:
+        raise HTTPException(status_code=422, detail="The release date cannot be before the start date")
     for key, value in fields.items():
         if key == "name" and value is not None:
             v.name_normalized = taxonomy_svc.normalize_name(value)

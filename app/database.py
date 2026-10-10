@@ -735,6 +735,55 @@ def _add_missing_indexes(conn) -> None:
                 _create_index_safely(conn, idx, table.name)
 
 
+def _add_missing_check_constraints(conn) -> None:
+    """Add the models' CHECK constraints that an existing PostgreSQL database lacks.
+
+    Each is added NOT VALID (it binds new and updated rows at once, without scanning or
+    locking the table), then validated in its own savepoint. A legacy row that violates it
+    leaves the constraint NOT VALID with a warning; nothing is rewritten. SQLite cannot add
+    a constraint to an existing table, so there only new databases get them.
+    """
+    from sqlalchemy import CheckConstraint, inspect
+
+    if conn.dialect.name != "postgresql":
+        return
+    inspector = inspect(conn)
+    pending = {name for (name,) in conn.execute(text(
+        "SELECT conname FROM pg_constraint WHERE contype = 'c' AND NOT convalidated"
+    ))}
+    for table in Base.metadata.sorted_tables:
+        wanted = [c for c in table.constraints if isinstance(c, CheckConstraint) and c.name]
+        if not wanted:
+            continue
+        try:
+            existing = {c["name"] for c in inspector.get_check_constraints(table.name)}
+        except SQLAlchemyError:
+            continue
+        for constraint in wanted:
+            if constraint.name in existing and constraint.name not in pending:
+                continue
+            if constraint.name not in existing:
+                try:
+                    with conn.begin_nested():
+                        conn.execute(text(
+                            f'ALTER TABLE "{table.name}" ADD CONSTRAINT "{constraint.name}" '
+                            f"CHECK ({constraint.sqltext}) NOT VALID"
+                        ))
+                except SQLAlchemyError:
+                    logger.exception("could not add constraint %s", constraint.name)
+                    continue
+            try:
+                with conn.begin_nested():
+                    conn.execute(text(
+                        f'ALTER TABLE "{table.name}" VALIDATE CONSTRAINT "{constraint.name}"'
+                    ))
+            except SQLAlchemyError:
+                logger.warning(
+                    "Existing rows in %s violate %s; it guards new writes but stays NOT VALID "
+                    "until those rows are fixed.", table.name, constraint.name,
+                )
+
+
 def _create_index_safely(conn, idx, table_name: str) -> None:
     """Create one missing index inside a SAVEPOINT.
 
@@ -833,6 +882,8 @@ def init_db(on_migrated: Callable[[], None] | None = None) -> bool:
             _backfill_bug_display_id(conn)
             _run_once(conn, "plain_text_storage_v1", _plain_text_storage)
             _align_agile_hierarchy(conn)
+            # After the data alignment, so upgraded rows already satisfy the constraints.
+            _add_missing_check_constraints(conn)
             # All DDL commits together (and releases the lock).
             conn.commit()
         except BaseException:

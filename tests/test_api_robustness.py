@@ -217,3 +217,20 @@ def test_quick_filter_json_is_capped(admin_client):
     res = admin_client.post(f"/api/agile/boards/{board_id}/quick-filters", json={"name": "Huge", "filter_json": huge})
     assert res.status_code == 422
     assert "at most 16 KB" in res.json()["detail"][0]["msg"]
+
+
+def test_database_refuses_values_the_app_could_never_read(admin_client):
+    import pytest
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
+
+    from app.database import SessionLocal
+
+    pid = admin_client.get("/api/projects").json()[0]["id"]
+    bug = admin_client.post("/api/bugs", json={"project_id": pid, "title": "Guarded"}).json()
+    for statement in ("UPDATE bugs SET priority = 'Urgent!!' WHERE id = :i",
+                      "UPDATE bugs SET story_points = -3 WHERE id = :i",
+                      "UPDATE users SET role = 'root' WHERE id = 1"):
+        with SessionLocal() as db, pytest.raises(IntegrityError):
+            db.execute(text(statement), {"i": bug["id"]})
+            db.commit()
