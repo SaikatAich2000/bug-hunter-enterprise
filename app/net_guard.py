@@ -41,13 +41,15 @@ def address_problem(ip: Address, allow_private: bool) -> Optional[str]:
     """Why ``ip`` may not be connected to, or None when it may."""
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
+    elif isinstance(ip, ipaddress.IPv6Address) and ip.sixtofour is not None:
+        ip = ip.sixtofour  # 2002:7f00:1:: reaches 127.0.0.1 through a 6to4 relay
     if any(ip in net for net in _METADATA if net.version == ip.version) or ip.is_link_local:
         return "a link-local or cloud metadata address"
     if ip.is_unspecified or ip.is_multicast:
         return "a reserved address"
     if ip.is_loopback or ip.is_private or (ip.version == 4 and ip in _SHARED):
         return None if allow_private else "a private network address"
-    if ip.is_reserved:
+    if ip.is_reserved or (not allow_private and not ip.is_global):
         return "a reserved address"
     return None
 

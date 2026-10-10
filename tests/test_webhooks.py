@@ -284,3 +284,83 @@ def test_board_work_items_and_transitions_emit_events(client, outbox):
     updated = json.loads(outbox[-1]["body"])
     assert updated["event"] == "bug.updated"
     assert updated["payload"]["changes"] == [{"field": "status", "old": item["status"], "new": target}]
+
+
+# ---- B.3 SSRF regressions -------------------------------------------------------------------
+
+@pytest.mark.parametrize("url", [
+    "http://100.100.100.200/latest/meta-data",       # Alibaba metadata (CGNAT range)
+    "http://100.64.0.1/hook",                         # CGNAT
+    "http://169.254.169.254/latest/meta-data",
+    "http://[::ffff:169.254.169.254]/x",              # IPv6-mapped metadata
+    "http://[::ffff:127.0.0.1]/x",                    # IPv6-mapped loopback
+    "http://[::ffff:10.0.0.5]/x",
+    "http://[2002:7f00:1::]/x",                       # 6to4 wrapper around 127.0.0.1
+    "http://[fe80::1]/x", "http://[fd00:ec2::254]/x",
+    "http://192.0.2.10/x",                            # documentation range: not global
+])
+def test_non_global_targets_are_refused_when_saving(client, url):
+    c, _ = sign_up("Acme Corp", "owner@acme.test")
+    assert _create(c, url=url).status_code == 422, url
+
+
+def test_metadata_stays_blocked_even_when_private_networks_are_allowed(client, monkeypatch):
+    from app.config import get_settings
+
+    c, _ = sign_up("Acme Corp", "owner@acme.test")
+    monkeypatch.setattr(get_settings(), "WEBHOOK_ALLOW_PRIVATE_NETWORKS", True)
+    assert _create(c, url="http://100.100.100.200/x").status_code == 422
+    assert _create(c, url="http://169.254.169.254/x").status_code == 422
+
+
+def test_a_rebinding_name_is_refused_at_connect_time(client, monkeypatch):
+    """The name passes every pre-check (resolves public) but answers with an internal address
+    when the socket is opened: the guarded transport refuses it and nothing is connected."""
+    import socket
+
+    import httpcore
+
+    import app.webhooks_delivery as wd
+    from app import net_guard
+    from app.database import SessionLocal
+    from app.models import Webhook
+
+    c, _ = sign_up("Acme Corp", "owner@acme.test")
+    hook_id = _create(c, url="https://rebind.example.com/hook").json()["id"]
+    answers = iter(["93.184.216.34", "100.100.100.200"])  # check passes, connect is rebound
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: [(2, 1, 6, "", (next(answers), 443))])
+    connected = []
+    monkeypatch.setattr(httpcore.SyncBackend, "connect_tcp",
+                        lambda self, host, *a, **k: connected.append(host))
+    with SessionLocal() as db:
+        org_id = db.get(Webhook, hook_id).org_id
+    wd.deliver_event(org_id, "webhook.ping", {}, hook_id)
+    assert connected == []
+    hook = c.get(f"/api/webhooks/{hook_id}").json()
+    assert hook["last_error"] == wd.PRIVATE_TARGET_MESSAGE
+    assert net_guard.HostNotAllowed  # the guard is what stopped it
+
+
+def test_delivery_connects_to_the_vetted_ip_and_never_follows_redirects(client, monkeypatch):
+    import socket
+
+    import httpcore
+
+    import app.webhooks_delivery as wd
+    from app.database import SessionLocal
+    from app.models import Webhook
+
+    c, _ = sign_up("Acme Corp", "owner@acme.test")
+    hook_id = _create(c, url="https://public.example.com/hook").json()["id"]
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 443))])
+    seen = []
+
+    def fake_connect(self, host, *a, **k):
+        seen.append(host)
+        raise httpcore.ConnectError("stop here")
+
+    monkeypatch.setattr(httpcore.SyncBackend, "connect_tcp", fake_connect)
+    with SessionLocal() as db:
+        org_id = db.get(Webhook, hook_id).org_id
+    wd.deliver_event(org_id, "webhook.ping", {}, hook_id)
+    assert seen == ["93.184.216.34"]  # the IP the guard vetted, not the name
