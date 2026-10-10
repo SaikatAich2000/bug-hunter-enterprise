@@ -164,7 +164,7 @@ services:
       BOOTSTRAP_ADMIN_RESET_PASSWORD: ${BOOTSTRAP_ADMIN_RESET_PASSWORD:-false}
 
       # Organizations, two-factor sign-in, webhooks, privacy and metrics (see .env.example).
-      ALLOW_PUBLIC_SIGNUP: ${ALLOW_PUBLIC_SIGNUP:-true}
+      ALLOW_PUBLIC_SIGNUP: ${ALLOW_PUBLIC_SIGNUP:-false}
       BCRYPT_ROUNDS: ${BCRYPT_ROUNDS:-12}
       TOTP_ENABLED: ${TOTP_ENABLED:-true}
       TOTP_RECOVERY_CODE_COUNT: ${TOTP_RECOVERY_CODE_COUNT:-10}

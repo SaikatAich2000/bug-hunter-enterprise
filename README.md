@@ -93,7 +93,7 @@ unique across the whole installation, so signing in needs no organization picker
 
 **Getting started.**
 
-- *Sign-up:* with `ALLOW_PUBLIC_SIGNUP=true` (the default) anyone can create an organization at `/signup`: it starts with a *General* project and its creator is the admin. Turn it off for a closed installation.
+- *Sign-up:* with `ALLOW_PUBLIC_SIGNUP=true` (off by default) anyone can create an organization at `/signup`: it starts with a *General* project and its creator is the admin. Turn it off for a closed installation.
 - *Bootstrap:* `BOOTSTRAP_ADMIN_EMAIL` / `_PASSWORD` create `BOOTSTRAP_ORG_NAME` and its admin on first boot. Leave the email empty to start with no account and rely on sign-up.
 - *Invitations:* **Organization → Invitations**. A manager can only attach projects they lead; only admins invite admins. An invitation for an address that already has an account anywhere is refused.
 
@@ -313,7 +313,7 @@ image or the repository. The ones that matter most:
 | `BOOTSTRAP_ADMIN_EMAIL` / `_PASSWORD` / `_NAME` | `admin@bughunter.local` (Compose) / _(required)_ / `Admin` | First admin, created only when the database has no users. |
 | `BOOTSTRAP_ORG_NAME` | `Default Organization` | Organization created together with the bootstrap admin. |
 | `BOOTSTRAP_ADMIN_RESET_PASSWORD` | `false` | Recovery: every boot resets the bootstrap admin's password to `BOOTSTRAP_ADMIN_PASSWORD`. Turn it off again afterwards. |
-| `ALLOW_PUBLIC_SIGNUP` | `true` | Anyone may create an organization at `/signup`. |
+| `ALLOW_PUBLIC_SIGNUP` | `false` | Anyone may create an organization at `/signup`. |
 | `TOTP_ENABLED` | `true` | Two-factor sign-in with an authenticator app (each user opts in). |
 | `BCRYPT_ROUNDS` | `12` | Cost of new password hashes (minimum 10). |
 | `FIELD_ENCRYPTION_KEY` | _(blank)_ | Fernet key encrypting 2FA and webhook secrets at rest. Values written under a key can't be read without it. |

@@ -337,6 +337,10 @@ def client(tmp_path, monkeypatch):
     # Off by default regardless of the real .env — most tests assume normal
     # login-gating; auto-login tests opt in via monkeypatch.
     monkeypatch.setenv("AUTO_LOGIN_ENABLED", "false")
+    # Sign-up is off by default in the product; the suite's helpers create orgs through it.
+    # Verification has its own tests (tests/test_identity.py) that switch it on.
+    monkeypatch.setenv("ALLOW_PUBLIC_SIGNUP", "true")
+    monkeypatch.setenv("EMAIL_VERIFICATION_REQUIRED", "false")
 
     # Dispose the previous engine before re-importing app modules so pooled
     # SQLite connections are closed when each isolated test database changes.
@@ -457,6 +461,10 @@ def db_session(tmp_path, monkeypatch):
     monkeypatch.setenv("PASSWORD_BREACH_CHECK_ENABLED", "false")
     monkeypatch.setenv("WEB_PUSH_ENABLED", "false")
     monkeypatch.setenv("AUTO_LOGIN_ENABLED", "false")
+    # Sign-up is off by default in the product; the suite's helpers create orgs through it.
+    # Verification has its own tests (tests/test_identity.py) that switch it on.
+    monkeypatch.setenv("ALLOW_PUBLIC_SIGNUP", "true")
+    monkeypatch.setenv("EMAIL_VERIFICATION_REQUIRED", "false")
 
     # Dispose the previous engine before replacing app modules and database URL.
     old_database = sys.modules.get("app.database")

@@ -222,8 +222,12 @@ class Settings:
     # signs out its devices. Leave it off; it overwrites the password on every boot.
     BOOTSTRAP_ADMIN_RESET_PASSWORD: bool = _env_bool("BOOTSTRAP_ADMIN_RESET_PASSWORD", False)
     # Multi-tenant sign-up: when true anyone may create an organization (and become its
-    # first admin) at /signup; when false only invitations and the bootstrap admin exist.
-    ALLOW_PUBLIC_SIGNUP: bool = _env_bool("ALLOW_PUBLIC_SIGNUP", True)
+    # first admin) at /signup; when false (the default) only invitations and the bootstrap
+    # admin exist. An open sign-up is an explicit decision of the operator.
+    ALLOW_PUBLIC_SIGNUP: bool = _env_bool("ALLOW_PUBLIC_SIGNUP", False)
+    # A public sign-up must prove ownership of its address (mailed link) before the first
+    # login. Accounts made by an invitation or an admin are already vouched for.
+    EMAIL_VERIFICATION_REQUIRED: bool = _env_bool("EMAIL_VERIFICATION_REQUIRED", True)
     # bcrypt cost for new password hashes (existing hashes keep verifying at their own cost).
     BCRYPT_ROUNDS: int = _env_int("BCRYPT_ROUNDS", 12, minimum=10)
     # Two-factor sign-in with an authenticator app (TOTP). Each user still opts in.
