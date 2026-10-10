@@ -181,7 +181,7 @@ def move_issues(
     return views_svc.issue_payloads(db, items, actor, done=done)
 
 
-@router.post("/work-items/{item_id}/transition", responses=BAD_REQUEST_NOT_FOUND_CONFLICT_422)
+@router.post("/work-items/{item_id}/transition", response_model=AgileIssueOut, responses=BAD_REQUEST_NOT_FOUND_CONFLICT_422)
 def transition_item(
     item_id: int, payload: WorkItemTransitionIn, background: BackgroundTasks,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
@@ -234,7 +234,7 @@ def transition_item(
     return _issue_out(db, item, actor)
 
 
-@router.put("/work-items/{item_id}/estimate", responses=NOT_FOUND_CONFLICT_VALIDATION_422)
+@router.put("/work-items/{item_id}/estimate", response_model=AgileIssueOut, responses=NOT_FOUND_CONFLICT_VALIDATION_422)
 def update_item_estimate(
     item_id: int, payload: WorkItemEstimateIn,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
@@ -272,7 +272,7 @@ def update_item_estimate(
     return _issue_out(db, item, actor)
 
 
-@router.post("/work-items/{item_id}/flag", responses=NOT_FOUND_CONFLICT_409)
+@router.post("/work-items/{item_id}/flag", response_model=AgileIssueOut, responses=NOT_FOUND_CONFLICT_409)
 def flag_item(
     item_id: int, payload: WorkItemFlagIn,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
@@ -291,7 +291,7 @@ def flag_item(
     return _issue_out(db, item, actor)
 
 
-@router.put("/work-items/{item_id}/taxonomy", responses=NOT_FOUND_CONFLICT_409)
+@router.put("/work-items/{item_id}/taxonomy", response_model=AgileIssueOut, responses=NOT_FOUND_CONFLICT_409)
 def update_item_taxonomy(
     item_id: int, payload: WorkItemTaxonomyIn,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
