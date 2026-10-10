@@ -2875,6 +2875,9 @@ def _validate_git_credential(value: Optional[str]) -> Optional[str]:
         return None
     if any(ch.isspace() or ord(ch) < 33 or ord(ch) == 127 for ch in candidate):
         raise ValueError("must not contain whitespace or control characters")
+    if not candidate.isascii():
+        # Tokens are ASCII; anything else cannot be sent in an Authorization header.
+        raise ValueError("must contain only ASCII characters")
     if len(candidate) > _GIT_CREDENTIAL_MAX_LENGTH:
         raise ValueError(f"must be at most {_GIT_CREDENTIAL_MAX_LENGTH} characters")
     return candidate

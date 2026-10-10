@@ -25,6 +25,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app import net_guard
 from app.access import accessible_project_ids, can_access_project
 from app.api_docs import (
     FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_503,
@@ -42,7 +43,7 @@ from app.database import get_db
 from app.git import branches as branch_svc
 from app.git import credentials as credential_svc
 from app.git.branches import BranchCreationError, BranchTarget
-from app.git.github import GitHubEnterpriseProvider
+from app.git.github import HOST_NOT_ALLOWED_MESSAGE, GitHubEnterpriseProvider, parse_base_url
 from app.git.naming import (
     display_id_for_branch,
     is_valid_branch_name,
@@ -248,13 +249,14 @@ def build_provider(
     return GitHubEnterpriseProvider(
         base_url=resolved_base_url,
         organization=resolved_organization,
-        token=_resolve_provider_token(config, token),
+        token=_resolve_provider_token(config, token, resolved_base_url),
     )
 
 def _resolve_provider_token(
-    config: ProjectGitConfig | None, draft_token: str | None
+    config: ProjectGitConfig | None, draft_token: str | None, base_url: str
 ) -> str | None:
-    """Credential precedence: draft PAT, then project PAT, then global token.
+    """Credential precedence: draft PAT, then project PAT, then global token, each
+    saved credential only for the server it belongs to (``credentials.resolve_token``).
 
     Raises a safe ``not_configured`` error when the project's stored credential
     cannot be decrypted, so a broken credential is never silently downgraded to
@@ -263,7 +265,7 @@ def _resolve_provider_token(
     if draft_token and draft_token.strip():
         # An explicit draft PAT wins, and is never persisted by this path.
         return draft_token.strip()
-    return credential_svc.resolve_token(config)
+    return credential_svc.resolve_token(config, base_url)
 
 def _credentials_configured(config: ProjectGitConfig | None = None) -> bool:
     """True when a credential exists for this project (own PAT or fallback)."""
@@ -579,6 +581,32 @@ def _apply_credential_operation(
         ) from None
     return "credential replaced" if replaced else "credential configured"
 
+_REENTER_TOKEN_MESSAGE = (
+    "Re-enter the access token when changing the Git server: a saved token is only "
+    "sent to the server it was saved for."
+)
+
+
+def _check_server_change(config: ProjectGitConfig, payload: GitIntegrationIn) -> None:
+    """Refuse a server the deployment may not reach, and a server change that would carry
+    the stored project token to a new host without it being re-entered."""
+    new_base = (payload.base_url or "").strip() or get_settings().GITHUB_API_URL
+    host = parse_base_url(new_base)[2]
+    try:
+        net_guard.allowed_addresses(host, 443, get_settings().GIT_ALLOW_PRIVATE_HOSTS)
+    except net_guard.HostNotAllowed:
+        raise HTTPException(status_code=422, detail=HOST_NOT_ALLOWED_MESSAGE) from None
+    except OSError:
+        pass  # Unresolvable here: saved as-is, and the connection test reports it.
+    if (
+        credential_svc.project_credential_stored(config)
+        and not payload.credential
+        and not payload.clear_credential
+        and not credential_svc.same_server(new_base, credential_svc.saved_base_url(config))
+    ):
+        raise HTTPException(status_code=422, detail=_REENTER_TOKEN_MESSAGE)
+
+
 @router.put("/projects/{project_id}/config", response_model=GitIntegrationOut,
             responses=_CONFIG_RESPONSES)
 def update_git_config(
@@ -603,6 +631,7 @@ def update_git_config(
     elif payload.version is not None and payload.version != config.version:
         raise HTTPException(status_code=409, detail=_DETAIL_VERSION_CONFLICT)
 
+    _check_server_change(config, payload)
     changes: list[str] = []
     for field in _CONFIG_FIELDS:
         value = getattr(payload, field)
@@ -644,6 +673,29 @@ def _record_connection_result(
     config.last_error = "" if ok else sanitize_provider_message(message)
     config.version += 1
     db.flush()
+
+_OTHER_SERVER_MESSAGE = (
+    "Enter an access token to test a different Git server: a saved token is only "
+    "sent to the server it was saved for."
+)
+
+
+def _draft_test_failed(
+    db: Session, actor: User, project: Project, config: ProjectGitConfig | None,
+    code: str, message: str,
+) -> dict:
+    _audit(
+        db, actor, "git_connection_test_failed",
+        config.id if config is not None else project.id,
+        f"Connection test failed for project '{project.name}' ({code}): {message} "
+        "[draft values were not saved]",
+    )
+    db.commit()
+    return {
+        "ok": False, "status": "error", "message": message,
+        "target": "", "checked_at": _now(), "error_code": code,
+    }
+
 
 @router.post("/projects/{project_id}/config/test", response_model=GitConnectionTestOut, responses=NOT_FOUND_404)
 def test_git_connection(
@@ -707,26 +759,6 @@ def test_git_connection(
             draft_branch = (settings.GITHUB_DEFAULT_BASE_BRANCH or "").strip()
     else:
         draft_branch = (draft.default_base_branch or "").strip()
-    if draft.credential:
-        draft_token: str | None = draft.credential
-    elif config is not None and credential_svc.project_credential_stored(config):
-        try:
-            draft_token = credential_svc.decrypt_credential(config.credential_encrypted)
-        except credential_svc.CredentialError as exc:
-            _audit(
-                db, actor, "git_connection_test_failed",
-                config.id if config is not None else project.id,
-                "Connection test failed for project "
-                f"'{project.name}' ({NOT_CONFIGURED}): {exc.message} "
-                "[draft values were not saved]",
-            )
-            db.commit()
-            return {
-                "ok": False, "status": "error", "message": exc.message,
-                "target": "", "checked_at": _now(), "error_code": NOT_CONFIGURED,
-            }
-    else:
-        draft_token = (settings.GITHUB_TOKEN or "").strip() or None
     if not draft_base:
         _audit(
             db, actor, "git_connection_test_failed",
@@ -769,6 +801,17 @@ def test_git_connection(
             "target": "", "checked_at": _now(),
             "error_code": INVALID_BASE_BRANCH,
         }
+    if draft.credential:
+        draft_token: str | None = draft.credential
+    else:
+        try:
+            draft_token = credential_svc.resolve_token(config, draft_base)
+        except GitProviderError as exc:
+            return _draft_test_failed(db, actor, project, config, exc.code, exc.message)
+        if draft_token is None and credential_svc.credentials_configured(config):
+            return _draft_test_failed(
+                db, actor, project, config, NOT_CONFIGURED, _OTHER_SERVER_MESSAGE,
+            )
     provider = build_provider(
         config, base_url=draft_base, organization=draft_org, token=draft_token,
     )

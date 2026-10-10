@@ -10,20 +10,26 @@ Design
   and never returned by an API response — the API only ever reports the boolean
   ``credentials_configured``.
 * When no encryption key is configured, projects without their own credential
-  keep working through the legacy global ``GITHUB_TOKEN`` fallback, but storing a
-  new project credential is refused with a clear, sanitized error.
+  keep working through the global ``GITHUB_TOKEN``, but storing a new project
+  credential is refused with a clear, sanitized error.
 
 Credential precedence (exactly, no other source exists)
 ------------------------------------------------------
-1. Project encrypted PAT (``project_git_configs.credential_encrypted``).
-2. Global ``GITHUB_TOKEN`` legacy fallback, for projects with no project PAT.
+1. Project encrypted PAT (``project_git_configs.credential_encrypted``), sent only to
+   the server the project is saved with.
+2. Global ``GITHUB_TOKEN``, for projects with no project PAT, sent only to
+   ``GITHUB_API_URL``.
 3. Not configured → the provider raises ``not_configured``.
+
+A token is never sent to any other server: pointing a project, or a connection test, at a
+different host never carries a saved credential there.
 """
 from __future__ import annotations
 
 import logging
 
 from app.config import get_settings
+from app.git.github import GitBaseUrlError, normalize_api_base
 from app.git.provider import NOT_CONFIGURED, GitProviderError
 
 logger = logging.getLogger("bug_hunter.git.credentials")
@@ -115,27 +121,52 @@ def project_credential_stored(config) -> bool:
     return bool((getattr(config, "credential_encrypted", "") or "").strip())
 
 
+def saved_base_url(config) -> str:
+    """The server this project is saved with (its own base URL, else the default)."""
+    own = (getattr(config, "base_url", "") or "").strip()
+    return own or (get_settings().GITHUB_API_URL or "").strip()
+
+
+def same_server(a: str, b: str) -> bool:
+    """True when two base URLs name the same Git API (compared after normalization)."""
+    try:
+        return normalize_api_base(a) == normalize_api_base(b)
+    except GitBaseUrlError:
+        return False
+
+
 def credentials_configured(config=None) -> bool:
-    """True when *some* credential is available (project PAT or global token)."""
+    """True when the project's own server has a credential (its PAT, or the global token
+    when the project uses the server ``GITHUB_API_URL`` names)."""
     if project_credential_stored(config):
         return True
-    return bool((get_settings().GITHUB_TOKEN or "").strip())
+    settings = get_settings()
+    return bool((settings.GITHUB_TOKEN or "").strip()) and same_server(
+        saved_base_url(config), settings.GITHUB_API_URL
+    )
 
 
-def resolve_token(config) -> str | None:
-    """Resolve the credential for one project. See the module docstring.
+def resolve_token(config, base_url: str | None = None) -> str | None:
+    """The credential for a request to ``base_url`` (default: the project's saved server).
 
-    An unreadable project credential is a hard configuration error: it never
-    silently degrades to the global token, which would send Project A's requests
-    to Project B's identity.
+    A project PAT is only returned for the server it was saved with, and the global token
+    only for ``GITHUB_API_URL``; any other server gets no credential. An unreadable project
+    credential is a hard configuration error: it never silently degrades to the global
+    token, which would send Project A's requests to Project B's identity.
     """
+    target = saved_base_url(config) if base_url is None else base_url
     if project_credential_stored(config):
+        if not same_server(target, saved_base_url(config)):
+            return None
         try:
             return decrypt_credential(config.credential_encrypted)
         except CredentialError as exc:
             raise GitProviderError(NOT_CONFIGURED, exc.message) from None
-    global_token = (get_settings().GITHUB_TOKEN or "").strip()
-    return global_token or None
+    settings = get_settings()
+    global_token = (settings.GITHUB_TOKEN or "").strip()
+    if global_token and same_server(target, settings.GITHUB_API_URL):
+        return global_token
+    return None
 
 
 __all__ = [
@@ -149,4 +180,6 @@ __all__ = [
     "encryption_available",
     "project_credential_stored",
     "resolve_token",
+    "same_server",
+    "saved_base_url",
 ]

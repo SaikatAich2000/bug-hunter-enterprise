@@ -361,11 +361,11 @@ class Settings:
 
     # --- GitHub (optional; branch creation only) ---
     # PAT-only auth. Two credential sources, in this order: a per-project PAT
-    # stored encrypted in project_git_configs, then the legacy global
-    # GITHUB_TOKEN below (kept only for backward compatibility with projects
-    # that have no project credential). Project rows also override the
-    # non-secret base URL / organization / default base branch, and those
-    # overrides always win over the environment.
+    # stored encrypted in project_git_configs (sent only to the server it was
+    # saved for), then the global GITHUB_TOKEN below (sent only to
+    # GITHUB_API_URL). Project rows also override the non-secret base URL /
+    # organization / default base branch, and those overrides always win over
+    # the environment.
     GIT_BRANCH_CREATION_ENABLED: bool = _env_bool("GIT_BRANCH_CREATION_ENABLED", False)
     GIT_BRANCH_DELETION_ENABLED: bool = _env_bool("GIT_BRANCH_DELETION_ENABLED", False)
     GITHUB_API_URL: str = os.getenv(
@@ -376,6 +376,9 @@ class Settings:
     # every public example. Tests set this explicitly via fixtures.
     GITHUB_ORGANIZATION: str = os.getenv("GITHUB_ORGANIZATION", "").strip()
     GITHUB_TOKEN: str = os.getenv("GITHUB_TOKEN", "").strip()
+    # The Git server may resolve to a private or loopback address only when this is on (an
+    # on-prem GitHub Enterprise). Link-local and cloud metadata addresses are never reachable.
+    GIT_ALLOW_PRIVATE_HOSTS: bool = _env_bool("GIT_ALLOW_PRIVATE_HOSTS", False)
     # Server-only Fernet key protecting project Git credentials at rest. Absent
     # means "no new project credential may be stored"; legacy global-token
     # operation keeps working. Never derived from SESSION_SECRET.

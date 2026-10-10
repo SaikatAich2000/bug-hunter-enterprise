@@ -26,6 +26,7 @@ from urllib.parse import quote, urlparse
 
 import httpx
 
+from app import net_guard
 from app.config import get_settings
 from app.git.provider import (
     AUTH_FAILED,
@@ -78,6 +79,12 @@ _API_SUFFIX = "/api/v3"
 INVALID_BASE_URL_MESSAGE = (
     "The configured Git base URL is not a usable provider URL; enter an https "
     "origin such as https://github.example.com"
+)
+
+# The base URL resolves to an address the server may not connect to (see app/net_guard.py).
+HOST_NOT_ALLOWED_MESSAGE = (
+    "The Git server address is on a private or reserved network. If your GitHub "
+    "Enterprise server is internal, set GIT_ALLOW_PRIVATE_HOSTS=true on the server."
 )
 
 # DNS resolution markers, checked against the exception chain.
@@ -343,6 +350,10 @@ class GitHubEnterpriseProvider:
             status_code=status,
         )
 
+    @staticmethod
+    def _host_not_allowed() -> GitProviderError:
+        return GitProviderError(INVALID_BASE_URL, HOST_NOT_ALLOWED_MESSAGE)
+
     def _transport_error(
         self, exc: BaseException, auth: str | None
     ) -> GitProviderError:
@@ -412,17 +423,27 @@ class GitHubEnterpriseProvider:
         # Fail closed before any network attempt. Verification is always on, via
         # the operating system trust store (corporate TLS interception included).
         ssl_context = system_trust_context()
+        allow_private = settings.GIT_ALLOW_PRIVATE_HOSTS
+        try:
+            net_guard.precheck(url, allow_private)
+        except net_guard.HostNotAllowed:
+            raise self._host_not_allowed() from None
 
         attempts = max(settings.GITHUB_MAX_RETRIES, 0) + 1
         last_error: GitProviderError | None = None
         for attempt in range(attempts):
             try:
                 with httpx.Client(
-                    timeout=self._timeouts(), verify=ssl_context
+                    timeout=self._timeouts(), verify=ssl_context,
+                    transport=net_guard.guarded_transport(
+                        verify=ssl_context, allow_private=allow_private
+                    ),
                 ) as client:
                     response = client.request(
                         method, url, headers=headers, params=params, json=json_body
                     )
+            except net_guard.HostNotAllowed:
+                raise self._host_not_allowed() from None
             except httpx.TimeoutException:
                 last_error = GitProviderError(
                     TIMEOUT, "GitHub did not respond in time"
