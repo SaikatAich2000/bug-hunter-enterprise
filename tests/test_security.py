@@ -552,14 +552,13 @@ class TestPasswordBreachCheck:
         digest = hashlib.sha1(pw.encode("utf-8")).hexdigest().upper()  # NOSONAR
         return f"{digest[5:]}:9999\n"
 
-    def test_unit_legacy_default_allowlisted_despite_breach_match(self):
-        """The legacy value is allowlisted and short-circuits before any network call."""
+    def test_unit_no_password_is_exempt_from_the_breach_check(self):
+        """Former "legacy" values get no special treatment: a corpus match is a breach."""
         from app import password_breach
-        body = self._force_match("legacy-default")
-        with mock.patch.object(password_breach, "_fetch_range", return_value=body) as m:
-            assert password_breach.is_password_breached("legacy-default") is False
-            assert password_breach.is_password_breached("LEGACY-DEFAULT") is False
-        m.assert_not_called()
+        for pw in ("legacy-default", "changeme"):
+            body = self._force_match(pw)
+            with mock.patch.object(password_breach, "_fetch_range", return_value=body):
+                assert password_breach.is_password_breached(pw) is True
 
     def test_change_password_rejects_breached(self, admin_client, monkeypatch):
         monkeypatch.setenv("PASSWORD_BREACH_CHECK_ENABLED", "true")

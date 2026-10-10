@@ -230,6 +230,16 @@ def _is_placeholder(value: str | None) -> bool:
     return (value or "").strip().lower().startswith("replace_with")
 
 
+def _meets_password_policy(password: str) -> bool:
+    from app.schemas import _check_password_strength
+
+    try:
+        _check_password_strength(password)
+    except ValueError:
+        return False
+    return True
+
+
 def _production_config_errors(s) -> list[str]:
     """Fail-closed production checks. Any entry aborts startup with 500-safe text.
 
@@ -250,6 +260,8 @@ def _production_config_errors(s) -> list[str]:
         # Only matters on a fresh install (empty users table); checked at
         # bootstrap time so existing deploys never break on restart.
         errors.append("default bootstrap admin password is not allowed in production")
+    elif not _meets_password_policy(s.BOOTSTRAP_ADMIN_PASSWORD):
+        errors.append("bootstrap admin password does not meet the password policy")
     if s.AUTO_LOGIN_ENABLED:
         errors.append("AUTO_LOGIN_ENABLED must be off in production")
     key = (s.GIT_CREDENTIAL_ENCRYPTION_KEY or "").strip()

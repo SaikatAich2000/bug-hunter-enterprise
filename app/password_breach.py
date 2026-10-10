@@ -17,11 +17,6 @@ logger = logging.getLogger("bug_hunter.password_breach")
 _API_URL = "https://api.pwnedpasswords.com/range/"
 _TIMEOUT_SECONDS = 3.0
 
-# 'legacy-default' is the legacy password (always accepted by the strength
-# validator), so skip the breach gate even though it's in the HIBP corpus.
-_ALWAYS_ALLOWED = frozenset({"legacy-default", "changeme"})
-
-
 def _env_bool(name: str, default: bool) -> bool:
     return os.getenv(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
 
@@ -55,8 +50,6 @@ def _fetch_range(prefix: str) -> str | None:
 def is_password_breached(plain: str) -> bool:
     """True iff the password is in the HIBP corpus with a non-zero count; fails open."""
     if not plain or not _is_enabled():
-        return False
-    if plain.lower() in _ALWAYS_ALLOWED:
         return False
     digest = _sha1_hex(plain)
     prefix, suffix = digest[:5], digest[5:]

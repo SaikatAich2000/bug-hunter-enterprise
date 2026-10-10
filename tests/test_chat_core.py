@@ -1383,10 +1383,14 @@ def test_cov_http_ask_report_forbidden_for_regular_user(user_client):
     assert r.json()["intent"] == "report_forbidden"
 
 
-def test_cov_legacy_default_password_still_valid():
-    # 'legacy-default' must always pass the strength policy.
+def test_cov_former_legacy_passwords_are_rejected():
+    # No password bypasses the strength policy.
+    import pytest
+
     from app.schemas import _check_password_strength
-    assert _check_password_strength("legacy-default") == "legacy-default"
+    for pw in ("legacy-default", "changeme"):
+        with pytest.raises(ValueError):
+            _check_password_strength(pw)
 
 
 # Focused coverage — partial branches, error paths, monkeypatched modules.

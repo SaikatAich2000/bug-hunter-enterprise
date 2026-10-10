@@ -193,16 +193,17 @@ def test_cov_update_user_duplicate_email_409(admin_client):
 
 
 def test_cov_update_user_role_change_and_password_reset(admin_client):
-    """Promote to manager + reset password in one PUT; legacy value stays accepted."""
+    """Promote to manager + reset password in one PUT."""
     u = _mk_user(admin_client, "Cov Promote", "cov.promote@example.com")
+    assert admin_client.put(f"/api/users/{u['id']}", json={"password": "changeme"}).status_code == 422
     r = admin_client.put(f"/api/users/{u['id']}",
-                         json={"role": "manager", "password": "legacy-default"})
+                         json={"role": "manager", "password": "Promoted2026"})
     assert r.status_code == 200
     assert r.json()["role"] == "manager"
     # Confirm the new password actually works.
     other_c = _new_client()
     rl = other_c.post("/api/auth/login",
-                      json={"email": "cov.promote@example.com", "password": "legacy-default"})
+                      json={"email": "cov.promote@example.com", "password": "Promoted2026"})
     assert rl.status_code == 200
 
 

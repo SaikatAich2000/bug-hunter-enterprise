@@ -1,4 +1,4 @@
-"""Configurable password policy + the legacy exception (_check_password_strength).
+"""Configurable password policy (_check_password_strength); no password is exempt.
 Imports live inside tests; Settings class attributes are patched so every instance sees the change.
 """
 import pytest
@@ -10,13 +10,10 @@ def _check():
     return _check_password_strength
 
 
-def test_legacy_default_always_accepted_even_with_raised_minimum(monkeypatch):
-    # The legacy value must pass even when the minimum is raised above 8.
-    import app.config as config
-    monkeypatch.setattr(config.Settings, "PASSWORD_MIN_LENGTH", 16)
-    check = _check()
-    assert check("legacy-default") == "legacy-default"
-    assert check("LEGACY-DEFAULT") == "LEGACY-DEFAULT"  # case-insensitive
+@pytest.mark.parametrize("pw", ["legacy-default", "LEGACY-DEFAULT", "changeme", "ChangeMe"])
+def test_no_password_bypasses_the_policy(pw):
+    with pytest.raises(ValueError):
+        _check()(pw)
 
 
 def test_default_rules_unchanged():

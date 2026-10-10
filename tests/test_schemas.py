@@ -237,14 +237,12 @@ def test_cov_validate_email_invalid_raises():
         s._validate_email("not-an-email")
 
 
-# _check_password_strength (including the legacy exception)
-def test_cov_password_legacy_default_exception_always_passes(monkeypatch):
-    # The legacy value bypasses normal strength checks regardless of the configured minimum.
-    import app.config as config
-    monkeypatch.setattr(config.Settings, "PASSWORD_MIN_LENGTH", 24)
+# _check_password_strength
+def test_cov_password_former_legacy_values_are_rejected():
     s = _S()
-    assert s._check_password_strength("legacy-default") == "legacy-default"
-    assert s._check_password_strength("LEGACY-DEFAULT") == "LEGACY-DEFAULT"
+    for pw in ("legacy-default", "LEGACY-DEFAULT", "changeme", "ChangeMe"):
+        with pytest.raises(ValueError):
+            s._check_password_strength(pw)
 
 
 def test_cov_password_valid_default():
@@ -325,11 +323,10 @@ def test_cov_userin_weak_password_raises():
         s.UserIn(name="Alice", email="a@b.com", password="short")
 
 
-def test_cov_userin_legacy_default_password_passes():
-    # The legacy value must pass the model-level check as well.
+def test_cov_userin_rejects_former_legacy_password():
     s = _S()
-    u = s.UserIn(name="Alice", email="a@b.com", password="legacy-default")
-    assert u.password == "legacy-default"
+    with pytest.raises(ValidationError):
+        s.UserIn(name="Alice", email="a@b.com", password="legacy-default")
 
 
 # --- UserUpdate  (Optional fields: None -> early-return branches) ---

@@ -335,10 +335,6 @@ def _normalize_project_role(v: str) -> str:
 def _check_password_strength(v: str) -> str:
     if not isinstance(v, str):
         raise ValueError("Password must be a string")
-    # 'legacy-default' is the legacy value; always accept so upgrades raising
-    # PASSWORD_MIN_LENGTH don't lock out existing accounts.
-    if v.lower() in ("legacy-default", "changeme"):
-        return v
     # DoS guard — bcrypt cost scales with input length.
     if len(v) > 200:
         raise ValueError("Password is too long")

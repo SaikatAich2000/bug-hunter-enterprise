@@ -248,8 +248,7 @@ class Settings:
     AUTO_LOGIN_ENABLED: bool = _env_bool("AUTO_LOGIN_ENABLED", False)
 
     # --- Password policy ----------------------------------------------------
-    # Enforced in app/schemas._check_password_strength; legacy "legacy-default" is
-    # intentionally exempt.
+    # Enforced in app/schemas._check_password_strength whenever a password is set.
     PASSWORD_MIN_LENGTH: int = _env_int("PASSWORD_MIN_LENGTH", 8, minimum=1)
     # Require at least one letter and one digit.
     PASSWORD_REQUIRE_COMPLEXITY: bool = _env_bool("PASSWORD_REQUIRE_COMPLEXITY", True)
