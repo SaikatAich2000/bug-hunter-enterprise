@@ -1,4 +1,4 @@
-/** The board's estimation statistic, as Jira applies it: story points,
+/** The board's estimation statistic: story points,
  * original time estimate (hours) or issue count. Unestimated issues count 0. */
 
 export const STATISTIC_LABELS = {
@@ -43,7 +43,7 @@ export function formatNumber(value) {
 }
 
 /**
- * Jira's sprint header lozenges: the statistic summed by status category.
+ * Sprint header lozenges: the statistic summed by status category.
  * Testing counts as in progress.
  */
 export function categoryTotals(issues, mode) {

@@ -1,4 +1,4 @@
-/** Work-item types, modelled on Jira Software:
+/** Work-item types:
  *
  *   Epic  →  Story · Task · Bug · Requirement (standard issues)  →  Sub-task
  *
@@ -29,7 +29,7 @@ const ICONS = {
   "Sub-task": "🔹",
 };
 
-/** Display name of a stored type (types are named as in Jira). */
+/** Display name of a stored type. */
 export function itemTypeLabel(type) {
   return type || "Bug";
 }

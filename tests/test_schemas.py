@@ -237,14 +237,12 @@ def test_cov_validate_email_invalid_raises():
         s._validate_email("not-an-email")
 
 
-# _check_password_strength (including the legacy exception)
-def test_cov_password_legacy_default_exception_always_passes(monkeypatch):
-    # The legacy value bypasses normal strength checks regardless of the configured minimum.
-    import app.config as config
-    monkeypatch.setattr(config.Settings, "PASSWORD_MIN_LENGTH", 24)
+# _check_password_strength
+def test_cov_password_former_legacy_values_are_rejected():
     s = _S()
-    assert s._check_password_strength("legacy-default") == "legacy-default"
-    assert s._check_password_strength("LEGACY-DEFAULT") == "LEGACY-DEFAULT"
+    for pw in ("legacy-default", "LEGACY-DEFAULT", "changeme", "ChangeMe"):
+        with pytest.raises(ValueError):
+            s._check_password_strength(pw)
 
 
 def test_cov_password_valid_default():
@@ -325,11 +323,10 @@ def test_cov_userin_weak_password_raises():
         s.UserIn(name="Alice", email="a@b.com", password="short")
 
 
-def test_cov_userin_legacy_default_password_passes():
-    # The legacy value must pass the model-level check as well.
+def test_cov_userin_rejects_former_legacy_password():
     s = _S()
-    u = s.UserIn(name="Alice", email="a@b.com", password="legacy-default")
-    assert u.password == "legacy-default"
+    with pytest.raises(ValidationError):
+        s.UserIn(name="Alice", email="a@b.com", password="legacy-default")
 
 
 # --- UserUpdate  (Optional fields: None -> early-return branches) ---
@@ -476,13 +473,12 @@ def test_cov_bugcreate_short_title_raises():
         s.BugCreate(project_id=1, title="ab")
 
 
-def test_cov_bugcreate_description_sanitized():
-    # Description is stripped and flattened to plain text on creation.
+def test_cov_bugcreate_description_is_plain_text():
+    # Description is plain text: trimmed and stripped of control characters, otherwise kept.
     s = _S()
     b = s.BugCreate(project_id=1, title="Title here",
-                    description="  <b>x</b><script>bad</script>  ")
-    assert b.description == "x"
-    assert "<script>" not in b.description
+                    description="  <b>x</b>\x07 a < b\r\nnext  ")
+    assert b.description == "<b>x</b> a < b\nnext"
 
 
 def test_cov_bugcreate_bad_item_type_raises():
@@ -554,21 +550,21 @@ def test_cov_bugcreate_strip_desc_non_string_passthrough():
 
 
 # --- BugUpdate — Optional everything (None early-returns) ---
-def test_cov_bugupdate_all_none_passes():
+def test_cov_bugupdate_nullable_fields_accept_none():
     # Explicit None exercises each optional validator's early-return branch.
     s = _S()
-    u = s.BugUpdate(project_id=None, title=None, description=None,
-                    reporter_id=None, assignee_ids=None, item_type=None,
-                    status=None, priority=None, environment=None,
+    u = s.BugUpdate(description=None, reporter_id=None, assignee_ids=None,
                     due_date=None, event_id=None)
-    assert u.title is None
     assert u.description is None
-    assert u.item_type is None
-    assert u.status is None
-    assert u.priority is None
-    assert u.environment is None
     assert u.due_date is None
     assert u.assignee_ids is None
+
+
+@pytest.mark.parametrize("field", ["project_id", "title", "item_type", "status", "priority", "environment"])
+def test_cov_bugupdate_required_fields_refuse_null(field):
+    s = _S()
+    with pytest.raises(ValidationError, match=f"{field} cannot be null"):
+        s.BugUpdate(**{field: None})
 
 
 def test_cov_bugupdate_values_validated():
@@ -582,7 +578,7 @@ def test_cov_bugupdate_values_validated():
     assert u.status == "Blocked"
     assert u.priority == "Low"
     assert u.environment == "UAT"
-    assert "<script>" not in u.description
+    assert u.description == "<b>k</b><script>x</script>"  # plain text, escaped when rendered
     assert u.assignee_ids == [2, 5]
     assert u.due_date == "2026-02-02"
 
@@ -712,13 +708,15 @@ def test_cov_eventcreate_strip_desc_non_string_passthrough():
 
 # --- EventUpdate  (Optional: None early-returns + dedup) ---
 def test_cov_eventupdate_all_none_passes():
-    # Explicit None exercises the None-return branch in each optional validator.
+    # Explicit None exercises the None-return branch in each optional validator; the name
+    # may be left out but never set to null.
     s = _S()
-    u = s.EventUpdate(name=None, description=None, scheduled_for=None,
-                      manager_ids=None)
+    u = s.EventUpdate(description=None, scheduled_for=None, manager_ids=None)
     assert u.name is None
     assert u.scheduled_for is None
     assert u.manager_ids is None
+    with pytest.raises(ValidationError, match="name cannot be null"):
+        s.EventUpdate(name=None)
 
 
 def test_cov_eventupdate_values_validated():

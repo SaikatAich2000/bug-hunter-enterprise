@@ -13,6 +13,7 @@ import {
   useRef,
 } from "react";
 import { fileTooLargeMessage } from "../lib/upload";
+import { sanitizeHtml } from "../lib/sanitize";
 import { toast } from "../lib/toast";
 
 // Unsafe-file filter: blocks executable extensions/MIME types from the attachment grid.
@@ -785,7 +786,7 @@ const RichEditor = forwardRef(function RichEditor(
     const ta = nativeRef.current;
     if (!editor || !ta) return;
     if (editor.innerHTML !== ta.value) {
-      editor.innerHTML = ta.value;
+      editor.innerHTML = sanitizeHtml(ta.value);
       sync();
       scheduleSnapshot();
     }
@@ -921,7 +922,7 @@ const RichEditor = forwardRef(function RichEditor(
     const editor = editorRef.current;
     const history = historyRef.current;
     if (editor) {
-      editor.innerHTML = initialHtmlRef.current;
+      editor.innerHTML = sanitizeHtml(initialHtmlRef.current);
       resetHistory();
     }
     return () => {
@@ -950,7 +951,9 @@ const RichEditor = forwardRef(function RichEditor(
     setHtml(html) {
       const editor = editorRef.current;
       if (!editor) return;
-      editor.innerHTML = html || "";
+      // Whatever arrives here (stored comments, drafts) is rendered as live HTML in the
+      // editor, so it goes through the same sanitizer as every other HTML we display.
+      editor.innerHTML = sanitizeHtml(html);
       sync();
       resetHistory(); // wholesale replace — reset history so Ctrl+Z can't jump to old content
 

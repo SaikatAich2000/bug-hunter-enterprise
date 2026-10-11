@@ -74,7 +74,7 @@ def test_password_toggle_css_present(cls):
     assert cls in _read(STYLES), f"styles.css missing {cls!r}"
 
 
-# The legacy client-side exception
-def test_client_validator_allows_legacy_default():
-    # The legacy value is whitelisted case-insensitively before length/complexity so UI matches backend.
-    assert 'toLowerCase() === "legacy-default"' in _read(CONSTANTS)
+# No client-side exemption: the UI applies the same policy to every password.
+def test_client_validator_has_no_exempt_passwords():
+    src = _read(CONSTANTS)
+    assert "legacy-default" not in src and "changeme" not in src.lower()

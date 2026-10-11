@@ -53,10 +53,11 @@ def test_an_encrypted_value_cannot_be_read_without_or_with_the_wrong_key(box):
         secrets_box.unseal(sealed)
 
 
-def test_an_invalid_key_falls_back_to_plain_storage(box):
+def test_an_invalid_key_fails_closed_instead_of_storing_plaintext(box):
     secrets_box, set_key = box
     set_key("not-a-fernet-key")
-    assert secrets_box.seal("s3cret") == "s3cret"
+    with pytest.raises(secrets_box.SecretKeyInvalid):
+        secrets_box.seal("s3cret")
 
 
 def test_two_factor_and_webhook_secrets_are_encrypted_in_the_database(client, box):
@@ -149,3 +150,77 @@ def test_invitation_acceptance_conflicts(client, monkeypatch):
     weak_token = sent[-1].rsplit("token=", 1)[1]
     assert new_client().post("/api/invitations/accept",
                              json={"token": weak_token, "name": "Weak", "password": "short"}).status_code == 422
+
+
+def test_previous_keys_still_decrypt_after_rotation(box, monkeypatch):
+    from app.config import get_settings
+
+    secrets_box, set_key = box
+    old, new = Fernet.generate_key().decode(), Fernet.generate_key().decode()
+    set_key(old)
+    sealed_old = secrets_box.seal("s3cret")
+    set_key(new)
+    with pytest.raises(secrets_box.SecretUnreadable):
+        secrets_box.unseal(sealed_old)  # the retired key alone is gone
+    monkeypatch.setattr(get_settings(), "FIELD_ENCRYPTION_KEY_PREVIOUS", old)
+    assert secrets_box.unseal(sealed_old) == "s3cret"
+    resealed = secrets_box.seal(secrets_box.unseal(sealed_old))
+    monkeypatch.setattr(get_settings(), "FIELD_ENCRYPTION_KEY_PREVIOUS", "")
+    assert secrets_box.unseal(resealed) == "s3cret"  # new writes use only the current key
+
+
+def _prod(**over):
+    import types
+
+    base = dict(
+        SESSION_SECRET="x" * 40, BOOTSTRAP_ADMIN_EMAIL="admin@x.test", BOOTSTRAP_ADMIN_PASSWORD="Strong-Pass-1",
+        AUTO_LOGIN_ENABLED=False, COOKIE_SECURE=True, APP_BASE_URL="https://bh.example.com",
+        EMAIL_BACKEND="smtp", GIT_CREDENTIAL_ENCRYPTION_KEY="", is_production_env=True,
+        FIELD_ENCRYPTION_KEY=Fernet.generate_key().decode(), FIELD_ENCRYPTION_KEY_PREVIOUS="",
+    )
+    return types.SimpleNamespace(**{**base, **over})
+
+
+def test_production_refuses_to_start_without_a_valid_field_key():
+    from app.main import _production_config_errors
+
+    assert _production_config_errors(_prod()) == []
+    assert any("FIELD_ENCRYPTION_KEY must be set" in e for e in _production_config_errors(_prod(FIELD_ENCRYPTION_KEY="")))
+    assert any("not a valid" in e for e in _production_config_errors(_prod(FIELD_ENCRYPTION_KEY="nope")))
+    assert any("not a valid" in e for e in _production_config_errors(_prod(FIELD_ENCRYPTION_KEY_PREVIOUS="nope")))
+
+
+def test_startup_job_encrypts_plaintext_secrets_in_every_org_once(client, box):
+    from sqlalchemy import text
+
+    from app.database import SessionLocal, _seal_secrets_if_keyed
+    from app.models import User, Webhook
+
+    _, set_key = box
+    ca, _ = sign_up("Acme Corp", "owner@acme.test")
+    cb, _ = sign_up("Beta Corp", "owner@beta.test")
+    for c in (ca, cb):
+        c.post("/api/auth/2fa/begin")
+        c.post("/api/webhooks", json={"name": "H", "url": "https://hooks.example.com/x"})
+    with SessionLocal() as db:
+        plain = [u.totp_secret for u in db.query(User).filter(User.totp_secret.isnot(None))]
+        plain += [h.secret for h in db.query(Webhook)]
+    assert len(plain) == 4 and not any(v.startswith("enc:") for v in plain)
+
+    marker = "SELECT count(*) FROM app_migrations WHERE name='encrypt_plain_secrets_v1'"
+    with SessionLocal() as db:  # no key: the job must stay pending, not be recorded
+        _seal_secrets_if_keyed(db.connection())
+        assert db.execute(text(marker)).scalar() == 0
+        db.commit()
+    set_key(Fernet.generate_key().decode())
+    for _ in range(2):  # second run is a no-op
+        with SessionLocal() as db:
+            _seal_secrets_if_keyed(db.connection())
+            db.commit()
+    with SessionLocal() as db:
+        now = [u.totp_secret for u in db.query(User).filter(User.totp_secret.isnot(None))]
+        now += [h.secret for h in db.query(Webhook)]
+        assert all(v.startswith("enc:v1:") for v in now) and len(now) == 4
+        assert db.execute(text(marker)).scalar() == 1
+    from app.secrets_box import unseal
+    assert sorted(unseal(v) for v in now) == sorted(plain)

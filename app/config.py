@@ -182,11 +182,14 @@ class Settings:
     # fail-closed hardening checks (see is_production and app/main.py).
     APP_ENV: str = os.getenv("APP_ENV", "").strip().lower()
 
-    # Request-body ceiling; over-limit requests get 413 before the body is read,
-    # so a huge Content-Length can't exhaust RAM.
+    # Upload (multipart) body ceiling; over-limit requests get 413 before the body
+    # is read, so a huge Content-Length can't exhaust RAM.
     MAX_REQUEST_BODY_BYTES: int = _env_int(
         "MAX_REQUEST_BODY_BYTES", 60 * 1024 * 1024, minimum=1024
     )
+    # Ceiling for every non-upload body (JSON). The largest legitimate one is a
+    # description at its 1,000,000-character limit.
+    MAX_JSON_BODY_BYTES: int = _env_int("MAX_JSON_BODY_BYTES", 2 * 1024 * 1024, minimum=1024)
 
     APP_BASE_URL: str = os.getenv("APP_BASE_URL", "").strip() or _default_base_url()
 
@@ -198,9 +201,6 @@ class Settings:
     SESSION_TTL_SECONDS: int = _env_int("SESSION_TTL_SECONDS", 86400, minimum=60)
     # Set true behind HTTPS so the cookie is TLS-only.
     COOKIE_SECURE: bool = _env_bool("COOKIE_SECURE", False)
-    # Reject legacy jti-less cookies (not revocable per-device); flip on after
-    # a migration window.
-    SESSION_REQUIRE_JTI: bool = _env_bool("SESSION_REQUIRE_JTI", False)
     # /docs, /redoc, /openapi.json are always on in development; a production
     # deploy (see is_production) turns them off unless this is true.
     ENABLE_API_DOCS: bool = _env_bool("ENABLE_API_DOCS", False)
@@ -240,6 +240,8 @@ class Settings:
     # Optional Fernet key encrypting TOTP secrets and webhook signing secrets at rest
     # (values written without a key stay readable and are encrypted when next saved).
     FIELD_ENCRYPTION_KEY: str = os.getenv("FIELD_ENCRYPTION_KEY", "").strip()
+    # Comma-separated retired keys, kept only so values sealed under them stay readable.
+    FIELD_ENCRYPTION_KEY_PREVIOUS: str = os.getenv("FIELD_ENCRYPTION_KEY_PREVIOUS", "").strip()
     # Shown on the public privacy page as the contact for privacy questions.
     PRIVACY_CONTACT_EMAIL: str = os.getenv("PRIVACY_CONTACT_EMAIL", "").strip()
     # Audit rows older than this many days are purged daily; 0 keeps everything.
@@ -256,8 +258,7 @@ class Settings:
     AUTO_LOGIN_ENABLED: bool = _env_bool("AUTO_LOGIN_ENABLED", False)
 
     # --- Password policy ----------------------------------------------------
-    # Enforced in app/schemas._check_password_strength; legacy "legacy-default" is
-    # intentionally exempt.
+    # Enforced in app/schemas._check_password_strength whenever a password is set.
     PASSWORD_MIN_LENGTH: int = _env_int("PASSWORD_MIN_LENGTH", 8, minimum=1)
     # Require at least one letter and one digit.
     PASSWORD_REQUIRE_COMPLEXITY: bool = _env_bool("PASSWORD_REQUIRE_COMPLEXITY", True)
@@ -368,13 +369,20 @@ class Settings:
     FIREBASE_APP_ID: str = os.getenv("FIREBASE_APP_ID", "")
     FIREBASE_VAPID_KEY: str = os.getenv("FIREBASE_VAPID_KEY", "")
 
+    # --- Retention (app/jobs/retention.py, run daily by the app) ---
+    # Days to keep notifications and Sleuth conversations (by last activity); 0 keeps them
+    # forever. Expired sessions, reset tokens and idempotency keys are always removed.
+    NOTIFICATION_RETENTION_DAYS: int = _env_int("NOTIFICATION_RETENTION_DAYS", 180, minimum=0)
+    CHAT_RETENTION_DAYS: int = _env_int("CHAT_RETENTION_DAYS", 180, minimum=0)
+    RETENTION_JOB_ENABLED: bool = _env_bool("RETENTION_JOB_ENABLED", True)
+
     # --- GitHub (optional; branch creation only) ---
     # PAT-only auth. Two credential sources, in this order: a per-project PAT
-    # stored encrypted in project_git_configs, then the legacy global
-    # GITHUB_TOKEN below (kept only for backward compatibility with projects
-    # that have no project credential). Project rows also override the
-    # non-secret base URL / organization / default base branch, and those
-    # overrides always win over the environment.
+    # stored encrypted in project_git_configs (sent only to the server it was
+    # saved for), then the global GITHUB_TOKEN below (sent only to
+    # GITHUB_API_URL). Project rows also override the non-secret base URL /
+    # organization / default base branch, and those overrides always win over
+    # the environment.
     GIT_BRANCH_CREATION_ENABLED: bool = _env_bool("GIT_BRANCH_CREATION_ENABLED", False)
     GIT_BRANCH_DELETION_ENABLED: bool = _env_bool("GIT_BRANCH_DELETION_ENABLED", False)
     GITHUB_API_URL: str = os.getenv(
@@ -385,6 +393,9 @@ class Settings:
     # every public example. Tests set this explicitly via fixtures.
     GITHUB_ORGANIZATION: str = os.getenv("GITHUB_ORGANIZATION", "").strip()
     GITHUB_TOKEN: str = os.getenv("GITHUB_TOKEN", "").strip()
+    # The Git server may resolve to a private or loopback address only when this is on (an
+    # on-prem GitHub Enterprise). Link-local and cloud metadata addresses are never reachable.
+    GIT_ALLOW_PRIVATE_HOSTS: bool = _env_bool("GIT_ALLOW_PRIVATE_HOSTS", False)
     # Server-only Fernet key protecting project Git credentials at rest. Absent
     # means "no new project credential may be stored"; legacy global-token
     # operation keeps working. Never derived from SESSION_SECRET.

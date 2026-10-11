@@ -1,4 +1,4 @@
-/** Backlog (Jira Scrum): open sprints above the ranked backlog. Drag issues
+/** Backlog: open sprints above the ranked backlog. Drag issues
  * to rank them or to move them between sprints and the backlog; every row
  * also has a "⋯ Move to" menu, the keyboard alternative. */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -22,7 +22,7 @@ import ActionMenu from "./ActionMenu";
 import {
   CategoryTotals, EpicLozenge, EstimateBadge, IssueKey, PriorityIcon, StatusLozenge, SubtaskProgress, TypeIcon,
 } from "./IssueBits";
-import { AssigneeStack, formatDateRange, localToday } from "./agileShared";
+import { AssigneeStack, defaultSprintName, formatDateRange, localToday } from "./agileShared";
 import { CompleteSprintDialog, SprintFormDialog, StartSprintDialog } from "./SprintDialogs";
 import {
   BACKLOG_KEY, containerSprintId, daysRemaining, findContainer, matchesIssueFilter, moveLocally, planDrop, sprintKey,
@@ -316,7 +316,7 @@ export default function BacklogPanel({ canManage, board, onOpenTab }) {
     ...(users || []).filter((u) => u.is_active).map((u) => ({ value: String(u.id), label: u.name })),
   ];
   const today = localToday();
-  const nextName = `${(board.name || "Board").replace(/ Board$/, "")} Sprint ${sprints.length + 1}`;
+  const nextName = defaultSprintName(board.name, sprints);
   const canStartAnother = data.parallel_sprints || activeSprints.length === 0;
   const activeIssue = activeId != null ? issueById.get(activeId) : null;
 

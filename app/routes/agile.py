@@ -38,8 +38,10 @@ from app.api_docs import (
     NOT_FOUND_VALIDATION_422,
 )
 from app.auth import get_current_user
+from app import custom_values as cv
 from app.database import get_db
 from app.models import AcceptanceCriterion, Activity, Board, Bug, Project, Sprint, User
+from app.people import reject_inactive, require_project_members, resolve_users
 from app.schemas import (
     AcceptanceCriterionIn,
     AcceptanceCriterionOut,
@@ -183,17 +185,12 @@ def get_agile_settings(
 ) -> dict:
     project = _get_project_or_404(db, project_id, user)
     board = boards_svc.get_default_board(db, project_id)
-    # Self-heal: a project whose board row is missing (e.g. a data reset removed
-    # the board while `agile_enabled` stayed true) would otherwise leave the
-    # Sprint Board and Sprint Items tabs permanently blank, because both panels
-    # only render when `agile_enabled && board_id`. Repairing the flag here makes
-    # the state consistent again and points the UI at the Enable Agile panel.
-    if project.agile_enabled and board is None:
-        project.agile_enabled = False
-        db.commit()
+    # A project whose board row is missing (e.g. a data reset removed it while the flag stayed
+    # on) reads as not enabled, which points the UI at the Enable Agile panel; enabling it
+    # again recreates the board. A GET never writes.
     return {
         "project_id": project.id,
-        "agile_enabled": project.agile_enabled,
+        "agile_enabled": bool(project.agile_enabled and board is not None),
         "agile_feature_flags": project.agile_feature_flags or {},
         "board_id": board.id if board else None,
     }
@@ -293,7 +290,7 @@ def replace_board_columns(
     board_id: int, payload: BoardColumnsReplaceIn,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
 ) -> dict:
-    """Board configuration > Columns (Jira): the ordered columns and the
+    """Board configuration > Columns: the ordered columns and the
     statuses each one shows. Existing columns are updated in place when their
     id is sent; the rest are created, and columns left out are removed. A
     status may sit in one column only; the right-most column is the one that
@@ -482,60 +479,21 @@ def list_sprints_route(
     return [_sprint_out(db, s, counts.get(s.id, 0)) for s in sprints]
 
 
-@router.post("/sprints", status_code=status.HTTP_201_CREATED, responses=NOT_FOUND_CONFLICT_409)
+@router.post("/sprints", response_model=SprintOut, status_code=status.HTTP_201_CREATED,
+             responses=NOT_FOUND_CONFLICT_409)
 def create_sprint_route(
     payload: SprintCreateIn,
     board_id: int = Query(...),
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
 ) -> dict:
-    """Create one sprint, or many from a pre-computed period list.
-
-    Single-sprint mode (default) returns a SprintOut dict exactly as before.
-    Bulk mode (``generate=True``) returns ``{"created": [SprintOut, ...]}``
-    so the caller can distinguish the two shapes without an envelope guess.
-    """
     board = _get_board_or_404(db, board_id, actor)
     require_permission(actor, CREATE_SPRINT)
 
-    if payload.generate and payload.periods:
-        # Bulk generation: every period becomes one sprint. All-or-nothing —
-        # a single IntegrityError after any successful insert rolls the whole
-        # batch back so we never leave a partial series.
-        created: list[Sprint] = []
-        try:
-            from app.routes.bugs import _reject_inactive, _resolve_users
-            assignees = []
-            if payload.assignee_ids:
-                assignees = _resolve_users(db, payload.assignee_ids, actor.org_id)
-                _reject_inactive(assignees)
-            for idx, period in enumerate(payload.periods, start=1):
-                sprint = sprints_svc.create_sprint(
-                    db, board, actor,
-                    name=f"{payload.name} {idx}",
-                    goal=payload.goal,
-                    start_date=period.start_date,
-                    end_date=period.end_date,
-                    cadence=payload.cadence,
-                )
-                sprint.assignees = list(assignees)
-                created.append(sprint)
-            db.flush()
-        except IntegrityError as exc:
-            db.rollback()
-            raise HTTPException(status_code=409, detail=_DETAIL_SPRINT_NAME_TAKEN) from exc
-        for sprint in created:
-            _audit(db, actor, "sprint", sprint.id, "sprint_created",
-                   f"Created sprint '{sprint.name}'")
-        db.commit()
-        for sprint in created:
-            db.refresh(sprint)
-        return {"created": [_sprint_out(db, s) for s in created]}
-
     assignees = None
     if payload.assignee_ids:
-        from app.routes.bugs import _reject_inactive, _resolve_users
-        assignees = _resolve_users(db, payload.assignee_ids, actor.org_id)
-        _reject_inactive(assignees)
+        assignees = resolve_users(db, payload.assignee_ids, actor.org_id)
+        reject_inactive(assignees)
+        require_project_members(db, assignees, board.project_id)
     try:
         # create_sprint flushes, so the unique (board, name) check fires here.
         sprint = sprints_svc.create_sprint(
@@ -572,9 +530,10 @@ def update_sprint_route(
     if sprint.version != payload.version:
         raise HTTPException(status_code=409, detail=_DETAIL_VERSION_CONFLICT)
     if payload.assignee_ids is not None:
-        from app.routes.bugs import _reject_inactive, _resolve_users
-        assignees = _resolve_users(db, payload.assignee_ids, actor.org_id)
-        _reject_inactive(assignees)
+        assignees = resolve_users(db, payload.assignee_ids, actor.org_id)
+        added = [u for u in assignees if u not in sprint.assignees]
+        reject_inactive(added)
+        require_project_members(db, added, sprint.project_id)
         sprint.assignees = assignees
     try:
         sprints_svc.update_sprint(
@@ -802,13 +761,7 @@ def create_agile_work_item(
 ) -> dict:
     from app import notification_service
     from app.email_service import UserSnapshot, notify_assignment
-    from app.routes.bugs import (
-        _bug_snapshot,
-        _bug_to_out_dict,
-        _reject_inactive,
-        _resolve_users,
-        _user_brief,
-    )
+    from app.routes.bugs import _bug_snapshot, _bug_to_out_dict, _user_brief
     from app.webhooks_delivery import deliver_event
 
     project = _get_agile_project_or_404(db, payload.project_id, actor)
@@ -825,10 +778,20 @@ def create_agile_work_item(
         sprint = db.get(Sprint, payload.sprint_id)
         if sprint is None or sprint.project_id != project.id or sprint.state in ("closed", "cancelled"):
             raise HTTPException(status_code=422, detail="sprint_id must reference an open Sprint in this project")
-    # Same assignee rules as /api/bugs: unknown ids are an error (never
-    # silently dropped) and deactivated accounts cannot be assigned.
-    assignees = _resolve_users(db, payload.assignee_ids, actor.org_id)
-    _reject_inactive(assignees)
+    # Same assignee rules as /api/bugs: unknown ids are an error (never silently dropped),
+    # and deactivated accounts and people outside the project cannot be assigned.
+    assignees = resolve_users(db, payload.assignee_ids, actor.org_id)
+    reject_inactive(assignees)
+    require_project_members(db, assignees, project.id)
+
+    cfields = cv.project_fields(db, project.id)
+    try:
+        cvalues = cv.clean_incoming(cfields, payload.custom_values)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    missing = cv.missing_required(cfields, cvalues)
+    if missing:
+        raise HTTPException(status_code=422, detail=cv.required_message(missing))
 
     item = Bug(
         project_id=project.id,
@@ -845,6 +808,7 @@ def create_agile_work_item(
     item.assignees = list(assignees)
     db.add(item)
     db.flush()
+    cv.write_values(db, item.id, cfields, cvalues)
 
     try:
         assign_hierarchy(db, item, payload.parent_id, payload.epic_id)

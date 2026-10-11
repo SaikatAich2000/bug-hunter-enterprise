@@ -1,4 +1,4 @@
-"""Agile API: Jira-style reports (sprint report, burndown/burnup, velocity,
+"""Agile API: reports (sprint report, burndown/burnup, velocity,
 cumulative flow, control chart, epic report, daily summary, workload, scope
 changes, release) and their exports."""
 from __future__ import annotations
@@ -244,10 +244,9 @@ def export_sprint_report_xlsx(
 
     try:
         _ensure_openpyxl()
-        wb = Workbook()
+        wb = Workbook(write_only=True)
 
-        summary_ws = wb.active
-        summary_ws.title = "Sprint Summary"
+        summary_ws = wb.create_sheet("Sprint Summary")
         _write_table(
             summary_ws,
             [ReportColumn(key="field", label="Field", width=28),

@@ -22,13 +22,25 @@ command -v docker        >/dev/null 2>&1 && docker compose version >/dev/null 2>
 
 # ── .env guard ───────────────────────────────────────────────────────────────
 if [[ ! -f "$ENV_FILE" ]]; then
-  if [[ -f "$ENV_EXAMPLE" ]]; then
-    warn ".env not found — copying from .env.example"
-    cp "$ENV_EXAMPLE" "$ENV_FILE"
-  else
-    abort ".env file is missing. Create one from .env.example before deploying."
-  fi
+  [[ -f "$ENV_EXAMPLE" ]] || abort ".env file is missing. Create one from .env.example before deploying."
+  cp "$ENV_EXAMPLE" "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+  abort ".env was missing, so it was created from .env.example. Fill in its secrets
+       (python3 scripts/gen_local_env_secrets.py generates them), then run ./deploy.sh again."
 fi
+
+# Never start with template values: they are public, so they are not secrets.
+env_value() {
+  { grep -E "^$1=" "$ENV_FILE" || true; } | tail -n 1 | cut -d= -f2- | sed -e 's/^["'\'']//' -e 's/["'\'']$//'
+}
+for key in POSTGRES_PASSWORD SESSION_SECRET BOOTSTRAP_ADMIN_PASSWORD; do
+  value="$(env_value "$key")"
+  lowered="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
+  if [[ -z "$value" || "$lowered" == *replace_with* || "$lowered" == *change*me* || "$lowered" == *your_random* ]]; then
+    abort "$key in .env is empty or still a placeholder. Set a real value
+       (python3 scripts/gen_local_env_secrets.py fills placeholders), then run ./deploy.sh again."
+  fi
+done
 
 # ── Live-data safety ──────────────────────────────────────────────────────────
 # This script does NOT touch the named volume `bugtracker_pgdata` that holds
@@ -37,6 +49,15 @@ fi
 # alone. Existing rows are not deleted. Sessions stay valid as long as
 # SESSION_SECRET is unchanged.
 info "Live-data safety: bugtracker_pgdata volume will NOT be touched by this script."
+
+# ── Pre-deploy backup ─────────────────────────────────────────────────────────
+# An upgrade migrates the schema on start; take a dump first so it can be rolled
+# back (./scripts/restore.sh <file>). SKIP_BACKUP=1 skips it.
+if [[ "${SKIP_BACKUP:-0}" != "1" ]] \
+   && docker inspect --format '{{.State.Running}}' bugtracker_db 2>/dev/null | grep -qx true; then
+  info "Backing up the database before deploying..."
+  "$(cd "$(dirname "$0")" && pwd)/scripts/backup.sh" || abort "Pre-deploy backup failed; nothing was changed. (SKIP_BACKUP=1 to deploy anyway.)"
+fi
 
 # ── Base-image pre-pull (resilient to transient Docker Hub timeouts) ─────────
 # The default base image is python:3.12-slim. We retry the pull a few times

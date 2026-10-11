@@ -158,6 +158,7 @@ def test_upgrade_backfills_existing_users_once_and_never_verifies_new_signups(ve
     with engine.begin() as c:
         c.execute(text("DROP INDEX IF EXISTS uq_users_email_lower"))
         c.execute(text("ALTER TABLE users DROP COLUMN email_verified_at"))
+        c.execute(text("DELETE FROM app_migrations WHERE name = 'email_verified_backfill_v1'"))
     assert init_db() is True
     with SessionLocal() as db:
         assert all(u.email_verified_at is not None for u in db.query(User).all())

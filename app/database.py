@@ -8,6 +8,7 @@ import asyncio
 import logging
 import weakref
 from collections.abc import AsyncGenerator, Callable
+from datetime import datetime, timezone
 
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
@@ -244,11 +245,6 @@ def _add_missing_columns(conn) -> None:
     # generic pass skip the table silently.
     inspector = inspect(conn)
 
-    # Accounts that predate email verification are vouched for: stamped once, when the column
-    # first appears (never again, or a pending sign-up would be verified on the next boot).
-    user_cols = _column_names(inspector, "users")
-    verify_backfill = bool(user_cols) and "email_verified_at" not in user_cols
-
     bug_cols = _column_names(inspector, "bugs")
     if bug_cols and "item_type" not in bug_cols:
         _add_column_safely(conn,
@@ -289,11 +285,6 @@ def _add_missing_columns(conn) -> None:
     _add_missing_epic_detail_columns(conn, inspector)
     _add_missing_git_columns(conn, inspector)
     _add_missing_columns_from_metadata(conn)
-    if verify_backfill:
-        conn.execute(text(
-            "UPDATE users SET email_verified_at = COALESCE(created_at, CURRENT_TIMESTAMP) "
-            "WHERE email_verified_at IS NULL"
-        ))
 
 
 def _add_missing_columns_from_metadata(conn) -> None:
@@ -533,7 +524,7 @@ def _backfill_bug_display_id(conn) -> None:
 
 
 def _align_agile_hierarchy(conn) -> None:
-    """Align existing agile data with the Jira hierarchy (app/agile/upgrade.py)."""
+    """Align existing agile data with the work-item hierarchy (app/agile/upgrade.py)."""
     from app.agile.upgrade import align_agile_hierarchy
 
     align_agile_hierarchy(conn)
@@ -563,6 +554,91 @@ def _preserve_legacy_html_descriptions(conn) -> None:
             logger.info("Preserved %d rich-text description(s) from before 4.0", result.rowcount)
     except SQLAlchemyError:
         logger.exception("legacy description preservation failed; descriptions were not copied")
+
+
+def _backfill_email_verified(conn) -> None:
+    """Accounts that predate email verification are vouched for. Runs once (_run_once), or a
+    pending sign-up would be marked verified on a later boot."""
+    conn.execute(text(
+        "UPDATE users SET email_verified_at = COALESCE(created_at, CURRENT_TIMESTAMP) "
+        "WHERE email_verified_at IS NULL"
+    ))
+
+
+def _encrypt_plain_secrets(conn) -> None:
+    """Seal 2FA and webhook secrets written before FIELD_ENCRYPTION_KEY was configured."""
+    from app.secrets_box import is_sealed, seal
+
+    for table, column in (("users", "totp_secret"), ("webhooks", "secret")):
+        rows = conn.execute(text(f"SELECT id, {column} FROM {table} WHERE {column} IS NOT NULL AND {column} <> ''")).all()
+        for row_id, value in rows:
+            if not is_sealed(value):
+                conn.execute(text(f"UPDATE {table} SET {column} = :v WHERE id = :i"), {"v": seal(value), "i": row_id})
+
+
+def _seal_secrets_if_keyed(conn) -> None:
+    # Only with a key: without one the job must stay pending, not be recorded as done.
+    if _settings.FIELD_ENCRYPTION_KEY:
+        _run_once(conn, "encrypt_plain_secrets_v1", _encrypt_plain_secrets)
+
+
+def _run_once(conn, name: str, migrate: Callable[[object], None]) -> None:
+    """Run a data migration exactly once per database (recorded in app_migrations). Callers
+    hold the migration lock, so two replicas never run the same one."""
+    done = conn.execute(text("SELECT 1 FROM app_migrations WHERE name = :n"), {"n": name}).first()
+    if done is not None:
+        return
+    try:
+        with conn.begin_nested():
+            migrate(conn)
+            conn.execute(
+                text("INSERT INTO app_migrations (name, applied_at) VALUES (:n, :t)"),
+                {"n": name, "t": datetime.now(timezone.utc).replace(microsecond=0)},
+            )
+    except SQLAlchemyError:
+        # Rolled back and not recorded, so the next boot retries it; serving continues.
+        logger.exception("data migration %s failed; it will be retried on the next start", name)
+        return
+    logger.info("data migration %s applied", name)
+
+
+def _flatten_legacy_html_descriptions(conn) -> None:
+    """Rewrite 3.x HTML descriptions (already copied to description_legacy_html) as the plain
+    text 4.0 shows, so every description is stored exactly as it is displayed."""
+    from app.schemas import rich_text_to_plain
+
+    rows = conn.execute(text(
+        "SELECT id, description FROM bugs WHERE description_legacy_html IS NOT NULL "
+        "AND description = description_legacy_html"
+    )).all()
+    for bug_id, html in rows:
+        conn.execute(text("UPDATE bugs SET description = :d WHERE id = :i"),
+                     {"d": rich_text_to_plain(html), "i": bug_id})
+    if rows:
+        logger.info("Converted %d rich-text description(s) to plain text", len(rows))
+
+
+def _unescape_plain_text_fields(conn) -> None:
+    """Sprint goals, blocked reasons and epic notes used to be stored HTML-escaped (a typed
+    ``>`` showed as ``&gt;``); they are plain text now, stored as typed."""
+    import html
+
+    for table, key, column in (("sprints", "id", "goal"), ("bugs", "id", "blocked_reason"),
+                               ("epic_details", "epic_id", "summary_note")):
+        rows = conn.execute(text(
+            f"SELECT {key}, {column} FROM {table} WHERE {column} LIKE :amp"  # noqa: S608 - fixed names
+        ), {"amp": "%&%"}).all()
+        for row_id, value in rows:
+            plain = html.unescape(value)
+            if plain != value:
+                conn.execute(text(f"UPDATE {table} SET {column} = :v WHERE {key} = :i"),  # noqa: S608
+                             {"v": plain, "i": row_id})
+
+
+def _plain_text_storage(conn) -> None:
+    _preserve_legacy_html_descriptions(conn)
+    _flatten_legacy_html_descriptions(conn)
+    _unescape_plain_text_fields(conn)
 
 
 def _add_missing_agile_columns(conn, inspector, bug_cols: set[str]) -> None:
@@ -685,6 +761,55 @@ def _add_missing_indexes(conn) -> None:
                 _create_index_safely(conn, idx, table.name)
 
 
+def _add_missing_check_constraints(conn) -> None:
+    """Add the models' CHECK constraints that an existing PostgreSQL database lacks.
+
+    Each is added NOT VALID (it binds new and updated rows at once, without scanning or
+    locking the table), then validated in its own savepoint. A legacy row that violates it
+    leaves the constraint NOT VALID with a warning; nothing is rewritten. SQLite cannot add
+    a constraint to an existing table, so there only new databases get them.
+    """
+    from sqlalchemy import CheckConstraint, inspect
+
+    if conn.dialect.name != "postgresql":
+        return
+    inspector = inspect(conn)
+    pending = {name for (name,) in conn.execute(text(
+        "SELECT conname FROM pg_constraint WHERE contype = 'c' AND NOT convalidated"
+    ))}
+    for table in Base.metadata.sorted_tables:
+        wanted = [c for c in table.constraints if isinstance(c, CheckConstraint) and c.name]
+        if not wanted:
+            continue
+        try:
+            existing = {c["name"] for c in inspector.get_check_constraints(table.name)}
+        except SQLAlchemyError:
+            continue
+        for constraint in wanted:
+            if constraint.name in existing and constraint.name not in pending:
+                continue
+            if constraint.name not in existing:
+                try:
+                    with conn.begin_nested():
+                        conn.execute(text(
+                            f'ALTER TABLE "{table.name}" ADD CONSTRAINT "{constraint.name}" '
+                            f"CHECK ({constraint.sqltext}) NOT VALID"
+                        ))
+                except SQLAlchemyError:
+                    logger.exception("could not add constraint %s", constraint.name)
+                    continue
+            try:
+                with conn.begin_nested():
+                    conn.execute(text(
+                        f'ALTER TABLE "{table.name}" VALIDATE CONSTRAINT "{constraint.name}"'
+                    ))
+            except SQLAlchemyError:
+                logger.warning(
+                    "Existing rows in %s violate %s; it guards new writes but stays NOT VALID "
+                    "until those rows are fixed.", table.name, constraint.name,
+                )
+
+
 def _create_index_safely(conn, idx, table_name: str) -> None:
     """Create one missing index inside a SAVEPOINT.
 
@@ -775,7 +900,9 @@ def init_db(on_migrated: Callable[[], None] | None = None) -> bool:
             _migrate_enterprise_tables(conn)
             _backfill_project_keys(conn)
             _backfill_bug_display_id(conn)
-            _preserve_legacy_html_descriptions(conn)
+            _run_once(conn, "plain_text_storage_v1", _plain_text_storage)
+            _run_once(conn, "email_verified_backfill_v1", _backfill_email_verified)
+            _seal_secrets_if_keyed(conn)
             _align_agile_hierarchy(conn)
         if on_migrated is not None:
             on_migrated()
@@ -803,8 +930,12 @@ def init_db(on_migrated: Callable[[], None] | None = None) -> bool:
             _migrate_enterprise_tables(conn)
             _backfill_project_keys(conn)
             _backfill_bug_display_id(conn)
-            _preserve_legacy_html_descriptions(conn)
+            _run_once(conn, "plain_text_storage_v1", _plain_text_storage)
+            _run_once(conn, "email_verified_backfill_v1", _backfill_email_verified)
+            _seal_secrets_if_keyed(conn)
             _align_agile_hierarchy(conn)
+            # After the data alignment, so upgraded rows already satisfy the constraints.
+            _add_missing_check_constraints(conn)
             # All DDL commits together (and releases the lock).
             conn.commit()
         except BaseException:

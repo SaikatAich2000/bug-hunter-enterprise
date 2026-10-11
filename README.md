@@ -45,7 +45,7 @@ whatever `APP_VERSION` in `.env` says, and `/api/health` reports it.
 | Area | What it does |
 |---|---|
 | Work items | Bugs, requirements and tasks share one `#N` counter with the agile types (Epic, Story, Sub-task). A tab strip filters KPIs, columns and analytics by type. Each type has its own statuses; bugs also have a DEV/UAT/PROD environment. Items can be converted between types in place. |
-| Sprints & Agile | Opt-in per project, modelled on Jira Scrum: ranked backlog and sprint planning, the active sprint board, Epic → issue → Sub-task hierarchy, board settings, and burndown/sprint/velocity/flow reports. See [Sprints & Agile](#sprints--agile). |
+| Sprints & Agile | Opt-in per project, Scrum-style: ranked backlog and sprint planning, the active sprint board, Epic → issue → Sub-task hierarchy, board settings, and burndown/sprint/velocity/flow reports. See [Sprints & Agile](#sprints--agile). |
 | Projects & events | Projects group your work. Events group items for a standup or review and have one or more managers. |
 | Item links | Link items together: relates, blocks, or duplicate. |
 | Comments & attachments | Rich-text comments (bold, italic, lists, code, quotes) and plain-text descriptions that keep line breaks. PDF, image and video files are stored in PostgreSQL. Pasted images become real attachments, and image metadata (EXIF) is stripped. |
@@ -69,7 +69,7 @@ whatever `APP_VERSION` in `.env` says, and `/api/health` reports it.
 | Observability | Optional OpenTelemetry export (traces, metrics, logs) to SigNoz or any OTLP/gRPC collector. |
 | API docs | Self-hosted Swagger UI (`/docs`) and ReDoc (`/redoc`) in development. Production hides them unless `ENABLE_API_DOCS=true`. |
 | Sleuth assistant | Answers plain-English questions and runs actions (with confirmation). Runs locally by default; see [Sleuth](#sleuth). |
-| UI | The Bug Hunter Steam-style dark theme and a light theme, responsive layout, auto-refresh. |
+| UI | A dark theme and a light theme, responsive layout, auto-refresh. |
 
 ### Roles
 
@@ -151,13 +151,13 @@ except admins.
 
 ## Sprints & Agile
 
-Sprints work the way Jira Software's Scrum boards do. Agile is **off for every
+Sprints follow the usual Scrum board workflow. Agile is **off for every
 project** until a manager or admin opens **Sprints**, picks the project and
 clicks **Set up Scrum board**. That creates the project's board (To Do, In
 Progress, Testing, Done) and a backlog ranked from its open issues; nothing is
 deleted or changed.
 
-**Hierarchy.** There are three levels, as in Jira:
+**Hierarchy.** There are three levels:
 
 - **Epic**: a large body of work. Epics are never in a sprint.
 - **Standard issues**: Story, Task, Bug and Requirement. Each can belong to one

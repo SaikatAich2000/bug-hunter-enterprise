@@ -10,11 +10,9 @@ the per-item values anyone with access to the project fills in.
 """
 from __future__ import annotations
 
-import re
-from datetime import date
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -27,16 +25,17 @@ from app.access import (
     get_org_project_or_404,
 )
 from app.api_docs import BAD_REQUEST_FORBIDDEN_CONFLICT_NOT_FOUND_404, BAD_REQUEST_NOT_FOUND_404
-from app.auth import get_current_user
+from app.auth import can_edit_bug, get_current_user
+from app import custom_values as cv
 from app.database import get_db
 from app.models import Activity, Bug, BugCustomValue, CustomField, User
+from app.schemas import CustomValueIn
+from app.webhooks_delivery import deliver_event
 
 router = APIRouter(tags=["custom-fields"])
 
 FIELD_TYPES = ("text", "number", "date", "select")
-_MAX_VALUE_LENGTH = 2000
 _MAX_OPTIONS_LENGTH = 500
-_NUMBER_RE = re.compile(r"^-?\d+(\.\d+)?$")
 
 _DETAIL_BUG_NOT_FOUND = "Bug not found"
 _DETAIL_FIELD_NOT_FOUND = "Field not found"
@@ -111,11 +110,6 @@ class CustomFieldUpdateIn(BaseModel):
         if v is not None:
             _clean_options(v)
         return v
-
-
-class CustomValueIn(BaseModel):
-    field_id: int
-    value: str = Field(default="", max_length=_MAX_VALUE_LENGTH)
 
 
 class CustomValueOut(BaseModel):
@@ -232,24 +226,6 @@ def _accessible_bug(db: Session, bug_id: int, user: User) -> Bug:
     return bug
 
 
-def _check_value(field: CustomField, value: str) -> str:
-    """The value normalized for storage; raises ValueError naming the field when invalid.
-    An empty value is always valid here (required fields are checked separately)."""
-    value = value.strip()
-    if not value:
-        return ""
-    if field.field_type == "number" and not _NUMBER_RE.match(value):
-        raise ValueError(f"'{field.name}' must be a number")
-    if field.field_type == "date":
-        try:
-            date.fromisoformat(value)
-        except ValueError as exc:
-            raise ValueError(f"'{field.name}' must be a date (YYYY-MM-DD)") from exc
-    if field.field_type == "select" and value not in (field.options or "").split("|"):
-        raise ValueError(f"'{field.name}' must be one of its options")
-    return value
-
-
 @router.get("/api/bugs/{bug_id}/custom-values",
             responses=BAD_REQUEST_NOT_FOUND_404)
 def list_values(
@@ -261,42 +237,50 @@ def list_values(
 
 
 @router.put("/api/bugs/{bug_id}/custom-values",
-            responses=BAD_REQUEST_NOT_FOUND_404)
+            responses=BAD_REQUEST_FORBIDDEN_CONFLICT_NOT_FOUND_404)
 def set_values(
-    bug_id: int, payload: list[CustomValueIn], user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    bug_id: int, payload: list[CustomValueIn], background: BackgroundTasks,
+    user: User = Depends(get_current_user), db: Session = Depends(get_db),
 ) -> list[CustomValueOut]:
     """Replace the item's values with ``payload``. Values for fields that do not belong to the
-    item's project are ignored; blank values clear a field; required fields must be filled."""
+    item's project are ignored; blank values clear a field; required fields must be filled.
+    Only someone who may edit the item may do this (a plain user cannot touch a Task); each
+    change is audited, bumps the item's version and fires ``bug.updated``."""
     bug = _accessible_bug(db, bug_id, user)
-    fields = {f.id: f for f in db.scalars(
-        select(CustomField).where(CustomField.project_id == bug.project_id)
-    ).all()}
-    incoming: dict[int, str] = {}
+    if not can_edit_bug(user, bug.reporter_id, [a.id for a in bug.assignees], item_type=bug.item_type):
+        raise HTTPException(status_code=403, detail=f"You don't have permission to edit this {bug.item_type.lower()}.")
+    fields = cv.project_fields(db, bug.project_id)
     try:
-        for item in payload:
-            if item.field_id in fields:
-                incoming[item.field_id] = _check_value(fields[item.field_id], item.value)
+        incoming = cv.clean_incoming(fields, payload)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    missing = [f.name for fid, f in fields.items() if f.is_required and not incoming.get(fid)]
+    missing = cv.missing_required(fields, incoming)
     if missing:
-        raise HTTPException(
-            status_code=422, detail="Required fields are missing: " + ", ".join(sorted(missing)),
+        raise HTTPException(status_code=422, detail=cv.required_message(missing))
+    changes = cv.write_values(db, bug_id, fields, incoming)
+    if changes:
+        record_value_changes(db, bug, user, changes)
+        db.commit()
+        db.refresh(bug)
+        from app.routes.bugs import _bug_to_out_dict, _user_brief  # late: bugs imports this module's peers
+        background.add_task(
+            deliver_event, user.org_id, "bug.updated",
+            {"bug": _bug_to_out_dict(bug), "changes": changes_payload(changes), "actor": _user_brief(user)},
         )
-    existing = {r.field_id: r for r in db.scalars(
-        select(BugCustomValue).where(BugCustomValue.bug_id == bug_id)
-    ).all()}
-    for fid, row in existing.items():
-        if not incoming.get(fid):
-            db.delete(row)
-    for fid, value in incoming.items():
-        if not value:
-            continue
-        if fid in existing:
-            existing[fid].value = value
-        else:
-            db.add(BugCustomValue(bug_id=bug_id, field_id=fid, value=value))
-    db.commit()
     rows = db.scalars(select(BugCustomValue).where(BugCustomValue.bug_id == bug_id)).all()
     return [CustomValueOut(field_id=r.field_id, value=r.value) for r in rows]
+
+
+def changes_payload(changes: list[tuple[str, str, str]]) -> list[dict]:
+    return [{"field": f"custom_{n}", "old": o, "new": v} for n, o, v in changes]
+
+
+def record_value_changes(db: Session, bug: Bug, user: User, changes: list[tuple[str, str, str]]) -> None:
+    """Audit rows and the version bump for custom-value changes (caller commits)."""
+    for name, old, new in changes:
+        db.add(Activity(
+            org_id=user.org_id, bug_id=bug.id, entity_type="bug", entity_id=bug.id,
+            actor_user_id=user.id, actor_name=user.name, action=f"custom_{name[:40]}_changed",
+            detail=f"#{bug.id} '{bug.title}' - {name}: '{old}' -> '{new}'",
+        ))
+    bug.version = (bug.version or 1) + 1

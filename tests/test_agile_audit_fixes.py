@@ -8,7 +8,7 @@ import random
 
 import pytest
 
-from tests.test_agile_jira_rules import (
+from tests.test_agile_scrum_rules import (
     _add,
     _backlog_ids,
     _bug,

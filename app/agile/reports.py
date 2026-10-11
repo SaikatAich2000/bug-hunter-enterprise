@@ -1,8 +1,8 @@
-"""Agile reports, computed the way Jira Software computes them: by replaying
+"""Agile reports, computed by replaying
 each issue's change history (written for every write path by
 app.agile.integrity) against a sprint's exact start and completion instants.
 
-Conventions, all as in Jira:
+Conventions:
 
 * the statistic is the board's estimation: story points, original time
   estimate (in hours) or issue count; an unestimated issue counts 0;
@@ -223,7 +223,7 @@ class SprintAnalysis:
 
     @property
     def completed_inside(self) -> set[int]:
-        """Completed in this sprint: Jira's "Completed issues" and velocity.
+        """Completed in this sprint: the "Completed issues" list and velocity.
         Issues already done when they joined the sprint are listed apart."""
         return self.completed - self.completed_outside
 
@@ -306,7 +306,7 @@ def _completion_from_records(db: Session, sprint: Sprint) -> tuple[set[int], set
 
 def _live_completion(db: Session, members: set[int], done: set[str], history: History,
                      at: datetime) -> tuple[set[int], set[int]]:
-    """Jira's completion rule for a running sprint: the issue and all of its
+    """The completion rule for a running sprint: the issue and all of its
     Sub-tasks are done."""
     open_parents: set[int] = set()
     if members:
@@ -546,7 +546,7 @@ def sprint_report(db: Session, sprint: Sprint, board: Board) -> dict:
 
 
 def guideline(start: datetime, planned_end: datetime | None, total: float, board: Board) -> list[dict]:
-    """Jira's guideline: from the committed total at the start to zero at the
+    """The guideline: from the committed total at the start to zero at the
     planned end, flat over non-working days."""
     if planned_end is None or planned_end <= start:
         return []
@@ -746,7 +746,7 @@ def control_chart_report(db: Session, board: Board, date_from: str, date_to: str
     range_end = _midnight(date.fromisoformat(date_to) + timedelta(days=1), zone)
     timelines = _status_timelines(db, board.project_id, STANDARD_TYPES)
     completions: list[tuple[int, datetime | None, datetime, float, datetime]] = []
-    # One dot per issue, at its last move into the done column, as in Jira.
+    # One dot per issue, at its last move into the done column.
     # Its cycle time is the time spent in the work columns up to then,
     # summed over every pass (an issue reopened and finished again counts all
     # the time worked on it).

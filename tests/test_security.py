@@ -141,7 +141,7 @@ class TestBodySizeMiddleware:
         monkeypatch.setenv("SESSION_SECRET", "test_secret")
         monkeypatch.setenv("BOOTSTRAP_ADMIN_EMAIL", "admin@test.local")
         monkeypatch.setenv("BOOTSTRAP_ADMIN_PASSWORD", "Admin1234")
-        monkeypatch.setenv("MAX_REQUEST_BODY_BYTES", "1024")
+        monkeypatch.setenv("MAX_JSON_BODY_BYTES", "1024")
         for mod in list(sys.modules):
             if mod == "app" or mod.startswith("app."):
                 del sys.modules[mod]
@@ -163,30 +163,33 @@ class TestBodySizeMiddleware:
             assert "too large" in res.json()["detail"].lower()
 
     def test_malformed_content_length_returns_400(self):
-        """A non-integer Content-Length yields 400, not an uncaught ValueError (dispatched directly; the wire enforces numeric)."""
+        """A non-integer Content-Length yields 400, not an uncaught ValueError (called directly; the wire enforces numeric)."""
         import asyncio
 
-        from starlette.requests import Request
+        from app.main import BodyLimitMiddleware
 
-        from app.main import BodySizeLimitMiddleware
+        async def inner(_scope, _receive, _send):  # pragma: no cover — must not run
+            raise AssertionError("middleware must short-circuit before the app")
 
-        middleware = BodySizeLimitMiddleware(None)
-        scope = {
-            "type": "http", "method": "POST", "path": "/api/auth/login",
-            "headers": [(b"content-length", b"not-a-number")],
-            "query_string": b"", "scheme": "http",
-            "server": ("testserver", 80), "client": ("test", 0),
-            "raw_path": b"/api/auth/login",
-        }
-        request = Request(scope)
+        sent = []
 
-        async def call_next(_req):     # pragma: no cover — should not run
-            raise AssertionError("middleware must short-circuit before call_next")
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
 
-        response = asyncio.run(middleware.dispatch(request, call_next))
-        assert response.status_code == 400
-        body = response.body.decode("utf-8")
-        assert "try again" in body.lower()
+        async def send(msg):
+            sent.append(msg)
+
+        scope = {"type": "http", "method": "POST", "path": "/api/auth/login",
+                 "headers": [(b"content-length", b"not-a-number")]}
+        asyncio.run(BodyLimitMiddleware(inner)(scope, receive, send))
+        assert sent[0]["status"] == 400
+        assert b"try again" in sent[1]["body"].lower()
+
+    def test_json_bodies_have_a_smaller_cap_than_uploads(self, admin_client):
+        big = "x" * (3 * 1024 * 1024)
+        res = admin_client.post("/api/projects", json={"name": "Huge", "description": big})
+        assert res.status_code == 413
+        assert res.json()["detail"] == "This request is too large."
 
 
 class TestAccountLockoutEdgeCases:
@@ -404,14 +407,14 @@ class TestEmailMasking:
     @pytest.mark.parametrize("raw,expected", [
         ("alice@example.com",  "a***@example.com"),
         ("a@example.com",      "a***@example.com"),
-        ("@example.com",       "@example.com"),
+        ("@example.com",       "***@example.com"),
         ("",                   "***"),
         ("plain-no-at-sign",   "***"),
         ("BOB@example.com",    "B***@example.com"),
     ])
     def test_mask_helper(self, raw, expected):
-        from app.routes.auth import _mask_email
-        assert _mask_email(raw) == expected
+        from app.email_service import mask_email
+        assert mask_email(raw) == expected
 
     def test_inactive_login_logs_masked_email(self, admin_client, caplog):
         admin_client.post("/api/users", json={
@@ -429,7 +432,7 @@ class TestEmailMasking:
                 "email": "disabled@test.local", "password": "Disabled12",
             })
         assert res.status_code == 401
-        relevant = [r.message for r in caplog.records if "Login refused" in r.message]
+        relevant = [r.message for r in caplog.records if "Sign-in failed (inactive account)" in r.message]
         assert relevant, "expected the masked-email log line"
         for line in relevant:
             assert "disabled@test.local" not in line, (
@@ -552,14 +555,13 @@ class TestPasswordBreachCheck:
         digest = hashlib.sha1(pw.encode("utf-8")).hexdigest().upper()  # NOSONAR
         return f"{digest[5:]}:9999\n"
 
-    def test_unit_legacy_default_allowlisted_despite_breach_match(self):
-        """The legacy value is allowlisted and short-circuits before any network call."""
+    def test_unit_no_password_is_exempt_from_the_breach_check(self):
+        """Former "legacy" values get no special treatment: a corpus match is a breach."""
         from app import password_breach
-        body = self._force_match("legacy-default")
-        with mock.patch.object(password_breach, "_fetch_range", return_value=body) as m:
-            assert password_breach.is_password_breached("legacy-default") is False
-            assert password_breach.is_password_breached("LEGACY-DEFAULT") is False
-        m.assert_not_called()
+        for pw in ("legacy-default", "changeme"):
+            body = self._force_match(pw)
+            with mock.patch.object(password_breach, "_fetch_range", return_value=body):
+                assert password_breach.is_password_breached(pw) is True
 
     def test_change_password_rejects_breached(self, admin_client, monkeypatch):
         monkeypatch.setenv("PASSWORD_BREACH_CHECK_ENABLED", "true")
@@ -699,3 +701,40 @@ class TestExifStrip:
         assert marker.encode() not in dl.content, (
             "EXIF marker survived the upload roundtrip"
         )
+
+
+class TestFailedSignInTrail:
+
+    def test_failed_and_locked_sign_ins_are_audited_for_real_accounts(self, admin_client, caplog, monkeypatch):
+        from app import account_lockout
+
+        monkeypatch.setattr(account_lockout, "_LOGIN_FAIL_LIMIT", 3)
+        account_lockout._reset_for_tests()
+        admin_client.post("/api/users", json={
+            "name": "Target User", "email": "target@test.local", "role": "user", "password": "Target2026x",
+        })
+        with caplog.at_level(logging.WARNING, logger="bug_hunter.auth"):
+            for _ in range(3):
+                res = admin_client.post("/api/auth/login", json={"email": "target@test.local", "password": "wrong-one"})
+                assert res.status_code == 401
+            res = admin_client.post("/api/auth/login", json={"email": "nobody@test.local", "password": "wrong-one"})
+            assert res.status_code == 401
+        logs = " ".join(r.message for r in caplog.records)
+        assert "target@test.local" not in logs and "t***@test.local" in logs
+        assert "Sign-in locked after repeated failures" in logs
+        admin_client.post("/api/auth/login", json={"email": "admin@test.local", "password": "x"})
+        account_lockout._reset_for_tests()
+        from tests.conftest import BOOTSTRAP_EMAIL, BOOTSTRAP_PASSWORD
+        assert admin_client.post("/api/auth/login", json={
+            "email": BOOTSTRAP_EMAIL, "password": BOOTSTRAP_PASSWORD}).status_code == 200
+        actions = [a["action"] for a in admin_client.get("/api/audit?q=target@test.local").json()]
+        assert actions.count("login_failed") == 3 and "login_locked" in actions
+        assert not any("nobody@test.local" in a["detail"] for a in admin_client.get("/api/audit").json())
+
+    def test_every_response_carries_a_request_id(self, client):
+        res = client.get("/api/health")
+        assert len(res.headers["X-Request-ID"]) == 32
+        res = client.get("/api/health", headers={"X-Request-ID": "proxy-abc-12345"})
+        assert res.headers["X-Request-ID"] == "proxy-abc-12345"
+        res = client.get("/api/health", headers={"X-Request-ID": "bad id\\r\\nInjected: 1"})
+        assert res.headers["X-Request-ID"] != "bad id\\r\\nInjected: 1"

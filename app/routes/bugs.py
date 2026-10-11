@@ -27,6 +27,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
+from starlette.concurrency import run_in_threadpool
 
 from app import bulk_import, notification_service
 from app.access import (
@@ -72,7 +73,8 @@ from app.email_service import (
     notify_bug_updated,
     notify_comment_added,
 )
-from app.image_strip import strip_image_metadata
+from app.image_strip import ImageTooLarge, strip_image_metadata
+from app import custom_values as cv
 from app.models import (
     Activity,
     Attachment,
@@ -85,6 +87,7 @@ from app.models import (
     User,
     WorkItemBranch,
 )
+from app.people import reject_inactive, require_project_members, resolve_user, resolve_users
 from app.schemas import (
     ALLOWED_ENVIRONMENTS,
     ALLOWED_ITEM_TYPES,
@@ -109,7 +112,6 @@ from app.schemas import (
     CommentOut,
     display_id_for,
     normalize_choice,
-    rich_text_to_plain,
     statuses_for_type,
 )
 from app.webhooks_delivery import deliver_event
@@ -298,9 +300,7 @@ def _bug_to_out_dict(bug: Bug, attachment_count: int = 0, can_edit: bool = False
         "project_id": bug.project_id,
         "project_name": bug.project.name if bug.project else None,
         "title": bug.title,
-        # Flatten legacy editor HTML so every consumer reads plain text,
-        # even rows stored before the plain-text switch.
-        "description": rich_text_to_plain(bug.description or ""),
+        "description": bug.description or "",
         "reporter": _user_brief(bug.reporter) if bug.reporter else None,
         "assignees": [_user_brief(a) for a in bug.assignees],
         "item_type": _item_type(bug),
@@ -332,8 +332,7 @@ def _bug_snapshot(bug: Bug) -> BugSnapshot:
         id=bug.id, title=bug.title,
         project_name=bug.project.name if bug.project else "",
         status=bug.status, priority=bug.priority, environment=bug.environment,
-        # Notification snapshot also reads plain text (legacy HTML flattened).
-        description=rich_text_to_plain(bug.description or ""),
+        description=bug.description or "",
         reporter=(UserSnapshot(id=bug.reporter.id, name=bug.reporter.name, email=bug.reporter.email)
                   if bug.reporter else None),
         assignees=tuple(UserSnapshot(id=a.id, name=a.name, email=a.email) for a in bug.assignees),
@@ -342,39 +341,6 @@ def _bug_snapshot(bug: Bug) -> BugSnapshot:
         event_name=bug.event.name if getattr(bug, "event", None) else None,
         from_address=bug.project.organization.email_from_override if bug.project else None,
     )
-
-
-def _resolve_users(db: Session, user_ids: list[int], org_id: int) -> list[User]:
-    """Users of the organization with these ids; any other id is "unknown"."""
-    if not user_ids: return []
-    rows = db.scalars(select(User).where(User.id.in_(user_ids), User.org_id == org_id)).all()
-    found = {u.id for u in rows}
-    missing = set(user_ids) - found
-    if missing:
-        raise HTTPException(status_code=400, detail=f"Unknown user ids: {sorted(missing)}")
-    return list(rows)
-
-
-def _resolve_user(db: Session, user_id: int | None, org_id: int) -> User | None:
-    if user_id is None: return None
-    user = db.get(User, user_id)
-    if user is None or user.org_id != org_id:
-        raise HTTPException(status_code=400, detail=f"User {user_id} does not exist")
-    return user
-
-
-def _reject_inactive(users: list[User], noun: str = "user") -> None:
-    """Reject new assignments to deactivated accounts.
-
-    A disabled user can't log in, so notifications would be dead-ends. Existing
-    references are left in place; only new additions are checked.
-    """
-    inactive = sorted((u.name for u in users if not u.is_active))
-    if inactive:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Cannot assign a deactivated {noun}: {', '.join(inactive)}",
-        )
 
 
 # Human-readable labels for each link type, as (outgoing, incoming) pairs.
@@ -839,15 +805,26 @@ def create_bug(
                 status_code=403,
                 detail="You can only file items as yourself",
             )
-        reporter = _resolve_user(db, payload.reporter_id, actor.org_id)
+        reporter = resolve_user(db, payload.reporter_id, actor.org_id)
     else:
         reporter = actor
 
-    assignees = _resolve_users(db, payload.assignee_ids, actor.org_id)
-    _reject_inactive([reporter, *assignees])
+    assignees = resolve_users(db, payload.assignee_ids, actor.org_id)
+    reject_inactive([reporter, *assignees])
+    require_project_members(db, assignees, payload.project_id)
+    require_project_members(db, [reporter], payload.project_id, noun="reporter")
 
     if payload.event_id is not None:
         _assert_event_accessible(db, actor, accessible, payload.event_id)
+
+    cfields = cv.project_fields(db, payload.project_id)
+    try:
+        cvalues = cv.clean_incoming(cfields, payload.custom_values)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    missing = cv.missing_required(cfields, cvalues)
+    if missing:
+        raise HTTPException(status_code=422, detail=cv.required_message(missing))
 
     bug = Bug(
         project_id=payload.project_id,
@@ -866,6 +843,7 @@ def create_bug(
     bug.assignees = list(assignees)
     db.add(bug)
     db.flush()
+    cv.write_values(db, bug.id, cfields, cvalues)
     _log(
         db, bug.id, actor, "bug_created",
         f"{bug.item_type} #{bug.id} '{bug.title}' created with status '{bug.status}'.",
@@ -1296,8 +1274,8 @@ def _apply_reporter_change(bug: Bug, db: Session, org_id: int, new_reporter_id: 
         bug.reporter_id = None
         new_reporter_label = "—"
     else:
-        new_reporter = _resolve_user(db, new_reporter_id, org_id)
-        _reject_inactive([new_reporter], "reporter")
+        new_reporter = resolve_user(db, new_reporter_id, org_id)
+        reject_inactive([new_reporter], "reporter")
         bug.reporter_id = new_reporter.id
         new_reporter_label = new_reporter.name if new_reporter else "—"
     if old_reporter_label == new_reporter_label and old_reporter_label != "—":
@@ -1314,7 +1292,7 @@ def _apply_assignee_diff(bug: Bug, db: Session, org_id: int, assignee_ids: Optio
     can notify both sides (removal is as worth notifying as a new assignment)."""
     if assignee_ids is None:
         return [], []
-    new_users = _resolve_users(db, assignee_ids, org_id)
+    new_users = resolve_users(db, assignee_ids, org_id)
     old_users = list(bug.assignees)
     old_ids = {a.id for a in old_users}
     new_ids = {u.id for u in new_users}
@@ -1324,7 +1302,7 @@ def _apply_assignee_diff(bug: Bug, db: Session, org_id: int, assignee_ids: Optio
         return [], []
     added = [u for u in new_users if u.id in added_ids]
     removed = [u for u in old_users if u.id in removed_ids]
-    _reject_inactive(added)
+    reject_inactive(added)
     old_names = sorted(a.name for a in old_users)
     new_names = sorted(u.name for u in new_users)
     changes.append((
@@ -1334,6 +1312,16 @@ def _apply_assignee_diff(bug: Bug, db: Session, org_id: int, assignee_ids: Optio
     ))
     bug.assignees = new_users
     return added, removed
+
+
+def _require_people_on_project(db: Session, bug: Bug, project_moved: bool, added: list[User],
+                               reporter_changed: bool) -> None:
+    """Everyone newly attached to the item must be able to see its project; after a project
+    move that means everyone still attached."""
+    assignees = list(bug.assignees) if project_moved else added
+    require_project_members(db, assignees, bug.project_id)
+    if project_moved or reporter_changed:
+        require_project_members(db, [bug.reporter], bug.project_id, noun="reporter")
 
 
 def _persist_update(db: Session, bug: Bug, actor: User,
@@ -1430,6 +1418,8 @@ def update_bug(
     fields = payload.model_dump(exclude_unset=True)
     expected_version = fields.pop("expected_version", None)
     expected_updated_at = fields.pop("expected_updated_at", None)
+    fields.pop("custom_values", None)
+    custom_in = payload.custom_values
 
     bug = db.scalar(_eager_bug().where(Bug.id == bug_id))
     if bug is None:
@@ -1444,6 +1434,16 @@ def update_bug(
     _validate_update_authorization(bug, actor)
     _enforce_optimistic_concurrency(db, bug_id, expected_version, expected_updated_at)
     _validate_update_payload(fields, bug, db, actor, accessible)
+    cfields = cv.project_fields(db, fields.get("project_id") or bug.project_id)
+    try:
+        cvalues = cv.clean_incoming(cfields, custom_in) if custom_in is not None else {
+            fid: row.value for fid, row in cv.existing_values(db, bug_id).items() if fid in cfields
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    missing = cv.missing_required(cfields, cvalues)
+    if missing:
+        raise HTTPException(status_code=422, detail=cv.required_message(missing))
     # Reclassification: same table, same row id, common fields and relations
     # preserved. The guards run before any attribute is applied so a refused
     # conversion leaves the item completely untouched.
@@ -1475,11 +1475,14 @@ def update_bug(
     # freeze the pre-conversion id before the new item_type is applied.
     _preserve_display_id_on_type_change(fields, bug)
     changes = _compute_tracked_changes(bug, fields)
+    if custom_in is not None:
+        changes += [(f"custom_{n[:40]}", o, v) for n, o, v in cv.write_values(db, bug_id, cfields, cvalues)]
     old_status = bug.status
     if "sprint_id" in fields and fields["sprint_id"] != bug.sprint_id:
         # Planning work into or out of a sprint is backlog management, the
         # same permission the board's move endpoint requires.
         require_permission(actor, MANAGE_BACKLOG)
+    project_moved = "project_id" in fields and fields["project_id"] != bug.project_id
     _detach_for_project_move(db, bug, fields, actor)
     sprint_requested = "sprint_id" in fields
     new_sprint_id = fields.pop("sprint_id", None)
@@ -1496,6 +1499,7 @@ def update_bug(
     newly_assigned, newly_removed = _apply_assignee_diff(
         bug, db, actor.org_id, assignee_ids, changes,
     )
+    _require_people_on_project(db, bug, project_moved, newly_assigned, reporter_actually_changes)
 
     if changes or newly_assigned or newly_removed:
         _stage_update_notifications(
@@ -1722,10 +1726,17 @@ async def upload_attachment(
     if not data:
         raise HTTPException(status_code=400, detail="This file is empty, so there's nothing to attach.")
 
-    # Strip EXIF/GPS/XMP/ICC metadata from raster images. No-op for non-images;
-    # fails open on errors so an exotic format doesn't block the upload.
-    data = strip_image_metadata(data, file.content_type)
-    # Re-check the cap: stripping and re-encoding could grow the file slightly.
+    # Strip EXIF/GPS/XMP metadata from raster images (off the event loop: a re-encode can
+    # take a while). No-op for non-images and for bytes that are not a readable image.
+    try:
+        data = await run_in_threadpool(strip_image_metadata, data, file.content_type)
+    except ImageTooLarge:
+        raise HTTPException(
+            status_code=413,
+            detail=("This image is too large to process. Save it as JPEG or PNG, or resize "
+                    "it below 16 megapixels, and try again."),
+        ) from None
+    # Re-check the cap: re-encoding a GIF, BMP or TIFF could grow the file slightly.
     if len(data) > MAX_FILE_BYTES:
         raise HTTPException(
             status_code=413,
@@ -2263,7 +2274,7 @@ def _bulk_set_field(db: Session, bug: Bug, actor: User, field_name: str,
 
 
 def _delete_item(db: Session, bug: Bug, actor: User, note: str = "") -> int:
-    """Delete ``bug`` the way Jira does and record it in the audit trail.
+    """Delete ``bug`` and record it in the audit trail.
 
     Its Sub-tasks go with it (a Sub-task cannot exist without its parent; the
     FK alone would leave them parentless), and an Epic's issues are unlinked

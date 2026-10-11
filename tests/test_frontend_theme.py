@@ -187,19 +187,19 @@ def test_collapse_css_is_live_and_animated():
     assert "rotate(180deg)" in css, "the collapse chevron must flip on toggle"
 
 
-# 6. meta theme-color (Steam chrome) on every HTML entry point
+# 6. meta theme-color (the chrome colour) on every HTML entry point
 @pytest.mark.parametrize("html", ["index.html", "login.html", "reset.html"])
-def test_html_has_steam_theme_color(html):
+def test_html_has_chrome_theme_color(html):
     src = (FRONTEND / html).read_text(encoding="utf-8")
     assert 'name="theme-color"' in src, f"{html} missing meta theme-color"
-    assert "#171a21" in src, f"{html} theme-color should be the Steam chrome colour"
+    assert "#171a21" in src, f"{html} theme-color should be the chrome colour"
 
 
-# Steam identity tokens — pin the palette so a reskin can't silently revert it.
-def test_steam_identity_tokens_present():
+# Identity tokens — pin the palette so a reskin can't silently revert it.
+def test_identity_tokens_present():
     css = _read(STYLES)
-    assert "--chrome: #171a21" in css, "Steam chrome token"
-    assert "--panel-field:" in css, "Steam steel field-gradient token"
-    assert "--green-face:" in css, "Steam green install-button token"
-    # Motiva Sans is the Steam font; Asap is the self-hosted stand-in.
-    assert '"Motiva Sans", "Asap"' in css
+    assert "--chrome: #171a21" in css, "chrome token"
+    assert "--panel-field:" in css, "steel field-gradient token"
+    assert "--green-face:" in css, "green button token"
+    # Asap is the self-hosted UI font.
+    assert 'font-family: "Asap", Arial' in css

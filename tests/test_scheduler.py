@@ -181,3 +181,29 @@ def test_tick_swallows_run_failure(monkeypatch):
     monkeypatch.setattr(scheduler, "_run_digest_once", boom)
     c = CronSchedule("* * * * *")
     assert asyncio.run(scheduler._tick(c, timezone.utc, now=_dt(2026, 6, 15, 7, 0))) is None
+
+
+def test_retention_loop_runs_audit_sweep_and_general_retention(monkeypatch):
+    """One daily loop does both: the audit-log sweep and the notification/session retention."""
+    calls: list[str] = []
+    monkeypatch.setattr(scheduler, "_RETENTION_FIRST_DELAY_SECONDS", 0)
+    monkeypatch.setattr(scheduler, "_purge_audit_once", lambda: calls.append("audit"))
+    monkeypatch.setattr("app.jobs.retention.run_once", lambda: calls.append("retention"))
+    monkeypatch.setattr(scheduler, "get_settings", lambda: type(
+        "S", (), {"AUDIT_RETENTION_DAYS": 30, "RETENTION_JOB_ENABLED": True})())
+
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(seconds):
+        if seconds:
+            raise asyncio.CancelledError
+        await real_sleep(0)
+
+    monkeypatch.setattr(scheduler.asyncio, "sleep", fake_sleep)
+
+    async def one_round():
+        with pytest.raises(asyncio.CancelledError):
+            await scheduler._retention_loop()
+
+    asyncio.run(one_round())
+    assert calls == ["audit", "retention"]

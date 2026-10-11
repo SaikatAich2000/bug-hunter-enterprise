@@ -143,15 +143,15 @@ def test_filter_bugs_by_event(admin_client):
 # -- Multi-assignee items in event detail ------------------------------------
 
 def test_event_detail_includes_multi_assignee_item(admin_client):
+    p = _make_project(admin_client)
     u1 = admin_client.post("/api/users", json={
         "name": "Kunal", "email": "kunal@x.test", "role": "user",
-        "password": "User12345Aa",
+        "password": "User12345Aa", "project_ids": [p["id"]],
     }).json()
     u2 = admin_client.post("/api/users", json={
         "name": "Debasreeta", "email": "debasreeta@x.test", "role": "user",
-        "password": "User12345Aa",
+        "password": "User12345Aa", "project_ids": [p["id"]],
     }).json()
-    p = _make_project(admin_client)
     ev = _make_event(admin_client)
     item = _make_item(admin_client, p["id"], item_type="Task",
                       title="Aadhaar Genius RFP upload",

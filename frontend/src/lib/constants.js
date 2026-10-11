@@ -7,10 +7,6 @@ export const PASSWORD_HINT = `At least ${PASSWORD_MIN_LENGTH} characters, includ
 
 /** Error message if the password fails policy, else null. */
 export function validatePassword(pw) {
-  // legacy default password; server accepts it, so we must too
-  if (pw.toLowerCase() === "legacy-default" || pw.toLowerCase() === "changeme") {
-    return null;
-  }
   if (pw.length < PASSWORD_MIN_LENGTH) {
     return `Password must be at least ${PASSWORD_MIN_LENGTH} characters`;
   }

@@ -9,7 +9,7 @@ recognized but ignored on import.
 Two-pass design: every row is parsed and validated in memory first (no DB
 writes), then only the rows that passed validation are inserted in one
 transaction. A row with a hard error (bad project, invalid enum, etc.) is
-skipped and reported; an unresolved/deactivated assignee is a soft warning
+skipped and reported; an unresolved, deactivated or out-of-project assignee is a soft warning
 that just drops that one assignee, not the whole row.
 
 Notifications are written in-app only (``background=None``) — a 500-row
@@ -33,7 +33,8 @@ from sqlalchemy.orm import Session
 from app import notification_service
 from app.access import accessible_project_ids, can_access_project, scope_event_query
 from app.config import get_settings
-from app.models import Activity, Bug, Event, Project, User
+from app.custom_values import check_value, required_message
+from app.models import ROLE_ADMIN, Activity, Bug, BugCustomValue, CustomField, Event, Project, User, user_projects
 from app.schemas import (
     ALLOWED_ENVIRONMENTS,
     ALLOWED_ITEM_TYPES,
@@ -43,8 +44,7 @@ from app.schemas import (
     MIN_TITLE_LENGTH,
     STATUSES_BY_TYPE,
     normalize_choice,
-    rich_text_to_plain,
-    sanitize_html,
+    plain_text,
     statuses_for_type,
 )
 
@@ -178,6 +178,11 @@ def _find_header(rows: list[list[str]]) -> tuple[int, dict[int, str]]:
             if field_name:
                 col_map[col_idx] = field_name
         if _REQUIRED_HEADER_TOKENS.issubset(found_labels):
+            # Any other header may name a custom field of the row's project.
+            for col_idx, raw in enumerate(row):
+                label = raw.strip().lower()
+                if label and label not in _LABEL_TO_FIELD:
+                    col_map[col_idx] = "custom:" + label
             return i, col_map
     raise BulkImportError(
         "Could not find a header row with the expected columns (needs at "
@@ -192,6 +197,12 @@ class _Lookups:
     events_by_name: dict[str, list[Event]]
     users_by_email: dict[str, User]
     users_by_name: dict[str, list[User]]
+    members_by_project: dict[int, set[int]]
+    # project id -> lower-cased field name -> field (only the importer's accessible projects)
+    custom_fields: dict[int, dict[str, CustomField]] = field(default_factory=dict)
+
+    def can_see(self, user: User, project: Project) -> bool:
+        return user.role == ROLE_ADMIN or user.id in self.members_by_project.get(project.id, set())
 
 
 def _load_lookups(db: Session, actor: User, accessible: set[int]) -> _Lookups:
@@ -212,7 +223,22 @@ def _load_lookups(db: Session, actor: User, accessible: set[int]) -> _Lookups:
     for u in users:
         users_by_name.setdefault(u.name.lower(), []).append(u)
 
-    return _Lookups(projects_by_name, events_by_name, users_by_email, users_by_name)
+    members_by_project: dict[int, set[int]] = {}
+    # Only the importer's accessible (hence same-org) projects, and only this org's users.
+    member_rows = db.execute(
+        select(user_projects.c.user_id, user_projects.c.project_id).where(
+            user_projects.c.project_id.in_(accessible),
+            user_projects.c.user_id.in_([u.id for u in users]),
+        )
+    )
+    for user_id, project_id in member_rows:
+        members_by_project.setdefault(project_id, set()).add(user_id)
+
+    custom_fields: dict[int, dict[str, CustomField]] = {}
+    for f in db.scalars(select(CustomField).where(CustomField.project_id.in_(accessible))).all():
+        custom_fields.setdefault(f.project_id, {})[f.name.lower()] = f
+    return _Lookups(projects_by_name, events_by_name, users_by_email, users_by_name,
+                    members_by_project, custom_fields)
 
 
 @dataclass
@@ -230,6 +256,7 @@ class _RowPlan:
     reporter: User
     assignees: list[User] = field(default_factory=list)
     warning: str = ""
+    custom_values: dict[int, str] = field(default_factory=dict)
 
 
 def _resolve_row_title(cells: dict[str, str], row_num: int, errors: list[str]) -> str:
@@ -485,20 +512,40 @@ def _process_row(
     due_date = _resolve_row_due_date(cells, errors)
     reporter = _resolve_row_reporter(cells, lookups, actor, errors)
     assignees, warn_parts = _resolve_row_assignees(cells, lookups)
+    if project is not None:
+        # Assigned people and the reporter are notified, so each must be able to open the item.
+        for user in [a for a in assignees if not lookups.can_see(a, project)]:
+            assignees.remove(user)
+            warn_parts.append(f"assignee '{user.name}' is not a member of project '{project.name}' — skipped")
+        if reporter is not None and not lookups.can_see(reporter, project):
+            errors.append(f"Reporter '{reporter.name}' is not a member of project '{project.name}'")
+
+    custom_values: dict[int, str] = {}
+    if project is not None:
+        by_name = lookups.custom_fields.get(project.id, {})
+        for key, raw in cells.items():
+            if key.startswith("custom:") and key[7:] in by_name:
+                try:
+                    custom_values[by_name[key[7:]].id] = check_value(by_name[key[7:]], raw)
+                except ValueError as exc:
+                    errors.append(str(exc))
+        missing = sorted(f.name for f in by_name.values() if f.is_required and not custom_values.get(f.id))
+        if missing:
+            errors.append(required_message(missing))
 
     if errors:
         return None, errors
     assert project is not None
     assert reporter is not None
 
-    # Plain text, like every other work-item create path.
-    description = rich_text_to_plain(sanitize_html(cells.get("description", "").strip()))
+    # Plain text, stored as written, like every other work-item create path.
+    description = plain_text(cells.get("description", ""))
     plan = _RowPlan(
         row_num=row_num,
         title=title, item_type=item_type, project=project, event=event,
         status=status_val, priority=priority, environment=environment,
         due_date=due_date, description=description, reporter=reporter,
-        assignees=assignees, warning="; ".join(warn_parts),
+        assignees=assignees, warning="; ".join(warn_parts), custom_values=custom_values,
     )
     return plan, []
 
@@ -554,6 +601,9 @@ def _create_validated_rows(
     created_ids: list[int] = []
     for bug, plan in bug_plan_pairs:
         created_ids.append(bug.id)
+        for fid, value in plan.custom_values.items():
+            if value:
+                db.add(BugCustomValue(bug_id=bug.id, field_id=fid, value=value))
         db.add(Activity(
             org_id=actor.org_id, bug_id=bug.id, entity_type="bug", entity_id=bug.id,
             actor_user_id=actor.id, actor_name=actor.name, action="bug_created",

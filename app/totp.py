@@ -15,11 +15,13 @@ from typing import Optional
 
 import pyotp
 from itsdangerous import BadSignature, TimestampSigner
-from sqlalchemy import update
+from datetime import datetime, timezone
+
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.auth import session_secret
-from app.models import User
+from app.models import TotpRecoveryCode, User
 from app.secrets_box import seal, unseal
 
 _TOTP_DIGITS = 6
@@ -120,5 +122,42 @@ def generate_recovery_codes(n: int) -> list[str]:
     return codes
 
 
-def hash_recovery_code(code: str) -> str:
-    return hashlib.sha256(code.strip().upper().encode("utf-8")).hexdigest()
+def _normalise(code: str) -> bytes:
+    return code.strip().upper().encode("utf-8")
+
+
+def legacy_hash_recovery_code(code: str) -> str:
+    """The unsalted SHA-256 earlier releases stored; only used to verify old rows."""
+    return hashlib.sha256(_normalise(code)).hexdigest()
+
+
+def hash_recovery_code(code: str, salt: str) -> str:
+    """HMAC-SHA256 of the code keyed by its own random salt (so equal codes never share a
+    hash and a leaked table cannot be attacked with one precomputed table)."""
+    return hmac.new(salt.encode("ascii"), _normalise(code), hashlib.sha256).hexdigest()
+
+
+def new_recovery_code_row(user_id: int, code: str) -> TotpRecoveryCode:
+    salt = secrets.token_hex(8)
+    return TotpRecoveryCode(user_id=user_id, salt=salt, code_hash=hash_recovery_code(code, salt))
+
+
+def consume_recovery_code(db: Session, user: User, code: str) -> bool:
+    """Spend one of the user's unused recovery codes. A legacy-hashed row is accepted too; the
+    spent row's legacy digest is replaced by a salted one so no unsalted hash lingers."""
+    rows = db.scalars(
+        select(TotpRecoveryCode).where(
+            TotpRecoveryCode.user_id == user.id, TotpRecoveryCode.used_at.is_(None)
+        )
+    ).all()
+    for row in rows:
+        if row.salt:
+            ok = hmac.compare_digest(row.code_hash, hash_recovery_code(code, row.salt))
+        else:
+            ok = hmac.compare_digest(row.code_hash, legacy_hash_recovery_code(code))
+        if ok:
+            row.salt = secrets.token_hex(8)
+            row.code_hash = hash_recovery_code(code, row.salt)
+            row.used_at = datetime.now(timezone.utc)
+            return True
+    return False

@@ -16,7 +16,7 @@ from app.auth import can_edit_bug
 from app.models import Board, Bug, EpicDetail, Label, Project, Sprint, User, WorkItemLabel
 from app.schemas import CANONICAL_STATUSES, display_id_for
 
-BACKLOG_DEFAULT_LIMIT = 1000
+BACKLOG_DEFAULT_LIMIT = 300
 _STATUS_ORDER = {value: n for n, value in enumerate(CANONICAL_STATUSES)}
 
 
@@ -84,7 +84,7 @@ def issue_payloads(
             "title": item.title,
             "item_type": item.item_type or "Bug",
             "status": item.status,
-            # The board's last column decides "done" (Jira), whatever the category.
+            # The board's last column decides "done", whatever the category.
             "status_category": "done" if item.status in done else category_of(categories, item),
             "priority": item.priority,
             "story_points": float(item.story_points) if item.story_points is not None else None,
@@ -211,7 +211,7 @@ def planning_view(db: Session, board: Board, viewer: User, backlog_limit: int = 
         _issues_query().where(Bug.sprint_id.in_(sprint_ids), Bug.item_type.in_(STANDARD_TYPES))
         .order_by(Bug.rank, Bug.id)
     ).all()) if sprint_ids else []
-    # Jira's backlog: issues in no open sprint whose status is not in the
+    # The backlog: issues in no open sprint whose status is not in the
     # board's last column.
     backlog_filter = (
         Bug.project_id == board.project_id, Bug.sprint_id.is_(None),
@@ -271,7 +271,7 @@ def epic_rows(db: Session, epics: list[Bug]) -> list[dict]:
     return out
 
 
-HIERARCHY_UNPARENTED_LIMIT = 500
+HIERARCHY_UNPARENTED_LIMIT = 200
 
 
 def hierarchy_view(

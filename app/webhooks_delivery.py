@@ -5,9 +5,10 @@ no queue, and lost if the worker restarts mid-flight. Each payload carries a uni
 ``delivery_id`` so listeners can deduplicate. Ten consecutive failures suspend a hook so a
 broken listener cannot generate noise forever; an admin re-enables it once it is fixed.
 
-Destinations on private networks (loopback, RFC 1918, link-local, cloud metadata hosts) are
-refused unless WEBHOOK_ALLOW_PRIVATE_NETWORKS is set: the hostname is checked when the hook
-is saved and every address it resolves to is checked again at delivery time. Redirects are
+Destinations that are not globally routable (loopback, RFC 1918, CGNAT, link-local, cloud
+metadata) are refused unless WEBHOOK_ALLOW_PRIVATE_NETWORKS is set (link-local and metadata
+never): the hostname is checked when the hook is saved and the connection itself only goes to
+an address vetted by app/net_guard.py, so DNS rebinding cannot redirect it. Redirects are
 never followed.
 """
 from __future__ import annotations
@@ -27,6 +28,7 @@ from urllib.parse import urlparse
 import httpx
 from sqlalchemy import select
 
+from app import net_guard
 from app.config import get_settings
 from app.database import SessionLocal
 from app.metrics import record_event
@@ -48,14 +50,6 @@ class WebhookTargetError(ValueError):
     """The destination is not allowed (private network) or cannot be resolved."""
 
 
-def _is_private(address: str) -> bool:
-    ip = ipaddress.ip_address(address)
-    return bool(
-        ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved
-        or ip.is_multicast or ip.is_unspecified
-    )
-
-
 def _literal_ip(host: str) -> str | None:
     """The host as an IP address string when it is an IP literal (including the plain-integer
     form ``2130706433``), else None."""
@@ -74,29 +68,27 @@ def check_hostname(url: str) -> str:
         raise WebhookTargetError(PRIVATE_TARGET_MESSAGE) from exc
     if not host:
         raise WebhookTargetError(PRIVATE_TARGET_MESSAGE)
-    if get_settings().WEBHOOK_ALLOW_PRIVATE_NETWORKS:
-        return host
-    if host in _BLOCKED_HOSTS or host.endswith(_BLOCKED_HOST_SUFFIXES):
+    allow = get_settings().WEBHOOK_ALLOW_PRIVATE_NETWORKS
+    if not allow and (host in _BLOCKED_HOSTS or host.endswith(_BLOCKED_HOST_SUFFIXES)):
         raise WebhookTargetError(PRIVATE_TARGET_MESSAGE)
     address = _literal_ip(host)
-    if address is not None and _is_private(address):
+    if address is not None and net_guard.address_problem(ipaddress.ip_address(address), allow):
         raise WebhookTargetError(PRIVATE_TARGET_MESSAGE)
     return host
 
 
 def check_destination(url: str) -> None:
-    """Delivery-time check: the host passes ``check_hostname`` and every address it resolves
-    to is public."""
+    """Early, friendly refusal: the host passes ``check_hostname`` and every address it resolves
+    to is allowed. The connection itself is guarded again (see ``_client``), so this check
+    is not what stops DNS rebinding."""
     host = check_hostname(url)
-    if get_settings().WEBHOOK_ALLOW_PRIVATE_NETWORKS or _literal_ip(host) is not None:
-        return
     port = urlparse(url).port or (443 if url.lower().startswith("https") else 80)
     try:
-        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+        net_guard.allowed_addresses(host, port, get_settings().WEBHOOK_ALLOW_PRIVATE_NETWORKS)
+    except net_guard.HostNotAllowed as exc:
+        raise WebhookTargetError(PRIVATE_TARGET_MESSAGE) from exc
     except socket.gaierror as exc:
         raise WebhookTargetError(f"Could not resolve {host}") from exc
-    if any(_is_private(info[4][0]) for info in infos):
-        raise WebhookTargetError(PRIVATE_TARGET_MESSAGE)
 
 
 def matches_event(subscriptions: str, event: str) -> bool:
@@ -137,6 +129,8 @@ def _post(client: httpx.Client, hook: Webhook, body: bytes, event: str, delivery
                     response.status_code, (time.monotonic() - started) * 1000)
     except (WebhookTargetError, SecretUnreadable) as exc:
         hook.last_status_code, ok, error = None, False, str(exc)[:500]
+    except net_guard.HostNotAllowed:  # the name now resolves somewhere internal (rebinding)
+        hook.last_status_code, ok, error = None, False, PRIVATE_TARGET_MESSAGE
     except httpx.HTTPError as exc:
         hook.last_status_code, ok, error = None, False, f"{type(exc).__name__}: {exc}"[:500]
     if ok:
@@ -179,7 +173,9 @@ def deliver_event(
             "delivered_at": datetime.now(timezone.utc).isoformat(), "payload": payload,
         }, default=str).encode("utf-8")
         timeout = httpx.Timeout(get_settings().WEBHOOK_TIMEOUT_SECONDS)
-        with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+        transport = net_guard.guarded_transport(
+            verify=True, allow_private=get_settings().WEBHOOK_ALLOW_PRIVATE_NETWORKS)
+        with httpx.Client(timeout=timeout, follow_redirects=False, transport=transport) as client:
             for hook in hooks:
                 _post(client, hook, body, event, delivery_id)
         db.commit()

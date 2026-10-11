@@ -17,7 +17,7 @@ const VIEW_TITLES = {
 
 // "list" builds its own live summary below.
 const VIEW_SUBTITLES = {
-  sprints: "Backlog, active sprint board, epics and reports for a project, the Jira Scrum way",
+  sprints: "Backlog, active sprint board, epics and reports for a project",
   events:
     "Group work items into an event — a standup, a sprint meeting, a release — and track them together",
   analytics: "Visual breakdown of your work by status, priority, environment, project and assignee",

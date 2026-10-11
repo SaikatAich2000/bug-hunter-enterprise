@@ -1,12 +1,12 @@
-"""Adversarial Jira scenarios for the agile reports, from the independent
-reports audit. Each test asserts the number Jira would show, worked out by
-hand (Clock back-dates the change log; see test_agile_reports_jira.py)."""
+"""Adversarial scenarios for the agile reports, from the independent reports
+audit. Each test asserts the number the reports must show, worked out by hand
+(Clock back-dates the change log; see test_agile_reports_by_hand.py)."""
 from __future__ import annotations
 
 import csv
 import io
 
-from tests.test_agile_reports_jira import (
+from tests.test_agile_reports_by_hand import (
     Clock,
     _complete,
     _estimate,
@@ -44,7 +44,7 @@ def _remove(c, sid, iid):
 # ---------------------------------------------------------------- S1
 def test_s1_completed_outside_excluded_from_completed_and_velocity(admin_client):
     """A(3) committed, done Thu.  E(5) Done on Sun 1 Mar (before), added Wed 4.
-    Jira: Completed issues = A, total 3; 'completed outside' = E (5) listed
+    Expected: Completed issues = A, total 3; 'completed outside' = E (5) listed
     separately and NOT in the Completed total nor in velocity completed."""
     c = admin_client
     p, bid = _project(c, "S1")
@@ -70,7 +70,7 @@ def test_s1_completed_outside_excluded_from_completed_and_velocity(admin_client)
     vel = _vel(c, bid)["points"]
     assert [r["id"] for r in rep["completed_outside"]] == [e["id"]]
     assert [r["id"] for r in rep["completed"]] == [a["id"]]
-    # Jira: header total equals the Completed table total
+    # The header total equals the Completed table total
     assert rep["completed_count"] == 1, rep["completed_count"]
     assert rep["completed_estimate"] == 3, rep["completed_estimate"]
     assert [(v["committed_estimate"], v["completed_estimate"]) for v in vel] == [(3, 3)]
@@ -79,7 +79,7 @@ def test_s1_completed_outside_excluded_from_completed_and_velocity(admin_client)
 # ---------------------------------------------------------------- S2
 def test_s2_outside_issue_reopened_and_recompleted_counts_in_sprint(admin_client):
     """E(5) Done before; added Wed; reopened Thu; Done again Fri 6.
-    Jira: E was completed during the sprint -> Completed issues [E], 5;
+    Expected: E was completed during the sprint -> Completed issues [E], 5;
     nothing completed outside."""
     c = admin_client
     p, bid = _project(c, "S2")
@@ -115,7 +115,7 @@ def test_s2_outside_issue_reopened_and_recompleted_counts_in_sprint(admin_client
 def test_s3_estimate_before_start_and_remove_readd(admin_client):
     """A 3->8 on Sun (before start).  B(5) committed.
     Tue 10:00 B removed (13->8), Tue 12:00 B 5->2 while out (no sprint event),
-    Wed 10:00 B re-added (8->10).  Jira: committed 13 (A 8 + B 5),
+    Wed 10:00 B re-added (8->10).  Expected: committed 13 (A 8 + B 5),
     no removed issue, B not marked added (it was committed), remaining 10."""
     c = admin_client
     p, bid = _project(c, "S3")
@@ -150,8 +150,8 @@ def test_s3_estimate_before_start_and_remove_readd(admin_client):
 def test_s4_moved_between_parallel_sprints(admin_client):
     """X: A(3),B(5); Y: C(2); both start Mon 09:00.  Tue B moved X->Y,
     Wed B done.  Complete both Fri.
-    Jira X: committed 8, removed B(5), completed 0, not completed A 3.
-    Jira Y: committed 2, added B, completed B 5, not completed C 2.
+    Expected X: committed 8, removed B(5), completed 0, not completed A 3.
+    Expected Y: committed 2, added B, completed B 5, not completed C 2.
     Velocity: X (8,0), Y (2,5)."""
     c = admin_client
     project = c.post("/api/projects", json={"name": "S4", "color": "#c9764f"}).json()
@@ -194,7 +194,7 @@ def test_s4_moved_between_parallel_sprints(admin_client):
 def test_s5_board_timezone_dst_and_subsecond_start(admin_client):
     """Board America/New_York, Mon-Fri.  Sprint 2-13 Mar 2026, started
     2026-03-02T14:00:00.750Z (09:00:00.75 EST).  DST starts Sun 8 Mar.
-    Jira: guideline ends at local midnight 14 Mar = 04:00Z; Sat 7 + Sun 8
+    Expected: guideline ends at local midnight 14 Mar = 04:00Z; Sat 7 + Sun 8
     flat: value at 2026-03-07T05:00Z == value at 2026-03-09T04:00Z;
     non-working days ['2026-03-07','2026-03-08'].  A(10) done 2026-03-03T03:00Z
     (Mon 22:00 local) -> daily report for local Mon 2 Mar shows completed 10."""
@@ -231,7 +231,7 @@ def test_s5_board_timezone_dst_and_subsecond_start(admin_client):
 # ---------------------------------------------------------------- S6
 def test_s6_control_chart_reopened_issue_is_one_dot(admin_client):
     """X: In Progress Mon 2 10:00, Done Tue 3 10:00, In Progress Wed 4 10:00,
-    Done Fri 6 10:00.  Jira control chart: ONE dot for X, completed at the last
+    Done Fri 6 10:00.  Control chart: ONE dot for X, completed at the last
     entry into Done (6 Mar); cycle = first In Progress -> last Done = 4.0 d
     (time-in-columns variant: 3.0 d)."""
     c = admin_client
@@ -286,7 +286,7 @@ def test_s8_sprint_csv_export_has_all_outcomes(admin_client):
 # ---------------------------------------------------------------- S9
 def test_s9_parent_done_with_open_subtask_burndown_vs_sprint_report(admin_client):
     """P(5) done, its sub-task open, sprint completed.  Sprint report: P not
-    completed (Jira sub-task rule).  Burndown/burnup end should agree:
+    completed (sub-task rule).  Burndown/burnup end should agree:
     remaining 5, completed 0."""
     c = admin_client
     p, bid = _project(c, "S9")
@@ -372,7 +372,7 @@ def test_s12_cfd_json_and_csv_honour_include_subtasks(admin_client):
 def test_s13_issue_done_before_start_and_created_in_sprint(admin_client):
     """Z(2) Done on Sun, committed at Mon start; A(3) committed open.
     Tue: N(4) created directly into the active sprint.
-    Jira lists N as added (*) and Z as completed outside the sprint."""
+    The report lists N as added (*) and Z as completed outside the sprint."""
     c = admin_client
     p, bid = _project(c, "S13")
     clock = Clock()
@@ -400,7 +400,7 @@ def test_s13_issue_done_before_start_and_created_in_sprint(admin_client):
 
 # ---------------------------------------------------------------- S14
 def test_s14_daily_completed_today_with_same_day_reopen(admin_client):
-    """A(3) done Tue 10:00, reopened Tue 15:00.  Jira-like daily: net 0
+    """A(3) done Tue 10:00, reopened Tue 15:00.  Daily view: net 0
     completed that day (A is not done at end of day)."""
     c = admin_client
     p, bid = _project(c, "S14")

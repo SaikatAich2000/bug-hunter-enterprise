@@ -1,4 +1,4 @@
-"""Work-item type hierarchy, modelled on Jira Software.
+"""Work-item type hierarchy.
 
     Epic                                  level 1: groups work, never planned into a sprint
     Story, Task, Bug, Requirement         level 0: "standard" issues, ranked and planned

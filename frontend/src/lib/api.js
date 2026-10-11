@@ -59,10 +59,34 @@ export function requestInit(opts = {}) {
   };
 }
 
-export async function api(path, opts = {}) {
-  const init = requestInit(opts);
+// A request that hangs (a stalled proxy, a dropped connection) fails instead of spinning
+// forever; uploads get longer.
+const REQUEST_TIMEOUT_MS = 30_000;
+const UPLOAD_TIMEOUT_MS = 5 * 60_000;
+export const OFFLINE_MESSAGE = "Can't reach the server. Check your connection and try again.";
+export const TIMEOUT_MESSAGE = "The server took too long to respond. Please try again.";
 
-  const res = await fetch(`${API}${path}`, init);
+/** fetch with a timeout, turning network failures into readable ApiErrors (status 0). */
+async function send(path, init, timeoutMs) {
+  const timeout = typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(timeoutMs) : undefined;
+  const signal = init.signal && timeout && AbortSignal.any ? AbortSignal.any([init.signal, timeout]) : (init.signal || timeout);
+  try {
+    return await fetch(`${API}${path}`, { ...init, signal });
+  } catch (err) {
+    if (err?.name === "TimeoutError") throw new ApiError(TIMEOUT_MESSAGE, 0);
+    if (err?.name === "AbortError" && init.signal?.aborted) throw err; // the caller cancelled
+    if (err instanceof TypeError || err?.name === "AbortError") throw new ApiError(OFFLINE_MESSAGE, 0);
+    throw err;
+  }
+}
+
+function timeoutFor(opts) {
+  return opts.timeoutMs ?? (opts.body instanceof FormData ? UPLOAD_TIMEOUT_MS : REQUEST_TIMEOUT_MS);
+}
+
+export async function api(path, opts = {}) {
+  const { timeoutMs: _timeout, ...rest } = opts;
+  const res = await send(path, requestInit(rest), timeoutFor(opts));
 
   if (res.status === 401) {
     bounceToLogin();
@@ -91,7 +115,9 @@ export async function api(path, opts = {}) {
 
 /** Fetch a binary endpoint; returns blob + filename. */
 export async function apiBlob(path, opts = {}) {
-  const res = await fetch(`${API}${path}`, requestInit(opts));
+  const { timeoutMs: _timeout, ...rest } = opts;
+  // Exports can take a while to build; allow as long as an upload.
+  const res = await send(path, requestInit(rest), opts.timeoutMs ?? UPLOAD_TIMEOUT_MS);
   if (res.status === 401) {
     bounceToLogin();
     throw new ApiError("Session expired", 401, true);

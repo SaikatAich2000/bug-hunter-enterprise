@@ -39,9 +39,10 @@ def _uid(db, email: str) -> int:
     return db.scalar(select(User).where(User.email == email)).id
 
 
-def _mk_user(admin_client, name: str, email: str) -> int:
+def _mk_user(admin_client, name: str, email: str, project_ids=()) -> int:
     r = admin_client.post("/api/users", json={
         "name": name, "email": email, "role": "user", "password": "User12345",
+        "project_ids": list(project_ids),
     })
     assert r.status_code == 201, r.text
     return r.json()["id"]
@@ -198,10 +199,10 @@ def test_push_to_users_sends_and_prunes_dead_tokens(admin_client, monkeypatch):
 def test_operation_fires_push_immediately(admin_client, monkeypatch):
     _enable_push(monkeypatch, on=True)
     calls = _capture_fcm(monkeypatch)
-    xid = _mk_user(admin_client, "Xavier", "xavier@test.local")
+    proj = admin_client.post("/api/projects", json={"name": "Push Proj"}).json()
+    xid = _mk_user(admin_client, "Xavier", "xavier@test.local", project_ids=[proj["id"]])
     _register(xid, "xavier-token")
 
-    proj = admin_client.post("/api/projects", json={"name": "Push Proj"}).json()
     r = admin_client.post("/api/bugs", json={
         "project_id": proj["id"], "title": "Push me", "priority": "Medium",
         "environment": "DEV", "assignee_ids": [xid],
@@ -236,10 +237,10 @@ def test_bulk_delete_fires_push_immediately(admin_client, monkeypatch):
     """Bulk delete must push to assignees like a single delete; the bulk path was previously silent."""
     _enable_push(monkeypatch, on=True)
     calls = _capture_fcm(monkeypatch)
-    yid = _mk_user(admin_client, "Yolanda", "yolanda@test.local")
+    proj = admin_client.post("/api/projects", json={"name": "Bulk Push"}).json()
+    yid = _mk_user(admin_client, "Yolanda", "yolanda@test.local", project_ids=[proj["id"]])
     _register(yid, "yolanda-token")
 
-    proj = admin_client.post("/api/projects", json={"name": "Bulk Push"}).json()
     bug = admin_client.post("/api/bugs", json={
         "project_id": proj["id"], "title": "Bulk push me", "priority": "Medium",
         "environment": "DEV", "assignee_ids": [yid],

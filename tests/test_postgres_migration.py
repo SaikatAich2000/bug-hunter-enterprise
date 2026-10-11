@@ -77,14 +77,14 @@ def _run(code: str, db_url: str) -> subprocess.CompletedProcess:
 
 @pytest.fixture
 def scratch_db():
-    from sqlalchemy import create_engine, text
+    from sqlalchemy import create_engine, make_url, text
     name = f"bh_migtest_{uuid.uuid4().hex[:10]}"
     admin = create_engine(ADMIN_URL, isolation_level="AUTOCOMMIT")
     with admin.connect() as c:
         c.execute(text(f'CREATE DATABASE "{name}"'))
-    base, _, _ = ADMIN_URL.rpartition("/")
     try:
-        yield f"{base}/{name}"
+        # make_url keeps query parameters (a socket host=, sslmode=) that string splitting broke.
+        yield make_url(ADMIN_URL).set(database=name).render_as_string(hide_password=False)
     finally:
         with admin.connect() as c:
             c.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
@@ -102,7 +102,7 @@ def test_upgrade_adds_every_missing_column_and_index(scratch_db):
 
 
 # Legacy agile data (Collections, Features, sub-tasks without a valid parent,
-# epics in sprints) written before the Jira-hierarchy upgrade, then two full
+# epics in sprints) written before the hierarchy upgrade, then two full
 # boots: the upgrade SQL must run on PostgreSQL and change nothing the second
 # time.
 AGILE_LEGACY = r"""
@@ -138,6 +138,9 @@ from app.database import Base, init_db
 from app.models import Organization, Project, User
 eng = create_engine(URL)
 Base.metadata.create_all(eng)
+with eng.begin() as c:
+    # The earlier edition stored role "member"; it predates the role constraint.
+    c.execute(text("ALTER TABLE users DROP CONSTRAINT ck_users_role"))
 with Session(eng) as db:
     org = Organization(name="Old Org", slug="old-org")
     db.add(org)
@@ -214,3 +217,42 @@ def test_migration_lock_is_transaction_scoped(scratch_db):
     assert out.returncode == 0, (out.stdout + out.stderr)[-3000:]
     assert "SEEDED [False]" in out.stdout, out.stdout
     assert "LEFTOVER 0" in out.stdout, out.stdout
+
+
+# CHECK constraints reach existing databases: added NOT VALID, validated when the data allows,
+# and a violating legacy row leaves the constraint guarding new writes without blocking boot.
+CONSTRAINTS = r"""
+import logging, sys
+logging.basicConfig(level=logging.WARNING, stream=sys.stdout, format="LOG %(levelname)s %(message)s")
+from sqlalchemy import text
+from app.database import Base, engine, init_db
+import app.models  # noqa: F401
+Base.metadata.create_all(engine)
+with engine.begin() as c:
+    c.execute(text("ALTER TABLE bugs DROP CONSTRAINT ck_bugs_priority"))
+    c.execute(text("ALTER TABLE users DROP CONSTRAINT ck_users_role"))
+    c.execute(text("INSERT INTO organizations (name, slug, description, created_at, updated_at) "
+                   "VALUES ('Legacy Org', 'legacy-org', '', now(), now())"))
+    c.execute(text("INSERT INTO users (org_id, name, email, role, password_hash, is_active, session_version, totp_enabled, created_at, updated_at) "
+                   "SELECT id, 'Legacy', 'legacy@x.test', 'superuser', 'x', true, 0, false, now(), now() FROM organizations WHERE slug = 'legacy-org'"))
+assert init_db() is True
+with engine.connect() as c:
+    rows = dict(c.execute(text(
+        "SELECT conname, convalidated FROM pg_constraint WHERE conname IN ('ck_bugs_priority', 'ck_users_role')"
+    )).all())
+print("CONSTRAINTS", sorted(rows.items()))
+try:
+    with engine.begin() as c:
+        c.execute(text("UPDATE users SET role = 'root' WHERE email = 'legacy@x.test'"))
+    print("UPDATE ALLOWED")
+except Exception:
+    print("UPDATE REFUSED")
+"""
+
+
+def test_check_constraints_reach_existing_databases(scratch_db):
+    out = _run(CONSTRAINTS, scratch_db)
+    assert out.returncode == 0, (out.stdout + out.stderr)[-3000:]
+    assert "CONSTRAINTS [('ck_bugs_priority', True), ('ck_users_role', False)]" in out.stdout, out.stdout
+    assert "violate ck_users_role" in out.stdout
+    assert "UPDATE REFUSED" in out.stdout

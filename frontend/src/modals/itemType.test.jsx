@@ -18,7 +18,7 @@ import {
   resolveCreateItemType,
 } from "../lib/itemTypes.js";
 
-describe("the Jira hierarchy", () => {
+describe("the work-item hierarchy", () => {
   it("has exactly Epic, four standard types and Sub-task", () => {
     expect(ALL_ITEM_TYPES).toEqual(["Epic", "Story", "Task", "Bug", "Requirement", "Sub-task"]);
     expect(STANDARD_TYPES).toEqual(["Story", "Task", "Bug", "Requirement"]);
@@ -60,7 +60,7 @@ describe("conversion type selection", () => {
     expect(itemTypeSelectionForEdit("Sub-task")).toEqual(["Sub-task"]);
   });
 
-  it("labels options with their icon and Jira name", () => {
+  it("labels options with their icon and type name", () => {
     const story = itemTypeOptions(["Story"])[0];
     expect(story.value).toBe("Story");
     expect(story.label).toBe(`${itemTypeIcon("Story")} Story`);
@@ -74,7 +74,7 @@ describe("conversion type selection", () => {
 });
 
 describe("create types vs the project's Agile surface", () => {
-  it("offers the Jira types, Bug first, and never retired ones", () => {
+  it("offers the current types, Bug first, and never retired ones", () => {
     const values = itemTypeSelectionForCreate(["Bug", "Requirement", "Collection", "Feature"]);
     expect(values).toEqual(["Bug", "Story", "Task", "Requirement", "Epic", "Sub-task"]);
   });

@@ -284,55 +284,22 @@ def test_email_digest_skips_already_claimed_rows(client, monkeypatch):
     assert uid  # user existed
 
 
-# app/auth.py — SESSION_REQUIRE_JTI legacy jti-less path
-def test_auth_legacy_jtiless_session_accepted_when_not_required(client):
-    # A jti-less cookie is accepted when SESSION_REQUIRE_JTI is False.
+# app/auth.py — a cookie without a session id can't be revoked, so it is refused
+def test_auth_jtiless_session_cookie_is_rejected(client):
     from sqlalchemy import select
 
-    from app.auth import COOKIE_NAME, make_session_token
-    from app.config import get_settings
+    from app.auth import COOKIE_NAME, _signer
     from app.database import SessionLocal
     from app.models import User
-
-    s = get_settings()
-    s.__class__.SESSION_REQUIRE_JTI = False
 
     db = SessionLocal()
     try:
         admin = db.scalar(select(User).where(User.email == BOOTSTRAP_EMAIL))
-        token = make_session_token(admin.id, admin.session_version or 0, jti=None)
+        legacy = _signer().sign(f"{admin.id}:{admin.session_version or 0}".encode()).decode()
     finally:
         db.close()
-
-    client.cookies.set(COOKIE_NAME, token)
-    r = client.get("/api/auth/me")
-    assert r.status_code == 200
-    assert r.json()["email"] == BOOTSTRAP_EMAIL
-
-
-def test_auth_legacy_jtiless_session_rejected_when_required(client):
-    # A jti-less cookie is rejected (401) when SESSION_REQUIRE_JTI is True.
-    from sqlalchemy import select
-
-    from app.auth import COOKIE_NAME, make_session_token
-    from app.config import get_settings
-    from app.database import SessionLocal
-    from app.models import User
-
-    s = get_settings()
-    s.__class__.SESSION_REQUIRE_JTI = True
-    try:
-        db = SessionLocal()
-        try:
-            admin = db.scalar(select(User).where(User.email == BOOTSTRAP_EMAIL))
-            token = make_session_token(admin.id, admin.session_version or 0, jti=None)
-        finally:
-            db.close()
-        client.cookies.set(COOKIE_NAME, token)
-        r = client.get("/api/auth/me")
-        assert r.status_code == 401
-    finally:
-        s.__class__.SESSION_REQUIRE_JTI = False
+    client.cookies.set(COOKIE_NAME, legacy)
+    assert client.get("/api/auth/me").status_code == 401
 
 
 # app/routes/auth.py - change-password same-pw reject + tz-aware reset expiry.
@@ -399,50 +366,26 @@ def test_push_subscribe_rebinds_to_the_new_account(admin_client):
     assert r.status_code == 200  # a device switching accounts re-binds its token
 
 
-# app/routes/sessions.py — empty list + sweep error rollback
+# app/routes/sessions.py — empty list skips the user prefetch
 def test_sessions_list_empty_skips_user_prefetch(client):
-    # Empty sessions table skips user-prefetch; a legacy jti-less cookie lets us wipe the table and stay admin.
+    from types import SimpleNamespace
+
     from sqlalchemy import select
 
-    from app.auth import COOKIE_NAME, make_session_token
-    from app.config import get_settings
     from app.database import SessionLocal
     from app.models import Session as SessionRow
     from app.models import User
-
-    get_settings().__class__.SESSION_REQUIRE_JTI = False
+    from app.routes.sessions import list_sessions
 
     db = SessionLocal()
     try:
         admin = db.scalar(select(User).where(User.email == BOOTSTRAP_EMAIL))
-        token = make_session_token(admin.id, admin.session_version or 0, jti=None)
         db.query(SessionRow).delete()
         db.commit()
+        request = SimpleNamespace(cookies={}, headers={})
+        assert list_sessions(request, db=db, actor=admin) == []
     finally:
         db.close()
-
-    client.cookies.set(COOKIE_NAME, token)
-    r = client.get("/api/sessions")
-    assert r.status_code == 200
-    assert r.json() == []
-
-
-def test_sessions_list_survives_sweep_error(admin_client, monkeypatch):
-    # SQLAlchemyError during the sweep is caught and rolled back; listing still returns.
-    from sqlalchemy.exc import SQLAlchemyError
-
-    import app.routes.sessions as sessions_mod
-
-    real_execute_marker = {"raised": False}
-
-    def boom_delete(*args, **kwargs):
-        real_execute_marker["raised"] = True
-        raise SQLAlchemyError("sweep boom")
-
-    monkeypatch.setattr(sessions_mod, "delete", boom_delete)
-    r = admin_client.get("/api/sessions")
-    assert r.status_code == 200
-    assert real_execute_marker["raised"] is True
 
 
 # app/main.py - asset hash, body-limit ASGI, cache headers, rate buckets, IP, CSRF.
@@ -465,11 +408,6 @@ class _FakeReq:
         self.cookies = {}
 
 
-async def _ok_no_cache(_request):
-    from starlette.responses import Response
-    return Response("ok")
-
-
 def test_main_asset_version_large_file_uses_size(tmp_path, monkeypatch):
     # Over-cap files are hashed by size (not read); shrink the cap to trip the branch.
     import app.main as main
@@ -483,11 +421,16 @@ def test_main_asset_version_large_file_uses_size(tmp_path, monkeypatch):
 
 def test_main_cache_control_static_non_fingerprinted(monkeypatch):
     # Non-assets /static/ paths get the 1-hour header, not the immutable one.
+    from starlette.datastructures import MutableHeaders
+
     import app.main as main
-    mw = main.CacheControlMiddleware(app=None)
-    req = _FakeReq(path="/static/firebase-messaging-sw.js", method="GET")
-    resp = asyncio.run(mw.dispatch(req, _ok_no_cache))
-    assert resp.headers["Cache-Control"] == "public, max-age=3600"
+
+    headers = MutableHeaders()
+    main._apply_cache_headers(headers, "/static/firebase-messaging-sw.js")
+    assert headers["Cache-Control"] == "public, max-age=3600"
+    kept = MutableHeaders({"Cache-Control": "private"})
+    main._apply_cache_headers(kept, "/api/x")
+    assert kept["Cache-Control"] == "private"
 
 
 def test_main_body_limit_skips_non_request_messages():
@@ -506,7 +449,7 @@ def test_main_body_limit_skips_non_request_messages():
     async def send(_msg):
         return None
 
-    mw = main.StreamingBodyLimitMiddleware(app_inner)
+    mw = main.BodyLimitMiddleware(app_inner)
     scope = {"type": "http", "path": "/api/x"}
     asyncio.run(mw(scope, receive, send))
     assert received["msgs"] == [{"type": "http.disconnect"}]
@@ -515,7 +458,7 @@ def test_main_body_limit_skips_non_request_messages():
 def test_main_body_limit_413_on_oversized_body(monkeypatch):
     # Oversized body triggers 413 when the response hasn't started.
     import app.main as main
-    monkeypatch.setattr(main.settings, "MAX_REQUEST_BODY_BYTES", 8)
+    monkeypatch.setattr(main.settings, "MAX_JSON_BODY_BYTES", 8)
 
     async def app_inner(_scope, receive, _send):
         await receive()
@@ -528,7 +471,7 @@ def test_main_body_limit_413_on_oversized_body(monkeypatch):
     async def send(msg):
         sent.append(msg)
 
-    mw = main.StreamingBodyLimitMiddleware(app_inner)
+    mw = main.BodyLimitMiddleware(app_inner)
     scope = {"type": "http", "path": "/api/x"}
     asyncio.run(mw(scope, receive, send))
     starts = [m for m in sent if m.get("type") == "http.response.start"]
@@ -539,7 +482,7 @@ def test_main_body_limit_413_on_oversized_body(monkeypatch):
 def test_main_body_limit_reraises_when_response_started(monkeypatch):
     # Response already started: no clean 413, so _RequestBodyTooLarge is re-raised.
     import app.main as main
-    monkeypatch.setattr(main.settings, "MAX_REQUEST_BODY_BYTES", 8)
+    monkeypatch.setattr(main.settings, "MAX_JSON_BODY_BYTES", 8)
 
     async def app_inner(_scope, receive, send):
         # Start the response before reading the oversized body.
@@ -552,7 +495,7 @@ def test_main_body_limit_reraises_when_response_started(monkeypatch):
     async def send(_msg):
         return None
 
-    mw = main.StreamingBodyLimitMiddleware(app_inner)
+    mw = main.BodyLimitMiddleware(app_inner)
     scope = {"type": "http", "path": "/api/x"}
     coro = mw(scope, receive, send)
     with pytest.raises(main._RequestBodyTooLarge):
@@ -588,11 +531,9 @@ def test_main_csrf_origin_present_not_allowed_blocks(monkeypatch):
     # Unknown Origin is 403. ('elif referer:' false is unreachable: the earlier guard returns first.)
     import app.main as main
     monkeypatch.setattr(main, "_allowed_origins", lambda: set())
-    mw = main.CsrfOriginMiddleware(app=None)
     req = _FakeReq(path="/api/projects", method="POST",
                    headers={"origin": "https://evil.example.com"})  # no host/referer
-    resp = asyncio.run(mw.dispatch(req, _ok_no_cache))
-    assert resp.status_code == 403
+    assert main.csrf_check(req).status_code == 403
 
 
 def test_main_has_valid_session_missing_row_returns_false(client):
@@ -953,18 +894,18 @@ def test_bugs_dangerous_ext_no_extension_returns_none(client):
     assert _dangerous_upload_ext("evil.exe") == "exe"
 
 
-def test_bugs_resolve_user_unknown_raises_400(client):
+def test_people_resolve_user_unknown_raises_400(client):
     # None is allowed (no filter); a non-existent id is a hard 400.
     from fastapi import HTTPException
 
     from app.database import SessionLocal
-    from app.routes.bugs import _resolve_user
+    from app.people import resolve_user
     db = SessionLocal()
     try:
         org_id = default_org_id()
-        assert _resolve_user(db, None, org_id) is None
+        assert resolve_user(db, None, org_id) is None
         with pytest.raises(HTTPException) as ei:
-            _resolve_user(db, 999999, org_id)
+            resolve_user(db, 999999, org_id)
         assert ei.value.status_code == 400
     finally:
         db.close()
@@ -1094,9 +1035,10 @@ def test_bugs_attachment_dangerous_ext_rejected(admin_client):
     assert "exe" in r.json()["detail"].lower()
 
 
-def _mk_user_via_api(admin_client, name, email):
+def _mk_user_via_api(admin_client, name, email, project_ids=()):
     r = admin_client.post("/api/users", json={
         "name": name, "email": email, "role": "user", "password": "User12345",
+        "project_ids": list(project_ids),
     })
     assert r.status_code == 201, r.text
     return r.json()["id"]
@@ -1104,8 +1046,8 @@ def _mk_user_via_api(admin_client, name, email):
 
 def test_bugs_update_changes_reporter_and_notifies(admin_client):
     # Reporter change is recorded; a tracked-field update stages 'updated' notifications.
-    uid = _mk_user_via_api(admin_client, "Redo", "redo@test.local")
     proj = admin_client.post("/api/projects", json={"name": "UpdProj"}).json()
+    uid = _mk_user_via_api(admin_client, "Redo", "redo@test.local", [proj["id"]])
     bug = admin_client.post("/api/bugs", json={
         "project_id": proj["id"], "title": "orig", "priority": "Low",
         "environment": "DEV", "assignee_ids": [uid],
@@ -1123,9 +1065,9 @@ def test_bugs_update_reporter_change_same_display_name_not_tracked(admin_client)
     # changes, and even though the plain display-name label is identical, the
     # write must not be silently rolled back as a no-op — the audit entry
     # disambiguates via email instead.
-    uid1 = _mk_user_via_api(admin_client, "Same Name", "same1@test.local")
-    uid2 = _mk_user_via_api(admin_client, "Same Name", "same2@test.local")
     proj = admin_client.post("/api/projects", json={"name": "SameNameProj"}).json()
+    uid1 = _mk_user_via_api(admin_client, "Same Name", "same1@test.local", [proj["id"]])
+    uid2 = _mk_user_via_api(admin_client, "Same Name", "same2@test.local", [proj["id"]])
     bug = admin_client.post("/api/bugs", json={
         "project_id": proj["id"], "title": "orig", "priority": "Low",
         "environment": "DEV", "reporter_id": uid1,
@@ -1372,8 +1314,8 @@ def test_bugs_download_range_row_vanished_404(admin_client):
 
 def test_bugs_update_assignee_only_skips_changes_notify(admin_client):
     # Assignee-only update: empty changes but newly_assigned set, so only the assign-notify block runs.
-    uid = _mk_user_via_api(admin_client, "Assignee Only", "assignonly@test.local")
     proj = admin_client.post("/api/projects", json={"name": "AssignOnly"}).json()
+    uid = _mk_user_via_api(admin_client, "Assignee Only", "assignonly@test.local", [proj["id"]])
     bug = admin_client.post("/api/bugs", json={
         "project_id": proj["id"], "title": "assignee only", "priority": "Low",
         "environment": "DEV",

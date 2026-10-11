@@ -14,7 +14,7 @@ from app.api_docs import NOT_FOUND_404, NOT_FOUND_VALIDATION_422
 from app.auth import get_current_user
 from app.database import get_db
 from app.models import Activity, Project, Sprint, User
-from app.routes.bugs import _resolve_users
+from app.people import reject_inactive, require_project_members, resolve_users
 from app.schemas import PlanningOut, SprintCapacityReplaceIn
 
 router = APIRouter(prefix="/api/agile", tags=["agile-planning"])
@@ -57,8 +57,13 @@ def update_capacity(
     user_ids = [e["user_id"] for e in entries]
     if len(set(user_ids)) != len(user_ids):
         raise HTTPException(status_code=422, detail="Each team member can appear only once")
-    # Unknown ids are a 400 here rather than a foreign-key failure at commit.
-    _resolve_users(db, user_ids, actor.org_id)
+    # Unknown ids are a 400 here rather than a foreign-key failure at commit; only people who
+    # can see the sprint's project can be planned into it.
+    members = resolve_users(db, user_ids, actor.org_id)
+    planned = {c.user_id for c in planning_svc.get_capacity(db, sprint.id)}
+    added = [u for u in members if u.id not in planned]
+    reject_inactive(added, "team member")
+    require_project_members(db, added, sprint.project_id, noun="team member")
     try:
         planning_svc.replace_capacity(db, sprint, board, entries)
     except planning_svc.PlanningError as exc:

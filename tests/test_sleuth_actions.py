@@ -100,6 +100,11 @@ def seed_fresh() -> tuple[int, int, int, int]:
         proj_b = models.Project(org_id=default_org_id(), name="Beacon", description="Auth service")
         db.add_all([proj, proj_b])
         db.commit()
+        # Alice and Bob work on both projects, so either can be assigned anywhere.
+        db.execute(models.user_projects.insert(), [
+            {"user_id": u.id, "project_id": p.id} for u in (alice, bob) for p in (proj, proj_b)
+        ])
+        db.commit()
         b1 = models.Bug(title="Login broken on Safari", description="d",
                         status="New", priority="High", environment="PROD",
                         project_id=proj.id, reporter_id=alice.id)

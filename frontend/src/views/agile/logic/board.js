@@ -12,7 +12,7 @@ export const SWIMLANE_MODES = [
 const PRIORITY_ORDER = ["Critical", "High", "Medium", "Low"];
 const DAY_MS = 86_400_000;
 
-/** Jira's built-in quick filters. */
+/** The built-in quick filters. */
 export const BUILTIN_QUICK_FILTERS = [
   { key: "mine", name: "Only my issues" },
   { key: "recent", name: "Recently updated" },
@@ -36,7 +36,7 @@ function matchesCustomFilter(card, spec) {
 }
 
 /**
- * Cards passing every active quick filter (Jira combines them with AND).
+ * Cards passing every active quick filter (they combine with AND).
  * ``active`` holds built-in keys and custom filter ids.
  */
 export function applyQuickFilters(cards, active, { userId, customFilters = [], now = Date.now() } = {}) {
@@ -57,7 +57,7 @@ export function applyQuickFilters(cards, active, { userId, customFilters = [], n
  * Swimlanes for ``mode``. Each lane is { key, title, cards }. In "story" mode
  * every parent issue that has Sub-tasks on the board gets a lane holding its
  * Sub-tasks (the parent is shown in the lane header); all other issues go to
- * "Other issues", as in Jira.
+ * "Other issues".
  */
 export function buildSwimlanes(cards, mode, { epics = [], currentUserId } = {}) {
   if (!mode || mode === "none") return [{ key: "all", title: "", cards }];
@@ -126,7 +126,7 @@ export function buildSwimlanes(cards, mode, { epics = [], currentUserId } = {}) 
   return [{ key: "all", title: "", cards }];
 }
 
-/** Jira's column constraint colouring: over the max or under the min. */
+/** Column constraint colouring: over the max or under the min. */
 export function wipState(column, count) {
   if (column.wip_limit != null && count > column.wip_limit) return "over";
   if (column.min_cards != null && count < column.min_cards) return "under";

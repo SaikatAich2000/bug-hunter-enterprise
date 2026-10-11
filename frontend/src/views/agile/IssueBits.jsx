@@ -25,7 +25,7 @@ export function IssueKey({ issue, onOpen }) {
 
 const CATEGORY_LABEL = { todo: "To do", in_progress: "In progress", testing: "In progress", done: "Done" };
 
-/** Status lozenge coloured by its Jira category (grey / blue / green). */
+/** Status lozenge coloured by its status category (grey / blue / green). */
 export function StatusLozenge({ status, category }) {
   const cat = category === "testing" ? "in_progress" : category || "todo";
   return (
@@ -46,7 +46,7 @@ export function EpicLozenge({ epicId, epicsById }) {
   );
 }
 
-// Jira-style priority marks: chevrons up for urgent work, an equals sign
+// Priority marks: chevrons up for urgent work, an equals sign
 // for medium and a chevron down for low.
 const PRIORITY_PATHS = {
   Critical: ["M3 9l5-4 5 4", "M3 13l5-4 5 4"],

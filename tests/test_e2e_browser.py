@@ -517,7 +517,7 @@ def test_a_cancelled_sprint_create_never_leaks_into_the_next_edit(server, open_p
 
 
 def test_sprint_lifecycle_plan_start_complete_and_report(server, open_page, admin_state):
-    """The Jira Scrum loop in the browser: rank an issue into a future sprint
+    """The Scrum loop in the browser: rank an issue into a future sprint
     by dragging it in the backlog, start the sprint, finish the work on the
     board, complete the sprint (open work goes back to the backlog) and read
     the sprint report."""
@@ -560,7 +560,7 @@ def test_sprint_lifecycle_plan_start_complete_and_report(server, open_page, admi
     with pg.expect_response(lambda r: f"/sprints/{sprint_id}/start" in r.url) as started:
         dialog.locator('button[type="submit"]').click()
     assert started.value.ok, started.value.text()
-    # Starting a sprint opens its board, like Jira.
+    # Starting a sprint opens its board.
     expect(pg.locator("#sprints-tab-board")).to_have_attribute("aria-selected", "true")
     expect(pg.locator(".ag-board-title")).to_have_text("Lifecycle Sprint")
 

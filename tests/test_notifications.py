@@ -161,11 +161,20 @@ def test_status_update_notifies_assignee(client):
 
 
 def _mk_manager(admin: TestClient, name: str, email: str) -> dict:
+    if not admin.get("/api/projects").json():
+        _mk_project(admin, "Events Proj")
     return _mk_user(admin, name, email, role="manager")
 
 
 def _mk_event(admin: TestClient, name: str, manager_ids: list[int]) -> dict:
-    r = admin.post("/api/events", json={"name": name, "manager_ids": manager_ids})
+    """An event in the first project; managers created by _mk_manager belong to every project
+    that existed when they were created, so they can open it (a project-less event is
+    admin-only, and only admins may manage it)."""
+    projects = admin.get("/api/projects").json()
+    project_id = projects[0]["id"] if projects else _mk_project(admin, "Events Proj")["id"]
+    r = admin.post("/api/events", json={
+        "name": name, "project_id": project_id, "manager_ids": manager_ids,
+    })
     assert r.status_code == 201, r.text
     return r.json()
 

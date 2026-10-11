@@ -233,6 +233,9 @@ class JsonLogFormatter(logging.Formatter):
             "thread": record.threadName,
             "service": _service_name(),
         }
+        request_id = getattr(record, "request_id", "")
+        if request_id:
+            payload["request_id"] = request_id
         trace_id = getattr(record, "otelTraceID", "")
         span_id = getattr(record, "otelSpanID", "")
         if trace_id:

@@ -1,4 +1,4 @@
-/** Active sprint board (Jira Scrum): columns mapped to statuses, swimlanes,
+/** Active sprint board: columns mapped to statuses, swimlanes,
  * quick filters, drag a card to another column to transition it. */
 import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
@@ -33,7 +33,7 @@ const DND_ACCESSIBILITY = {
   },
 };
 
-// A card lands in the cell under the pointer, like Jira; keyboard drags (no
+// A card lands in the cell under the pointer; keyboard drags (no
 // pointer) fall back to the nearest cell.
 function dropUnderPointer(args) {
   const hits = pointerWithin(args);
@@ -55,7 +55,7 @@ function Card({ card, epicsById, mode, columns, onOpen, onMove, onFlag }) {
   ];
   // The card is a labelled group that drags with the mouse or a long press;
   // its own buttons (key, title, actions) are what keyboard and screen-reader
-  // users work with, as on Jira boards: the actions menu moves the card.
+  // users work with: the actions menu moves the card.
   return (
     <div
       ref={setNodeRef}

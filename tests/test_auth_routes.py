@@ -273,12 +273,12 @@ def test_cov_logout_token_user_deleted_skips_audit(client, admin_client):
 
 
 def test_cov_logout_legacy_cookie_without_jti(client):
-    """A legacy 2-part cookie without jti writes the audit row but skips the per-session delete."""
+    """A legacy 2-part cookie without a session id is not a session: logout just clears it."""
     uid = _admin_user_id(client)
     client.post("/api/auth/logout")
 
-    from app.auth import COOKIE_NAME, make_session_token
-    legacy = make_session_token(uid, 0)  # no jti — produces a 2-part token
+    from app.auth import COOKIE_NAME, _signer
+    legacy = _signer().sign(f"{uid}:0".encode()).decode()
 
     res = client.post("/api/auth/logout", cookies={COOKIE_NAME: legacy})
     assert res.status_code == 204

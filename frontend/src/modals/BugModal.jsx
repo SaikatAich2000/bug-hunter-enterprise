@@ -30,6 +30,7 @@ import BugCustomFields, { missingRequiredFields, saveCustomValues } from "../com
 import ChipPicker from "../components/ChipPicker";
 import ItemPicker from "../components/ItemPicker";
 import { useFileDrop } from "../lib/useFileDrop";
+import { projectPeopleItems } from "../lib/people";
 import RichEditor from "../components/RichEditor";
 import GitBranchesPanel from "../components/GitBranchesPanel";
 import {
@@ -142,7 +143,7 @@ export default function BugModal() {
   const [availableEpics, setAvailableEpics] = useState([]);
   const [sprintPick, setSprintPick] = useState("");
   const [sprintBusy, setSprintBusy] = useState(false);
-  // Jira hierarchy links: a Sub-task's parent issue (required) and a standard
+  // Hierarchy links: a Sub-task's parent issue (required) and a standard
   // issue's Epic (optional).
   const [parentPick, setParentPick] = useState("");
   const [parentOptions, setParentOptions] = useState([]);
@@ -319,7 +320,7 @@ export default function BugModal() {
         setAvailableSprints(open_);
         setAvailableEpics(epicRows);
         // New issues go to the backlog unless the caller (a sprint's
-        // "Create issue") asked for a sprint, as in Jira.
+        // "Create issue") asked for a sprint.
       } catch {
         if (!cancelled) setAvailableSprints([]);
       }
@@ -489,9 +490,8 @@ export default function BugModal() {
       : { id: me.id, name: me.name, email: me.email };
   const reporterId = isEdit && bug.reporter ? bug.reporter.id : me.id;
 
-  const assigneeItems = users
-    .filter((u) => u.is_active)
-    .map((u) => ({ id: u.id, label: u.name, title: u.role }));
+  // Only people who can open the item's project can be assigned (the server refuses others).
+  const assigneeItems = projectPeopleItems(users, projectId, assigneeIds);
 
   const headType = isEdit ? bug.item_type || "Bug" : defaultType || defaultNewType || "Bug";
   const headTitle = isEdit
@@ -801,7 +801,7 @@ export default function BugModal() {
     return `${p.display_id || `#${p.id}`} ${p.title}`;
   }
 
-  /** Jira's hierarchy fields: Parent for a Sub-task, Epic for a standard issue. */
+  /** Hierarchy fields: Parent for a Sub-task, Epic for a standard issue. */
   function renderParentField() {
     if (itemType === "Epic") return null;
     if (itemType === "Sub-task") {

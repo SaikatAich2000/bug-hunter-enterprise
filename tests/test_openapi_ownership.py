@@ -26,6 +26,7 @@ OPERATION_OWNERS: dict[tuple[str, str], list[str]] = {
     ("POST", "/api/auth/2fa"): ["tests/test_two_factor.py"],
     ("GET", "/api/organization"): ["tests/test_tenancy_accounts.py"],
     ("PUT", "/api/organization"): ["tests/test_tenancy_accounts.py"],
+    ("POST", "/api/organization/delete"): ["tests/test_privacy.py"],
     ("GET", "/api/branding"): ["tests/test_tenancy_accounts.py"],
     ("PUT", "/api/branding"): ["tests/test_tenancy_accounts.py"],
     ("GET", "/api/invitations"): ["tests/test_invitations_memberships.py"],

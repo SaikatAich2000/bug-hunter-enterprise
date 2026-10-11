@@ -1,4 +1,4 @@
-"""Guards for the Jira-style Sprints frontend.
+"""Guards for the Sprints frontend.
 
 Behaviour of the React code itself is covered by the Vitest suites under
 ``frontend/src`` and the browser tests (``test_e2e_browser.py``). This file
@@ -7,7 +7,7 @@ pins the seams those cannot see from one side alone:
 * every ``/agile`` URL the frontend calls exists on the backend with the
   method the frontend uses (a renamed route would otherwise only show up as a
   404 toast in the browser);
-* the Jira rules the UI must keep (sprint lifecycle through dialogs, ranking
+* the Scrum rules the UI must keep (sprint lifecycle through dialogs, ranking
   through the board ``move`` endpoint, board drag through the workflow
   transition endpoint, no retired Collection/Feature concepts).
 """
@@ -93,7 +93,7 @@ def test_every_frontend_agile_call_has_a_backend_route(source, method, pattern):
     )
 
 
-def test_sprints_view_has_the_jira_tabs():
+def test_sprints_view_has_the_scrum_tabs():
     src = _read(SPRINTS_VIEW)
     keys = re.findall(r'\{ key: "(\w+)"', src)
     assert keys == ["backlog", "board", "hierarchy", "reports", "taxonomy", "planning", "settings"]

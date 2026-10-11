@@ -1,4 +1,4 @@
-"""Work-item hierarchy rules (Jira Software model).
+"""Work-item hierarchy rules.
 
     Epic                         parent_id = NULL, epic_id = NULL
     Story / Task / Bug / Req.    parent_id = NULL, epic_id = NULL or an Epic in the same project

@@ -195,3 +195,35 @@ def test_production_config_refuses_metrics_without_a_token():
     assert any("METRICS_TOKEN" in e for e in bad)
     ok = _production_config_errors(types.SimpleNamespace(**base, METRICS_ENABLED=True, METRICS_TOKEN="t"))
     assert not any("METRICS_TOKEN" in e for e in ok)
+
+
+def test_concurrent_registrations_of_one_token_leave_exactly_one_owner(client):
+    """Rebinding is one upsert statement: racing accounts never duplicate or lose the row."""
+    import threading
+
+    from app import push_service
+    from app.database import SessionLocal
+    from app.models import PushSubscription
+
+    _, a = sign_up("Acme", "owner@acme.test")
+    _, b = sign_up("Other Org", "boss@other.test")
+    token = "tok-race-000000000000000001"
+    errors = []
+
+    def go(user_id):
+        try:
+            with SessionLocal() as db:
+                push_service.register(db, user_id=user_id, token=token, rebind=True)
+                db.commit()
+        except Exception as exc:  # pragma: no cover - the assertion below reports it
+            errors.append(exc)
+
+    threads = [threading.Thread(target=go, args=(uid,)) for uid in (a["id"], b["id"]) * 4]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, errors
+    with SessionLocal() as db:
+        rows = db.query(PushSubscription).filter_by(token=token).all()
+        assert len(rows) == 1 and rows[0].user_id in (a["id"], b["id"])

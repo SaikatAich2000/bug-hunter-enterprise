@@ -3,11 +3,14 @@ Applied sheet. Used by routes/reports.py and chatbot/excel.py."""
 from __future__ import annotations
 
 import io
+import re
 from datetime import datetime, timezone
 from typing import Any
 
 try:
     from openpyxl import Workbook
+    from openpyxl.cell import WriteOnlyCell
+    from openpyxl.formatting.rule import FormulaRule
     from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
     OPENPYXL_AVAILABLE = True
@@ -34,9 +37,18 @@ _ZEBRA_FILL = "F2F4F8"
 _FORMULA_TRIGGERS = ("=", "+", "-", "@", "\t", "\r", "\n")
 
 
+# Characters a worksheet cannot hold (C0 controls except tab/newline/CR); openpyxl raises on
+# them, which failed the whole export for one stray character in old data.
+_ILLEGAL_XML_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
 def _defang_formula_text(s: str) -> str:
-    """Prefix with a quote if s starts with a formula trigger (checks both
-    the raw and whitespace-stripped first char — Excel trims leading spaces)."""
+    """Drop characters a worksheet can't hold, then prefix with a quote if s starts with a
+    formula trigger (checks both the raw and whitespace-stripped first char — Excel trims
+    leading spaces)."""
+    if not s:
+        return s
+    s = _ILLEGAL_XML_CHARS.sub("", s)
     if not s:
         return s
     stripped = s.lstrip()
@@ -71,57 +83,56 @@ def _coerce(value: Any) -> Any:
     return _defang_formula_text(str(value))
 
 
+def _cell(ws, value: Any, *, font=None, fill=None, alignment=None):
+    cell = WriteOnlyCell(ws, value=value)
+    if font is not None:
+        cell.font = font
+    if fill is not None:
+        cell.fill = fill
+    if alignment is not None:
+        cell.alignment = alignment
+    return cell
+
+
 def _write_table(
     ws,
     columns: list[ReportColumn],
     rows: list[dict[str, Any]],
     *,
     banner: str,
-    start_row: int = 1,
 ) -> int:
-    """Write a banner + header + rows. Returns the next free row index."""
+    """Write a banner, a header and the rows to a write-only sheet (rows stream straight to
+    the file instead of building a cell grid in memory). Returns the number of rows written."""
     ncols = max(1, len(columns))
-
-    # Defang banner/headers too, even though they're server-controlled today.
-    banner_cell = ws.cell(row=start_row, column=1, value=_defang_formula_text(banner))
-    banner_cell.font = Font(bold=True, color=_BANNER_FG, size=12)
-    banner_cell.fill = PatternFill("solid", fgColor=_BANNER_FILL)
-    banner_cell.alignment = Alignment(horizontal="left", vertical="center")
-    ws.merge_cells(
-        start_row=start_row, start_column=1,
-        end_row=start_row, end_column=ncols,
-    )
-    ws.row_dimensions[start_row].height = 22
-
-    # Header row.
-    header_row = start_row + 1
-    header_fill = PatternFill("solid", fgColor=_HEADER_FILL)
-    header_font = Font(bold=True, color=_HEADER_FG)
     for idx, col in enumerate(columns, start=1):
-        cell = ws.cell(row=header_row, column=idx, value=_defang_formula_text(col.label))
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = Alignment(horizontal="left", vertical="center")
         ws.column_dimensions[get_column_letter(idx)].width = max(8, col.width)
+    # Banner and header stay in view while scrolling.
+    ws.freeze_panes = "A3"
 
-    # Data rows.
-    align_by_col = [
-        Alignment(horizontal=col.align or "left", vertical="top", wrap_text=False)
-        for col in columns
-    ]
-    for r_idx, row in enumerate(rows):
-        sheet_row = header_row + 1 + r_idx
-        zebra = (r_idx % 2 == 1)
-        for c_idx, col in enumerate(columns, start=1):
-            v = _coerce(row.get(col.key, ""))
-            cell = ws.cell(row=sheet_row, column=c_idx, value=v)
-            cell.alignment = align_by_col[c_idx - 1]
-            if zebra:
-                cell.fill = PatternFill("solid", fgColor=_ZEBRA_FILL)
+    banner_font = Font(bold=True, color=_BANNER_FG, size=12)
+    banner_fill = PatternFill("solid", fgColor=_BANNER_FILL)
+    left = Alignment(horizontal="left", vertical="center")
+    # Defang banner/headers too, even though they're server-controlled today. The banner
+    # fill spans the table's width (write-only sheets can't merge cells).
+    ws.append([_cell(ws, _defang_formula_text(banner), font=banner_font, fill=banner_fill, alignment=left)]
+              + [_cell(ws, None, fill=banner_fill) for _ in range(ncols - 1)])
 
-    # Freeze banner + header so they don't scroll.
-    ws.freeze_panes = ws.cell(row=header_row + 1, column=1)
-    return header_row + 1 + len(rows)
+    header_font = Font(bold=True, color=_HEADER_FG)
+    header_fill = PatternFill("solid", fgColor=_HEADER_FILL)
+    ws.append([_cell(ws, _defang_formula_text(col.label), font=header_font, fill=header_fill, alignment=left)
+               for col in columns])
+
+    # Data cells are plain values: a per-cell style costs more than the value itself, Excel
+    # aligns numbers right on its own, and one conditional-format rule draws the zebra rows.
+    keys = [col.key for col in columns]
+    for row in rows:
+        ws.append([_coerce(row.get(key, "")) for key in keys])
+    if len(rows) > 1:
+        data = f"A3:{get_column_letter(ncols)}{len(rows) + 2}"
+        ws.conditional_formatting.add(data, FormulaRule(
+            formula=["MOD(ROW(),2)=0"], fill=PatternFill("solid", bgColor=_ZEBRA_FILL),
+        ))
+    return len(rows)
 
 
 _FILTER_LABELS = [
@@ -159,53 +170,32 @@ def _format_summary_display(v: Any) -> Any:
     return v
 
 
-def _write_filters_block(ws, result: ReportResult, start_row: int) -> int:
-    """Write the Filter/Value rows. Returns the row index after the block."""
-    row = start_row
-    ws.cell(row=row, column=1, value="Filter").font = Font(bold=True)
-    ws.cell(row=row, column=2, value="Value").font = Font(bold=True)
-    row += 1
-    f = result.filters or {}
-    for key, label in _FILTER_LABELS:
-        ws.cell(row=row, column=1, value=label)
-        # text_search/label are user free-text — defang like data cells.
-        ws.cell(row=row, column=2, value=_coerce(_format_filter_display(f.get(key))))
-        row += 1
-    return row
-
-
-def _write_summary_block(ws, result: ReportResult, start_row: int) -> int:
-    if not result.summary:
-        return start_row
-    row = start_row + 1   # blank separator row
-    ws.cell(row=row, column=1, value="Summary").font = Font(bold=True)
-    ws.cell(row=row, column=2, value="Value").font = Font(bold=True)
-    row += 1
-    for k, v in result.summary.items():
-        ws.cell(row=row, column=1, value=str(k).replace("_", " ").title())
-        ws.cell(row=row, column=2, value=_coerce(_format_summary_display(v)))
-        row += 1
-    return row
-
-
 def _write_filters_sheet(ws, result: ReportResult) -> None:
-    ws.title = "Filters Applied"
-    ws.cell(row=1, column=1, value=f"{get_settings().APP_NAME} — {result.report_label}").font = Font(bold=True, size=12)
-    ws.cell(row=2, column=1, value=f"Generated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}")
-    ws.cell(row=3, column=1, value=f"Total rows: {result.total}")
+    """The Filters Applied sheet: run details, every filter and the summary values."""
+    bold = Font(bold=True)
     ws.column_dimensions["A"].width = 24
     ws.column_dimensions["B"].width = 50
-
-    row = _write_filters_block(ws, result, start_row=5)
-    _write_summary_block(ws, result, start_row=row)
+    ws.append([_cell(ws, f"{get_settings().APP_NAME} — {result.report_label}", font=Font(bold=True, size=12))])
+    ws.append([f"Generated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}"])
+    ws.append([f"Total rows: {result.total}"])
+    ws.append([])
+    ws.append([_cell(ws, "Filter", font=bold), _cell(ws, "Value", font=bold)])
+    f = result.filters or {}
+    for key, label in _FILTER_LABELS:
+        # text_search/label are user free-text — defang like data cells.
+        ws.append([label, _coerce(_format_filter_display(f.get(key)))])
+    if result.summary:
+        ws.append([])
+        ws.append([_cell(ws, "Summary", font=bold), _cell(ws, "Value", font=bold)])
+        for k, v in result.summary.items():
+            ws.append([str(k).replace("_", " ").title(), _coerce(_format_summary_display(v))])
 
 
 def build_workbook_bytes(result: ReportResult) -> bytes:
     """Serialise a ReportResult to xlsx bytes. Three sheets at most."""
     _ensure_openpyxl()
-    wb = Workbook()
-    main_ws = wb.active
-    main_ws.title = (result.report_label or "Report")[:31] or "Report"
+    wb = Workbook(write_only=True)
+    main_ws = wb.create_sheet((result.report_label or "Report")[:31] or "Report")
     banner = f"{result.report_label} — {result.total} row{'' if result.total == 1 else 's'}"
     if result.filters and result.filters.get("label"):
         banner = f"{banner} · {result.filters['label']}"
@@ -216,8 +206,7 @@ def build_workbook_bytes(result: ReportResult) -> bytes:
         det_banner = f"{result.report_label} — Items ({len(result.detail_rows)} row{'' if len(result.detail_rows) == 1 else 's'})"
         _write_table(detail_ws, result.detail_columns, result.detail_rows, banner=det_banner)
 
-    filters_ws = wb.create_sheet("Filters Applied")
-    _write_filters_sheet(filters_ws, result)
+    _write_filters_sheet(wb.create_sheet("Filters Applied"), result)
 
     buf = io.BytesIO()
     wb.save(buf)

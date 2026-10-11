@@ -318,7 +318,7 @@ def test_label_merge_safety_and_taxonomy_assignment(admin_client):
 
 
 def test_retired_collection_and_feature_routes_are_gone(admin_client):
-    """Collections and Features are not Jira levels; grouping uses labels."""
+    """Collections and Features are not hierarchy levels; grouping uses labels."""
     project, _board_id = _setup_project_with_board(admin_client, "Collection Suite")
     for path in ("/api/agile/collections", "/api/agile/features"):
         assert admin_client.get(f"{path}?project_id={project['id']}").status_code == 404

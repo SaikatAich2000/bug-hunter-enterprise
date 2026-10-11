@@ -2,7 +2,7 @@
  *
  * Covers the sprint-board/backlog helpers and badges the board and backlog
  * views render with: type icons, epic colour fallback, avatar stacks,
- * story-point badges, date ranges and cadence-derived end dates.
+ * story-point badges and date ranges.
  */
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -11,11 +11,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   AssigneeStack,
   StoryPointBadge,
+  defaultSprintName,
   epicColor,
   epicTitle,
   formatDateRange,
-  sprintPeriods,
-  suggestEndDate,
   sumStoryPoints,
   typeEmoji,
 } from "./agileShared.jsx";
@@ -78,6 +77,12 @@ describe("epic colouring", () => {
     expect(epicColor(null, epics)).toBeNull();
     expect(epicColor(undefined, epics)).toBeNull();
   });
+
+  it("exposes the epic title or null", () => {
+    expect(epicTitle(1, epics)).toBe("Payments");
+    expect(epicTitle(99, epics)).toBeNull();
+  });
+});
 
 describe("AssigneeStack", () => {
   it("renders nothing when unassigned", () => {
@@ -158,50 +163,15 @@ describe("date range + story points", () => {
   });
 });
 
-describe("suggestEndDate", () => {
-  it("returns an empty suggestion without a start date or for custom cadence", () => {
-    expect(suggestEndDate("", "weekly")).toBe("");
-    expect(suggestEndDate("2026-09-01", "")).toBe("");
-    expect(suggestEndDate("2026-09-01", "custom")).toBe("");
-    expect(suggestEndDate("2026-09-01", "fortnightly")).toBe("");
-    expect(suggestEndDate("bad-date", "weekly")).toBe("");
+
+describe("defaultSprintName", () => {
+  it("never doubles the word Sprint", () => {
+    expect(defaultSprintName("Sprint Board", [{ name: "Sprint 1" }])).toBe("Sprint 2");
+    expect(defaultSprintName("", [])).toBe("Sprint 1");
   });
 
-  it("suggests the inclusive end of one period", () => {
-    expect(suggestEndDate("2026-09-01", "daily")).toBe("2026-09-01");
-    expect(suggestEndDate("2026-09-01", "weekly")).toBe("2026-09-07");
-    expect(suggestEndDate("2026-09-01", "monthly")).toBe("2026-09-30");
-  });
-
-  it("clamps a month-end start to the shorter next month", () => {
-    expect(suggestEndDate("2026-01-31", "monthly")).toBe("2026-02-27");
-  });
-});
-
-describe("sprintPeriods", () => {
-  it("splits a range into inclusive, contiguous periods cut at the end date", () => {
-    expect(sprintPeriods("2026-09-01", "2026-09-17", "weekly")).toEqual([
-      { start_date: "2026-09-01", end_date: "2026-09-07" },
-      { start_date: "2026-09-08", end_date: "2026-09-14" },
-      { start_date: "2026-09-15", end_date: "2026-09-17" },
-    ]);
-  });
-
-  it("anchors monthly periods to the start day across short months", () => {
-    expect(sprintPeriods("2026-01-31", "2026-04-29", "monthly").map((p) => p.start_date))
-      .toEqual(["2026-01-31", "2026-02-28", "2026-03-31"]);
-  });
-
-  it("returns one period for a custom cadence and none for an inverted range", () => {
-    expect(sprintPeriods("2026-09-01", "2026-09-20", "custom"))
-      .toEqual([{ start_date: "2026-09-01", end_date: "2026-09-20" }]);
-    expect(sprintPeriods("2026-09-20", "2026-09-01", "weekly")).toEqual([]);
-  });
-});
-
-
-  it("exposes the epic title or null", () => {
-    expect(epicTitle(1, epics)).toBe("Payments");
-    expect(epicTitle(99, epics)).toBeNull();
+  it("keeps a board's own name and skips names in use", () => {
+    expect(defaultSprintName("Mobile Board", [])).toBe("Mobile Sprint 1");
+    expect(defaultSprintName("Mobile Board", [{ name: "x" }, { name: "Mobile Sprint 3" }])).toBe("Mobile Sprint 4");
   });
 });

@@ -150,145 +150,22 @@ def test_legacy_bugs_endpoint_rejects_agile_types(admin_client):
     assert res.status_code == 422
 
 
-def test_bulk_sprint_generation_weekly_one_month(admin_client):
-    """A one-month range with weekly cadence must create the correct number of
-    sprints (preview count == created count), and the response shape must be
-    {"created": [...]} — not a bare SprintOut dict."""
-    project, board_id = _setup_project_with_board(admin_client, "Bulk Weekly Suite")
-    periods = [
-        {"start_date": "2026-01-01", "end_date": "2026-01-07"},
-        {"start_date": "2026-01-08", "end_date": "2026-01-14"},
-        {"start_date": "2026-01-15", "end_date": "2026-01-21"},
-        {"start_date": "2026-01-22", "end_date": "2026-01-28"},
-        {"start_date": "2026-01-29", "end_date": "2026-01-31"},
-    ]
-    res = admin_client.post(f"/api/agile/sprints?board_id={board_id}", json={
-        "name": "Sprint", "goal": "Bulk", "cadence": "weekly",
-        "generate": True, "periods": periods,
-    })
-    assert res.status_code == 201, res.text
-    body = res.json()
-    assert "created" in body, f"expected bulk response envelope, got: {body}"
-    assert len(body["created"]) == len(periods)
-    # Each created sprint carries the right period dates.
-    for i, created in enumerate(body["created"]):
-        assert created["start_date"] == periods[i]["start_date"]
-        assert created["end_date"] == periods[i]["end_date"]
-        assert created["state"] == "future"
-
-
-def test_bulk_sprint_generation_atomic_rollback(admin_client):
-    """A duplicate name in the middle of a bulk batch must roll back the whole
-    series — no partial sprints left behind."""
-    project, board_id = _setup_project_with_board(admin_client, "Atomic Suite")
-    # Pre-create a sprint whose name collides with the 2nd generated one.
-    admin_client.post(f"/api/agile/sprints?board_id={board_id}", json={
-        "name": "Atomic 2", "goal": "pre-existing",
-    })
-    periods = [
-        {"start_date": "2026-02-01", "end_date": "2026-02-07"},
-        {"start_date": "2026-02-08", "end_date": "2026-02-14"},
-    ]
-    res = admin_client.post(f"/api/agile/sprints?board_id={board_id}", json={
-        "name": "Atomic", "goal": "Bulk", "cadence": "weekly",
-        "generate": True, "periods": periods,
-    })
-    assert res.status_code == 409, res.text
-    # Only the pre-existing sprint should remain — none from the failed batch.
-    sprints = admin_client.get(f"/api/agile/sprints?board_id={board_id}").json()
-    assert len(sprints) == 1
-    assert sprints[0]["name"] == "Atomic 2"
-
-
-def test_single_sprint_response_unchanged(admin_client):
-    """Single-sprint mode (no generate flag) must still return a bare SprintOut
-    dict — backward compatibility for existing callers."""
+def test_create_sprint_creates_exactly_one_sprint(admin_client):
+    """POST /sprints creates one sprint and returns it; the removed bulk-generation fields
+    are ignored rather than fanning out into a series."""
     project, board_id = _setup_project_with_board(admin_client, "Single Suite")
     res = admin_client.post(f"/api/agile/sprints?board_id={board_id}", json={
         "name": "Sprint One", "goal": "Single", "start_date": "2026-03-01", "end_date": "2026-03-07",
+        "generate": True,
+        "periods": [{"start_date": "2026-03-08", "end_date": "2026-03-14"}] * 50,
     })
     assert res.status_code == 201, res.text
     body = res.json()
-    assert "id" in body
-    assert "created" not in body
     assert body["name"] == "Sprint One"
-
-
-def test_sprint_generate_intervals_weekly_one_month():
-    """Static interval calculation: a one-month inclusive range with weekly
-    cadence must yield the correct number of periods."""
-    from datetime import datetime as dt
-
-    from app.schemas import SprintCreateIn
-
-    start = dt(2026, 1, 1)
-    end = dt(2026, 1, 31)
-    intervals = SprintCreateIn.generate_intervals(start, end, "weekly", 5)
-    assert len(intervals) == 5
-    # First interval starts on the range start.
-    assert intervals[0][0] == start
-    # Last interval ends exactly on the range end.
-    assert intervals[-1][1] == end
-    # Intervals are contiguous (no gaps, no overlaps beyond shared boundary).
-    for i in range(1, len(intervals)):
-        assert intervals[i][0] >= intervals[i - 1][1]
-
-
-def test_sprint_generate_intervals_daily():
-    """Daily cadence over a 4-day range must yield exactly 4 one-day intervals."""
-    from datetime import datetime as dt
-    from datetime import timedelta
-
-    from app.schemas import SprintCreateIn
-
-    start = dt(2026, 6, 1)
-    end = dt(2026, 6, 5)  # 4-day span (Jun 5 - Jun 1 = 4 days)
-    intervals = SprintCreateIn.generate_intervals(start, end, "daily", 4)
-    assert len(intervals) == 4
-    assert intervals[0][0] == start
-    assert intervals[-1][1] == end
-    # Each interval spans roughly one day (within a few seconds of rounding).
-    for lo, hi in intervals:
-        assert timedelta(hours=23, minutes=59) <= (hi - lo) <= timedelta(days=1, seconds=1)
-
-
-def test_sprint_generate_intervals_invalid_inputs():
-    """Invalid inputs must raise ValueError, not silently produce garbage."""
-    from datetime import datetime as dt
-
-    import pytest
-
-    from app.schemas import SprintCreateIn
-
-    bad_inputs = [
-        (None, dt(2026, 1, 31), "weekly", 4),
-        (dt(2026, 1, 1), None, "weekly", 4),
-        (dt(2026, 1, 1), dt(2026, 1, 31), "weekly", 0),
-        (dt(2026, 1, 31), dt(2026, 1, 1), "weekly", 4),
-    ]
-    for start, end, cadence, periods in bad_inputs:
-        with pytest.raises(ValueError):
-            SprintCreateIn.generate_intervals(start, end, cadence, periods)
-
-
-def test_bulk_sprint_validation_requires_periods(admin_client):
-    """generate=True without periods must return 422."""
-    project, board_id = _setup_project_with_board(admin_client, "Validation Suite")
-    res = admin_client.post(f"/api/agile/sprints?board_id={board_id}", json={
-        "name": "Sprint", "goal": "Bulk", "cadence": "weekly", "generate": True,
-    })
-    assert res.status_code == 422, res.text
-
-
-def test_bulk_sprint_validation_rejects_bad_period_dates(admin_client):
-    """Periods with end_date before start_date must return 422."""
-    project, board_id = _setup_project_with_board(admin_client, "Bad Period Suite")
-    res = admin_client.post(f"/api/agile/sprints?board_id={board_id}", json={
-        "name": "Sprint", "goal": "Bulk", "cadence": "weekly",
-        "generate": True,
-        "periods": [{"start_date": "2026-01-07", "end_date": "2026-01-01"}],
-    })
-    assert res.status_code == 422, res.text
+    assert (body["start_date"], body["end_date"]) == ("2026-03-01", "2026-03-07")
+    assert "created" not in body
+    sprints = admin_client.get(f"/api/agile/sprints?board_id={board_id}").json()
+    assert [s["name"] for s in sprints] == ["Sprint One"]
 
 
 def test_epic_update_includes_target_date(admin_client):
@@ -320,7 +197,7 @@ def test_epic_update_includes_target_date(admin_client):
 
 
 def test_epics_are_never_planned_into_sprints(admin_client):
-    """Jira plans issues, not Epics: an Epic cannot be created in, added to,
+    """Sprints plan issues, not Epics: an Epic cannot be created in, added to,
     or updated into a sprint, whatever the route."""
     project, board_id = _setup_project_with_board(admin_client, "Epic Sprint Suite")
     sprint = admin_client.post(f"/api/agile/sprints?board_id={board_id}", json={"name": "Sprint A"}).json()

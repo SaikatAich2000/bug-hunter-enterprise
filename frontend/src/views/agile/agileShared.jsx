@@ -3,7 +3,7 @@
 import { initials } from "../../lib/format";
 import { itemTypeIcon } from "../../lib/itemTypes";
 
-/** Icon of a work-item type (Task and Sub-task differ, as in Jira). */
+/** Icon of a work-item type (Task and Sub-task differ). */
 export function typeEmoji(t) {
   return itemTypeIcon(t);
 }
@@ -79,57 +79,13 @@ export function localToday() {
   return localIsoDate(new Date());
 }
 
-function parseDay(value) {
-  if (!value) return null;
-  const d = new Date(`${value}T00:00:00`);
-  return Number.isNaN(d.getTime()) ? null : d;
-}
-
-/** `start` moved by `n` calendar months, clamped to the target month's last day
- * (Jan 31 + 1 month = Feb 28/29, not Mar 3). */
-function addMonths(start, n) {
-  const target = new Date(start.getFullYear(), start.getMonth() + n, 1);
-  const lastDay = new Date(target.getFullYear(), target.getMonth() + 1, 0).getDate();
-  target.setDate(Math.min(start.getDate(), lastDay));
-  return target;
-}
-
-/** Start of the `k`-th period after `start` for a cadence, or null when the
- * cadence has no fixed length. Anchored to `start` so month ends don't drift. */
-function periodStart(start, cadence, k) {
-  if (cadence === "daily") return new Date(start.getFullYear(), start.getMonth(), start.getDate() + k);
-  if (cadence === "weekly") return new Date(start.getFullYear(), start.getMonth(), start.getDate() + 7 * k);
-  if (cadence === "monthly") return addMonths(start, k);
-  return null;
-}
-
-function dayBefore(d) {
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1);
-}
-
-/** Suggested (inclusive) end date for one sprint of the given cadence: a daily
- * sprint ends the same day, a weekly one six days later, a monthly one the day
- * before the same date next month. Purely a form default the user sees. */
-export function suggestEndDate(startDate, cadence) {
-  const start = parseDay(startDate);
-  const next = start && periodStart(start, cadence, 1);
-  return next ? localIsoDate(dayBefore(next)) : "";
-}
-
-/** Inclusive sprint periods covering [startDate, endDate] for a cadence. A
- * cadence without a fixed length ("custom") yields one period for the range;
- * the last period is cut off at endDate. */
-export function sprintPeriods(startDate, endDate, cadence) {
-  const start = parseDay(startDate);
-  const end = parseDay(endDate);
-  if (!start || !end || end < start) return [];
-  if (!periodStart(start, cadence, 1)) return [{ start_date: startDate, end_date: endDate }];
-  const periods = [];
-  for (let k = 0; ; k += 1) {
-    const from = periodStart(start, cadence, k);
-    if (from > end) break;
-    const to = dayBefore(periodStart(start, cadence, k + 1));
-    periods.push({ start_date: localIsoDate(from), end_date: localIsoDate(to > end ? end : to) });
-  }
-  return periods;
+/** Name for the next sprint, as the server picks it: "Mobile Board" -> "Mobile Sprint 3", the
+ * default "Sprint Board" -> "Sprint 3" (never "Sprint Sprint 3"), skipping names in use. */
+export function defaultSprintName(boardName, sprints) {
+  const base = (boardName || "").replace(/ Board$/, "").trim().replace(/\s*\bsprints?$/i, "").trim();
+  const prefix = base ? `${base} Sprint` : "Sprint";
+  const taken = new Set(sprints.map((s) => (s.name || "").trim().toLowerCase()));
+  let n = sprints.length + 1;
+  while (taken.has(`${prefix} ${n}`.toLowerCase())) n += 1;
+  return `${prefix} ${n}`;
 }

@@ -132,6 +132,7 @@ def test_admin_can_delete_everything(admin_client):
 # Event managers — emails, role validation.
 def test_event_create_emails_only_managers(admin_client, monkeypatch):
     """Creating an event emails its managers only — not item assignees or random users."""
+    team = _make_project(admin_client, "Team")
     m1 = _make_user(admin_client, "Mgr-a", role="manager", email="mgra@x.test")
     m2 = _make_user(admin_client, "Mgr-b", role="manager", email="mgrb@x.test")
     _make_user(admin_client, "Worker", role="user", email="worker@x.test")
@@ -144,7 +145,7 @@ def test_event_create_emails_only_managers(admin_client, monkeypatch):
 
     sent.clear()
     ev = admin_client.post("/api/events", json={
-        "name": "Sprint kickoff",
+        "name": "Sprint kickoff", "project_id": team["id"],
         "manager_ids": [m1["id"], m2["id"]],
     }).json()
     # Admin is the actor, so only the two managers are recipients.
@@ -159,6 +160,7 @@ def test_event_create_emails_only_managers(admin_client, monkeypatch):
 
 
 def test_event_update_emails_managers(admin_client, monkeypatch):
+    team = _make_project(admin_client, "Team")
     mgr = _make_user(admin_client, "Mgr3", role="manager", email="m3@x.test")
     sent = []
     monkeypatch.setattr(
@@ -166,7 +168,7 @@ def test_event_update_emails_managers(admin_client, monkeypatch):
         lambda subject, to, body, from_address=None: sent.append((subject, sorted(to), body)),
     )
     ev = admin_client.post("/api/events", json={
-        "name": "Daily", "manager_ids": [mgr["id"]],
+        "name": "Daily", "project_id": team["id"], "manager_ids": [mgr["id"]],
     }).json()
     sent.clear()
     r = admin_client.put(f"/api/events/{ev['id']}", json={"name": "Daily (renamed)"})
@@ -179,6 +181,7 @@ def test_event_update_emails_managers(admin_client, monkeypatch):
 
 
 def test_event_delete_emails_managers(admin_client, monkeypatch):
+    team = _make_project(admin_client, "Team")
     mgr = _make_user(admin_client, "Mgr4", role="manager", email="m4@x.test")
     sent = []
     monkeypatch.setattr(
@@ -186,7 +189,7 @@ def test_event_delete_emails_managers(admin_client, monkeypatch):
         lambda subject, to, body, from_address=None: sent.append((subject, sorted(to), body)),
     )
     ev = admin_client.post("/api/events", json={
-        "name": "doomed", "manager_ids": [mgr["id"]],
+        "name": "doomed", "project_id": team["id"], "manager_ids": [mgr["id"]],
     }).json()
     sent.clear()
     r = admin_client.delete(f"/api/events/{ev['id']}")
@@ -199,11 +202,11 @@ def test_event_delete_emails_managers(admin_client, monkeypatch):
 
 def test_task_creation_does_NOT_email_event_managers(admin_client, monkeypatch):
     """A task dropped inside an event notifies only the task's assignees, not the event's managers."""
+    p = _make_project(admin_client)
     mgr = _make_user(admin_client, "EvMgr", role="manager", email="evmgr@x.test")
     worker = _make_user(admin_client, "Wkr", role="user", email="wkr@x.test")
-    p = _make_project(admin_client)
     ev = admin_client.post("/api/events", json={
-        "name": "Standup", "manager_ids": [mgr["id"]],
+        "name": "Standup", "project_id": p["id"], "manager_ids": [mgr["id"]],
     }).json()
     sent = []
     monkeypatch.setattr(
@@ -252,9 +255,10 @@ def test_regular_user_cannot_create_event(admin_client):
 
 
 def test_event_out_includes_managers(admin_client):
+    team = _make_project(admin_client, "Team")
     mgr = _make_user(admin_client, "Mgr5", role="manager", email="m5@x.test")
     ev = admin_client.post("/api/events", json={
-        "name": "with-managers", "manager_ids": [mgr["id"]],
+        "name": "with-managers", "project_id": team["id"], "manager_ids": [mgr["id"]],
     }).json()
     assert len(ev["managers"]) == 1
     assert ev["managers"][0]["name"] == "Mgr5"
@@ -379,8 +383,8 @@ def test_audit_search_by_item_type_word(admin_client):
 
 def test_audit_search_by_assignee_name(admin_client):
     """Assignee names are baked into the audit detail, so searching by name surfaces the assignment event."""
-    user = _make_user(admin_client, "Sandra", role="user", email="sandra@x.test")
     p = _make_project(admin_client)
+    user = _make_user(admin_client, "Sandra", role="user", email="sandra@x.test")
     bug = _make_item(admin_client, p["id"], item_type="Bug",
                      title="Crash on submit form", assignee_ids=[user["id"]])
     r = admin_client.get("/api/audit?q=Sandra")

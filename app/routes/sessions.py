@@ -9,8 +9,7 @@ import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import delete, select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api_docs import BAD_REQUEST_NOT_FOUND_404 as NOT_FOUND_400
@@ -49,18 +48,8 @@ def list_sessions(
     db: Session = Depends(get_db),
     actor: User = Depends(require_admin),
 ) -> list[dict]:
-    """List non-expired sessions with user info, sweeping expired rows on read."""
+    """List non-expired sessions with user info (expired rows are removed by the retention job)."""
     now = datetime.now(timezone.utc)
-
-    # set-based DELETE avoids the concurrent-admin StaleDataError; a failed
-    # sweep is harmless since the SELECT below filters expired rows anyway
-    try:
-        db.execute(delete(SessionRow).where(SessionRow.expires_at < now))
-        db.commit()
-    except SQLAlchemyError:
-        logger.exception("Session expiry sweep failed; serving the listing anyway.")
-        db.rollback()
-
     rows = db.scalars(
         select(SessionRow)
         .join(User, User.id == SessionRow.user_id)

@@ -420,8 +420,8 @@ def test_conversion_bug_to_story_keeps_row_id_and_common_data(admin_client):
     assert body["item_type"] == "Story"
     # Common data and relations survive; the display id is frozen at creation.
     assert body["title"] == "Keep me"
-    # Descriptions are normalized to plain text (see rich_text_to_plain).
-    assert body["description"] == "body"
+    # Descriptions are plain text, kept exactly as written.
+    assert body["description"] == "<p>body</p>"
     assert body["due_date"] == "2026-06-01"
     assert body["project_id"] == p["id"]
     assert body["reporter"]["id"] == row["reporter"]["id"]

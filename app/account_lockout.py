@@ -88,10 +88,11 @@ def check_locked(email: str) -> None:
     )
 
 
-def record_failure(email: str) -> None:
-    """Record a failed login; lock once the rolling window hits LOGIN_FAIL_LIMIT."""
+def record_failure(email: str) -> bool:
+    """Record a failed login; lock once the rolling window hits LOGIN_FAIL_LIMIT.
+    Returns True when this failure is the one that locked the account."""
     if _LOGIN_FAIL_LIMIT <= 0:
-        return
+        return False
     now = time.monotonic()
     cutoff = now - _LOGIN_FAIL_WINDOW_SECONDS
     key = _key(email)
@@ -109,6 +110,8 @@ def record_failure(email: str) -> None:
             bucket.locked_until = now + _LOGIN_LOCKOUT_SECONDS
             # Clear stale timestamps so the lock doesn't immediately re-trip on expiry.
             bucket.fails.clear()
+            return True
+    return False
 
 
 def clear(email: str) -> None:

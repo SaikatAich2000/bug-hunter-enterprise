@@ -222,3 +222,60 @@ def test_an_admin_can_turn_off_a_colleagues_two_factor_and_only_admins_see_who_h
     plain, res = _first_step("dana@acme.test")
     assert "requires_totp" not in res.json()
     assert plain.get("/api/auth/2fa/status").json()["enabled"] is False
+
+
+def _recovery_rows(email=None):
+    from app.database import SessionLocal
+    from app.models import TotpRecoveryCode, User
+
+    with SessionLocal() as db:
+        q = db.query(TotpRecoveryCode)
+        if email:
+            q = q.join(User, User.id == TotpRecoveryCode.user_id).filter(User.email == email)
+        return [(r.id, r.salt, r.code_hash, r.used_at) for r in q.order_by(TotpRecoveryCode.id)]
+
+
+def test_recovery_codes_are_stored_as_salted_hmacs(client, clock):
+    import hashlib
+
+    c, _ = sign_up("Acme Corp", "owner@acme.test")
+    _, codes = _enrol(c, clock)
+    rows = _recovery_rows()
+    assert len(rows) == len(codes)
+    assert all(r[1] for r in rows) and len({r[1] for r in rows}) == len(rows)  # a salt per code
+    unsalted = {hashlib.sha256(code.encode()).hexdigest() for code in codes}
+    assert not unsalted & {r[2] for r in rows}
+
+
+def test_a_legacy_hashed_recovery_code_verifies_then_is_upgraded(client, clock):
+    import hashlib
+
+    from app.database import SessionLocal
+    from app.models import TotpRecoveryCode
+
+    c, _ = sign_up("Acme Corp", "owner@acme.test")
+    _, codes = _enrol(c, clock)
+    old_hash = hashlib.sha256(codes[0].encode()).hexdigest()
+    with SessionLocal() as db:
+        row = db.query(TotpRecoveryCode).order_by(TotpRecoveryCode.id).first()
+        row.salt, row.code_hash = None, old_hash
+        db.commit()
+    c2, step = _first_step("owner@acme.test")
+    res = c2.post("/api/auth/login/totp", json={"pending_token": step.json()["pending_token"], "code": codes[0]})
+    assert res.status_code == 200, res.text
+    first = _recovery_rows()[0]
+    assert first[1] and first[2] != old_hash and first[3] is not None  # salted now, spent
+    c3, step = _first_step("owner@acme.test")  # a spent code never works twice
+    again = c3.post("/api/auth/login/totp", json={"pending_token": step.json()["pending_token"], "code": codes[0]})
+    assert again.status_code == 400
+
+
+def test_one_orgs_recovery_code_never_opens_another_orgs_account(client, clock):
+    ca, _ = sign_up("Acme Corp", "owner@acme.test")
+    cb, _ = sign_up("Beta Corp", "owner@beta.test")
+    _, codes_a = _enrol(ca, clock)
+    _enrol(cb, clock)
+    cb2, step = _first_step("owner@beta.test")
+    res = cb2.post("/api/auth/login/totp", json={"pending_token": step.json()["pending_token"], "code": codes_a[0]})
+    assert res.status_code == 400
+    assert _recovery_rows("owner@acme.test")[0][3] is None  # and it was not spent

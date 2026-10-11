@@ -1,4 +1,4 @@
-/** Board settings (Jira's board configuration): general, columns & statuses,
+/** Board settings: general, columns & statuses,
  * quick filters. */
 import { useEffect, useMemo, useState } from "react";
 import { useApp } from "../../state/AppContext";
@@ -11,6 +11,10 @@ import { agileApi, notifyAgileChanged } from "./agileApi";
 import { useLatestLoad } from "./useAgileProject";
 import { SWIMLANE_MODES } from "./logic/board";
 import { STATISTIC_LABELS } from "./logic/estimates";
+
+// IANA zones the browser knows, offered as suggestions (the server validates the name).
+const TIMEZONES = ["UTC", ...(typeof Intl.supportedValuesOf === "function"
+  ? Intl.supportedValuesOf("timeZone").filter((tz) => tz !== "UTC") : [])];
 
 const WEEKDAYS = [[1, "Mon"], [2, "Tue"], [3, "Wed"], [4, "Thu"], [5, "Fri"], [6, "Sat"], [7, "Sun"]];
 const CATEGORIES = [
@@ -114,7 +118,11 @@ function GeneralSettings({ board, onSaved }) {
         ))}
       </fieldset>
       <label className="field"><span>Timezone (IANA name, e.g. Asia/Kolkata)</span>
-        <input value={form.timezone} maxLength={64} onChange={(e) => setForm({ ...form, timezone: e.target.value })} />
+        <input value={form.timezone} maxLength={64} list="ag-timezones" autoComplete="off"
+          onChange={(e) => setForm({ ...form, timezone: e.target.value })} />
+        <datalist id="ag-timezones">
+          {TIMEZONES.map((tz) => <option key={tz} value={tz} />)}
+        </datalist>
         <small className="muted">Sprint dates and report days use this timezone.</small>
       </label>
       <div className="ag-dialog-actions">

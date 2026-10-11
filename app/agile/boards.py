@@ -239,7 +239,7 @@ def status_to_column(board: Board) -> dict[str, BoardColumn]:
 
 def done_status_values(db: Session, board: Board) -> set[str]:
     """Statuses that count as done: those in the board's right-most column
-    (Jira's rule for completing a sprint and for every sprint report). A board
+    (the rule for completing a sprint and for every sprint report). A board
     whose last column has no status falls back to the terminal statuses."""
     columns = ordered_columns(board)
     if columns:
