@@ -85,7 +85,7 @@ jobs:
           pytest -m "not ui" -n auto -q -p no:cacheprovider
           --cov=app --cov-report=xml:coverage.xml
           --junitxml=junit-parts/junit.xml
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: coverage-report
@@ -94,7 +94,7 @@ jobs:
             junit-parts/*.xml
           if-no-files-found: warn
           retention-days: 7
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ !cancelled() }}
         with:
           name: ci-forensics
@@ -172,7 +172,7 @@ jobs:
         # SonarQube resolves SF: paths against the repo root, Vitest emits them relative to frontend/.
         if: ${{ needs.policy.outputs.skip_tests != 'true' }}
         run: sed -i 's#^SF:src/#SF:frontend/src/#' frontend/coverage/lcov.info
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ always() && needs.policy.outputs.skip_tests != 'true' }}
         with:
           name: frontend-coverage
