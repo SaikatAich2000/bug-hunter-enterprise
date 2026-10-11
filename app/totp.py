@@ -88,18 +88,27 @@ def _pending_signer() -> TimestampSigner:
     return TimestampSigner(session_secret(), salt="bh-totp-pending")
 
 
-def make_pending_token(user_id: int) -> str:
-    return _pending_signer().sign(str(user_id).encode("utf-8")).decode("utf-8")
+def make_pending_token(user_id: int, session_version: int = 0) -> str:
+    """Bound to the account's session_version, so anything that signs the user out
+    (password change or reset, admin sign-out, deactivation) also voids a pending login."""
+    return _pending_signer().sign(f"{user_id}:{session_version}".encode("utf-8")).decode("utf-8")
 
 
-def parse_pending_token(token: str) -> Optional[int]:
+def parse_pending(token: str) -> Optional[tuple[int, int]]:
+    """(user_id, session_version) of a live pending token, else None."""
     if not token:
         return None
     try:
         raw = _pending_signer().unsign(token, max_age=_PENDING_TTL_SECONDS)
-        return int(raw.decode("utf-8"))
-    except (BadSignature, ValueError):  # expired, tampered or not a number
+        uid, version = raw.decode("utf-8").split(":")
+        return int(uid), int(version)
+    except (BadSignature, ValueError):  # expired, tampered, or an old-format token
         return None
+
+
+def parse_pending_token(token: str) -> Optional[int]:
+    parsed = parse_pending(token)
+    return parsed[0] if parsed else None
 
 
 def generate_recovery_codes(n: int) -> list[str]:

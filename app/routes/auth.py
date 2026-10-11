@@ -38,6 +38,7 @@ from app.config import get_settings
 from app.database import get_db
 from app.email_service import (
     notify_email_change_code,
+    notify_email_changed,
     notify_email_verification,
     notify_password_reset,
 )
@@ -71,7 +72,7 @@ from app.totp import (
     accept_code,
     hash_recovery_code,
     make_pending_token,
-    parse_pending_token,
+    parse_pending,
 )
 
 logger = logging.getLogger("bug_hunter.auth")
@@ -356,7 +357,8 @@ def login(
         _audit(db, user, "login_password_ok_awaiting_2fa",
                f"{user.email} passed the password step, awaiting 2FA")
         db.commit()
-        return {"requires_totp": True, "pending_token": make_pending_token(user.id)}
+        return {"requires_totp": True,
+                "pending_token": make_pending_token(user.id, user.session_version or 0)}
 
     # Clear the lockout bucket so transient typos don't carry forward.
     account_lockout.clear(payload.email)
@@ -386,11 +388,14 @@ def login_totp(
     payload: LoginTotpIn, request: Request, response: Response, db: Session = Depends(get_db),
 ) -> dict:
     """Second step of a two-factor login: a 6-digit authenticator code or a recovery code."""
-    user_id = parse_pending_token(payload.pending_token)
-    user = db.get(User, user_id) if user_id is not None else None
-    if user_id is None:
+    pending = parse_pending(payload.pending_token)
+    if pending is None:
         raise HTTPException(status_code=400, detail="Login session expired. Sign in again.")
-    if user is None or not user.is_active or not user.totp_enabled or not user.totp_secret:
+    user_id, session_version = pending
+    user = db.get(User, user_id)
+    # A password change, reset or forced sign-out since the password step voids the token.
+    if (user is None or not user.is_active or not user.totp_enabled or not user.totp_secret
+            or (user.session_version or 0) != session_version):
         raise HTTPException(status_code=400, detail="Login session invalid. Sign in again.")
     # The second factor is a credential too: rate-limit it like the password.
     account_lockout.check_locked(user.email)
@@ -504,6 +509,7 @@ def _void(db: Session, req: EmailChangeRequest, now: datetime, detail: str) -> H
 @router.post("/email-change/confirm", response_model=MeOut, responses=PASSWORD_CHANGE_400)
 def confirm_email_change(
     payload: EmailChangeConfirmIn,
+    background: BackgroundTasks,
     user: Annotated[User, Depends(get_current_user)],
     db: Session = Depends(get_db),
 ) -> dict:
@@ -544,6 +550,10 @@ def confirm_email_change(
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail="That email is already in use.") from exc
+    background.add_task(
+        notify_email_changed, old_email, user.name, user.email,
+        user.organization.email_from_override,
+    )
     return to_me(user)
 
 

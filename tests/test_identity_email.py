@@ -60,8 +60,9 @@ def test_accepting_an_invitation_cannot_duplicate_an_address_by_case(client):
         db.query(Invitation).filter_by(email="new@acme.test").one().token_hash = token_hash
         db.commit()
     # the address is registered (another spelling) between invite and accept
-    from app.database import engine
     from sqlalchemy import text
+
+    from app.database import engine
     with engine.begin() as c:
         c.execute(text("DROP INDEX uq_users_email_lower"))
     _insert_user(me["org_id"], "NEW@acme.test")
@@ -78,9 +79,9 @@ def test_email_change_cannot_take_a_case_variant_even_when_the_app_check_is_bypa
     monkeypatch.setattr(auth_routes, "_email_taken", lambda *a, **k: False)
     assert owner.post("/api/auth/email-change/request",
                       json={"current_password": PASSWORD, "new_email": "boss@other.test"}).status_code == 202
+    from app.auth import hash_token
     from app.database import SessionLocal
     from app.models import EmailChangeRequest
-    from app.auth import hash_token
     with SessionLocal() as db:
         db.query(EmailChangeRequest).one().code_hash = hash_token("123456")
         db.commit()
@@ -90,8 +91,9 @@ def test_email_change_cannot_take_a_case_variant_even_when_the_app_check_is_bypa
 
 
 def test_login_finds_a_legacy_mixed_case_row(client):
-    from app.database import engine
     from sqlalchemy import text
+
+    from app.database import engine
 
     _, me = sign_up("Acme", "owner@acme.test")
     with engine.begin() as c:

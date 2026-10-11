@@ -14,6 +14,8 @@ OPERATION_OWNERS: dict[tuple[str, str], list[str]] = {
     ("POST", "/api/auth/login"): ["tests/test_auth_routes.py"],
     ("POST", "/api/auth/logout"): ["tests/test_auth_routes.py"],
     ("POST", "/api/auth/signup"): ["tests/test_tenancy_accounts.py"],
+    ("POST", "/api/auth/verify-email"): ["tests/test_identity_verification.py"],
+    ("POST", "/api/auth/resend-verification"): ["tests/test_identity_verification.py"],
     ("PUT", "/api/auth/profile"): ["tests/test_tenancy_accounts.py"],
     ("POST", "/api/auth/email-change"): ["tests/test_tenancy_accounts.py"],
     ("GET", "/api/auth/data-export"): ["tests/test_tenancy_accounts.py"],

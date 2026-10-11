@@ -470,6 +470,30 @@ def notify_email_verification(
         logger.error("Email-verification message was NOT delivered.")
 
 
+def notify_email_changed(
+    old_email: str, user_name: str, new_email: str, from_address: str | None = None,
+) -> None:
+    """Tell the OLD address its account now signs in with another one, so an owner whose
+    session was hijacked learns about the swap while there is still time to react."""
+    if not old_email:
+        return
+    app_name = get_settings().APP_NAME
+    subject = f"[{app_name}] Your sign-in email was changed"
+    body = "\n".join([
+        f"Hi {user_name or 'there'},",
+        "",
+        f"The email address of your {app_name} account was changed to {new_email}.",
+        "This address no longer receives sign-in or password-reset emails for it.",
+        "",
+        "If you made this change, nothing else is needed. If you did not, contact your",
+        "organization's administrator immediately.",
+        "",
+        f"— {app_name}",
+    ])
+    if not deliver(subject, [old_email], body, from_address) and get_settings().EMAIL_BACKEND != "disabled":
+        logger.error("Email-change notice to the old address was NOT delivered.")
+
+
 def notify_invitation(
     email: str,
     inviter_name: str,
