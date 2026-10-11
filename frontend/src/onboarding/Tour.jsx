@@ -9,10 +9,10 @@ const GAP = 12;
 const MARGIN = 12;
 
 function measure(selector) {
-  const el = selector ? document.querySelector(selector) : null;
-  if (!el) return null;
-  const r = el.getBoundingClientRect();
-  if (r.width === 0 || r.height === 0) return null;
+  // A selector may list alternatives (a top-bar button on phones, a floating one on desktop): take the one on screen.
+  const rects = selector ? [...document.querySelectorAll(selector)].map((el) => el.getBoundingClientRect()) : [];
+  const r = rects.find((b) => b.width > 0 && b.height > 0);
+  if (!r) return null;
   return { top: r.top, left: r.left, width: r.width, height: r.height };
 }
 

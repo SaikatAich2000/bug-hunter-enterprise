@@ -70,7 +70,7 @@ export const TOUR_STEPS = [
   },
   {
     id: "sleuth",
-    selector: ".chrome-sleuth-btn",
+    selector: ".chrome-sleuth-btn, #sleuthFab",
     title: "Ask Sleuth",
     body: "The assistant answers questions about your work and can make changes after you confirm. Press Ctrl+/ (or Cmd+/) to open it from anywhere.",
   },

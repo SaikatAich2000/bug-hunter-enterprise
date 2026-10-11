@@ -27,7 +27,7 @@ def dismiss_welcome(page) -> None:
     page.evaluate(
         """() => fetch('/api/me/preferences', {
             method: 'PUT', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({welcome_seen: true}), credentials: 'include'})"""
+            body: JSON.stringify({welcome_seen: true, setup_status: 'skipped'}), credentials: 'include'})"""
     )
     later = page.get_by_role("button", name="Maybe later")
     if later.count():

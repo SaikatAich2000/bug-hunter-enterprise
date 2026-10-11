@@ -102,7 +102,7 @@ describe("SetupWizard", () => {
     expect(loadProjects).toHaveBeenCalled();
   });
 
-  it("reuses an existing project on resume instead of creating a second", async () => {
+  it("continues without creating a second project when one exists and none is typed", async () => {
     app.projects = [{ id: 4, name: "Website" }];
     render(<Wizard step={1} />);
     expect(screen.getByRole("status")).toHaveTextContent("Website");

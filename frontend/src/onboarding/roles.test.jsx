@@ -67,8 +67,11 @@ describe("tour tracks", () => {
         const id = step.selector.slice(1);
         expect(sidebar + chrome, `${step.id}: ${step.selector}`).toContain(`id="${id}"`);
       } else if (step.selector.startsWith(".")) {
-        const cls = step.selector.slice(1);
-        expect(chrome + src("sleuth/SleuthPanel.jsx") + sidebar, `${step.id}: ${step.selector}`).toContain(cls);
+        const all = chrome + src("sleuth/SleuthPanel.jsx") + sidebar;
+        for (const part of step.selector.split(",").map((s) => s.trim())) {
+          const needle = part.startsWith("#") ? `id="${part.slice(1)}"` : part.slice(1);
+          expect(all, `${step.id}: ${part}`).toContain(needle);
+        }
       } else throw new Error(`unexpected selector ${step.selector}`);
     }
   });

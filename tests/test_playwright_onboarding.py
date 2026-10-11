@@ -150,8 +150,8 @@ def test_welcome_then_resumable_tour(browser, stack):
 
         # Resume from the account menu continues at the saved step, then finish.
         _account_menu(pg, "#productTourBtn")
-        expect(pg.get_by_text("Step 2 of 6")).to_be_visible()
-        for _ in range(4):
+        expect(pg.get_by_text("Step 2 of 9")).to_be_visible()
+        for _ in range(7):
             pg.get_by_role("button", name="Next").click()
         pg.get_by_role("button", name="Finish").click()
         expect(pg.locator(".tour-card")).to_have_count(0)

@@ -159,8 +159,9 @@ export default function SetupWizard({ open, step, onStep, onClose, onSkip, onFin
   }
 
   async function createProject() {
-    if (projects.length > 0) return go(2);
     const name = projectName.trim();
+    // Every new organization starts with a default project, so adding another is optional.
+    if (name === "" && projects.length > 0) return go(2);
     if (name.length < 2) return setError("Give the project a name of at least 2 characters.");
     const ok = await run(async () => {
       await api("/projects", { method: "POST", json: { name, agile_enabled: scrum } });
@@ -262,24 +263,21 @@ export default function SetupWizard({ open, step, onStep, onClose, onSkip, onFin
 
           {index === 1 && (
             <form noValidate onSubmit={(e) => { e.preventDefault(); void createProject(); }} id="wizProjectForm">
-              {projects.length > 0 ? (
+              {projects.length > 0 && (
                 <p className="wiz-note" role="status">
-                  You already have {projects.length === 1 ? "a project" : `${projects.length} projects`}: <strong>{projects[0].name}</strong>.
-                  Continue to invite your team to it.
+                  You already have {projects.length === 1 ? "a project" : `${projects.length} projects`}:{" "}
+                  <strong>{projects[0].name}</strong>. Add another below, or continue to invite your team.
                 </p>
-              ) : (
-                <>
-                  <p className="hint">Projects hold work items. You can add more later from the sidebar.</p>
-                  <label className="field">
-                    <span>Project name <em>*</em></span>
-                    <input value={projectName} onChange={(e) => setProjectName(e.target.value)} maxLength={120} data-autofocus />
-                  </label>
-                  <label className="ent-check">
-                    <input type="checkbox" checked={scrum} onChange={(e) => setScrum(e.target.checked)} />
-                    <span>Use Scrum (sprints, a backlog and a board) for this project</span>
-                  </label>
-                </>
               )}
+              <p className="hint">Projects hold work items. You can add more later from the sidebar.</p>
+              <label className="field">
+                <span>Project name {projects.length === 0 && <em>*</em>}</span>
+                <input value={projectName} onChange={(e) => setProjectName(e.target.value)} maxLength={120} data-autofocus />
+              </label>
+              <label className="ent-check">
+                <input type="checkbox" checked={scrum} onChange={(e) => setScrum(e.target.checked)} />
+                <span>Use Scrum (sprints, a backlog and a board) for this project</span>
+              </label>
             </form>
           )}
 
@@ -374,7 +372,7 @@ export default function SetupWizard({ open, step, onStep, onClose, onSkip, onFin
         )}
         {index === 1 && (
           <button type="submit" form="wizProjectForm" className="btn primary" disabled={busy}>
-            {projects.length > 0 ? "Continue" : busy ? "Creating..." : "Create project"}
+            {busy ? "Creating..." : projectName.trim() ? "Create project" : projects.length > 0 ? "Continue" : "Create project"}
           </button>
         )}
         {index === 2 && (
