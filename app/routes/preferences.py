@@ -1,4 +1,4 @@
-"""Per-user onboarding preferences (welcome screen, product tour progress).
+"""Per-user onboarding preferences (welcome screen, product tour and organization setup progress).
 
 Scoped to the signed-in user: there is no user id in the URL, so nobody can read or
 change another person's state. Updates are partial; omitted fields stay as they were.
@@ -19,6 +19,7 @@ from app.models import User, UserPreference
 router = APIRouter(prefix="/api/me/preferences", tags=["preferences"])
 
 TourStatus = Literal["none", "running", "dismissed", "done"]
+SetupStatus = Literal["none", "running", "done", "skipped"]
 
 
 class PreferencesOut(BaseModel):
@@ -26,6 +27,8 @@ class PreferencesOut(BaseModel):
     welcome_hidden: bool = False
     tour_status: TourStatus = "none"
     tour_step: int = 0
+    setup_status: SetupStatus = "none"
+    setup_step: int = 0
 
 
 class PreferencesIn(BaseModel):
@@ -34,6 +37,8 @@ class PreferencesIn(BaseModel):
     welcome_hidden: bool | None = None
     tour_status: TourStatus | None = None
     tour_step: int | None = Field(default=None, ge=0, le=50)
+    setup_status: SetupStatus | None = None
+    setup_step: int | None = Field(default=None, ge=0, le=50)
 
 
 def _out(row: UserPreference | None) -> PreferencesOut:
@@ -42,6 +47,7 @@ def _out(row: UserPreference | None) -> PreferencesOut:
     return PreferencesOut(
         welcome_seen=row.welcome_seen, welcome_hidden=row.welcome_hidden,
         tour_status=row.tour_status, tour_step=row.tour_step,
+        setup_status=row.setup_status, setup_step=row.setup_step,
     )
 
 
@@ -68,6 +74,7 @@ def update_preferences(
         from sqlalchemy.dialects.sqlite import insert
     db.execute(insert(UserPreference).values(
         user_id=user.id, welcome_seen=False, welcome_hidden=False, tour_status="none", tour_step=0,
+        setup_status="none", setup_step=0,
     ).on_conflict_do_nothing(index_elements=[UserPreference.user_id]))
     row = db.get(UserPreference, user.id, populate_existing=True)
     for field, value in payload.model_dump(exclude_none=True).items():

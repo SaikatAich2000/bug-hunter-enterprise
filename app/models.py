@@ -1727,6 +1727,8 @@ class AppMigration(Base):
 
 
 TOUR_STATUSES = ("none", "running", "dismissed", "done")
+# First-admin organization setup wizard: not started, in progress, finished, or skipped.
+SETUP_STATUSES = ("none", "running", "done", "skipped")
 
 
 class UserPreference(Base):
@@ -1740,6 +1742,8 @@ class UserPreference(Base):
     welcome_hidden: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     tour_status: Mapped[str] = mapped_column(String(20), nullable=False, default="none")
     tour_step: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    setup_status: Mapped[str] = mapped_column(String(20), nullable=False, default="none")
+    setup_step: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     updated_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), default=utcnow, onupdate=utcnow, nullable=False
     )
@@ -1747,4 +1751,6 @@ class UserPreference(Base):
     __table_args__ = (
         CheckConstraint(_one_of("tour_status", TOUR_STATUSES), name="ck_user_preferences_tour_status"),
         CheckConstraint("tour_step >= 0", name="ck_user_preferences_tour_step"),
+        CheckConstraint(_one_of("setup_status", SETUP_STATUSES), name="ck_user_preferences_setup_status"),
+        CheckConstraint("setup_step >= 0", name="ck_user_preferences_setup_step"),
     )
