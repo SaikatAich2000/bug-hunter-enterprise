@@ -2,6 +2,8 @@
 import { createRoot } from "react-dom/client";
 import "../styles/styles.css";
 import "../styles/enterprise.css";
+import "../styles/auth.css";
+import "../styles/motion.css";
 
 export default function mountPublicPage(Page) {
   document.documentElement.dataset.theme = localStorage.getItem("theme") || "dark";

@@ -9,6 +9,7 @@ import DeleteAccountPage from "./deleteAccount/DeleteAccountPage";
 import LoginPage from "./login/LoginPage";
 import PrivacyPage from "./privacy/PrivacyPage";
 import SignupPage from "./signup/SignupPage";
+import VerifyPage from "./verify/VerifyPage";
 
 const replace = vi.fn();
 const fetchMock = vi.fn();
@@ -48,10 +49,15 @@ async function fill(label, value) {
 describe("SignupPage", () => {
   beforeEach(() => route({ "GET /api/meta": { signup_enabled: true } }));
 
+  const next = (name = "Continue") => userEvent.click(screen.getByRole("button", { name }));
+
+  /** Walk the three steps; stops on the password step unless `submit`. */
   async function fillForm(password = "Passw0rd!x", confirm = password) {
     await fill(/Organization name/, "Acme");
+    await next();
     await fill(/Your name/, "Alex");
     await fill(/Work email/, "alex@acme.test");
+    await next();
     await fill(/^Password/, password);
     await fill(/Confirm password/, confirm);
   }
@@ -60,7 +66,7 @@ describe("SignupPage", () => {
     route({ "GET /api/meta": { signup_enabled: true }, "POST /api/auth/signup": [{ id: 1 }, 201] });
     render(<SignupPage />);
     await fillForm();
-    await userEvent.click(screen.getByRole("button", { name: "Create organization" }));
+    await next("Create organization");
     await waitFor(() => expect(replace).toHaveBeenCalledWith("/"));
     const [, init] = calls("POST /api/auth/signup")[0];
     expect(JSON.parse(init.body)).toEqual({
@@ -68,10 +74,29 @@ describe("SignupPage", () => {
     });
   });
 
+  it("moves through the steps, validates each, and moves focus to the new step's heading", async () => {
+    render(<SignupPage />);
+    expect(screen.getByRole("list", { name: "Sign-up progress" })).toBeTruthy();
+    await next();
+    expect((await screen.findByRole("alert")).textContent).toMatch(/name of at least 2/);
+    await fill(/Organization name/, "Acme");
+    await next();
+    const heading = await screen.findByRole("heading", { name: "Tell us about you" });
+    await waitFor(() => expect(document.activeElement).toBe(heading));
+    expect(screen.getByText("Step 2: You").closest("li").getAttribute("aria-current")).toBe("step");
+    await fill(/Your name/, "Alex");
+    await fill(/Work email/, "not-an-email");
+    await next();
+    expect((await screen.findByRole("alert")).textContent).toMatch(/valid work email/);
+    // Back keeps what was typed.
+    await next("Back");
+    expect(screen.getByLabelText(/Organization name/).value).toBe("Acme");
+  });
+
   it("stops on mismatched or weak passwords without calling the server", async () => {
     render(<SignupPage />);
     await fillForm("Passw0rd!x", "different");
-    await userEvent.click(screen.getByRole("button", { name: "Create organization" }));
+    await next("Create organization");
     expect((await screen.findByRole("alert")).textContent).toMatch(/don't match/);
     expect(calls("POST /api/auth/signup")).toHaveLength(0);
   });
@@ -83,16 +108,71 @@ describe("SignupPage", () => {
     });
     render(<SignupPage />);
     await fillForm();
-    await userEvent.click(screen.getByRole("button", { name: "Create organization" }));
+    await next("Create organization");
     expect(await screen.findByText(/already exists/)).toBeTruthy();
     expect(replace).not.toHaveBeenCalled();
+  });
+
+  it("asks to check the inbox when verification is required, and resends with a cooldown", async () => {
+    route({
+      "GET /api/meta": { signup_enabled: true },
+      "POST /api/auth/signup": [{ verification_required: true, email: "alex@acme.test" }, 202],
+      "POST /api/auth/resend-verification": [null, 204],
+    });
+    render(<SignupPage />);
+    await fillForm();
+    await next("Create organization");
+    const heading = await screen.findByRole("heading", { name: "Check your inbox" });
+    await waitFor(() => expect(document.activeElement).toBe(heading));
+    expect(replace).not.toHaveBeenCalled();
+    expect(screen.getAllByText("alex@acme.test").length).toBeGreaterThan(0);
+    await userEvent.click(screen.getByRole("button", { name: "Send a new link" }));
+    await waitFor(() => expect(calls("POST /api/auth/resend-verification")).toHaveLength(1));
+    expect(JSON.parse(calls("POST /api/auth/resend-verification")[0][1].body)).toEqual({ email: "alex@acme.test" });
+    const again = await screen.findByRole("button", { name: /Send a new link \(\d+s\)/ });
+    expect(again.disabled).toBe(true);
   });
 
   it("hides the form when sign-up is switched off", async () => {
     route({ "GET /api/meta": { signup_enabled: false } });
     const { container } = render(<SignupPage />);
     expect(await screen.findByText(/turned off on this server/)).toBeTruthy();
-    expect(container.querySelector("#signupForm").hidden).toBe(true);
+    expect(container.querySelector("#signupSteps").hidden).toBe(true);
+  });
+});
+
+describe("VerifyPage", () => {
+  it("confirms a good link and offers sign-in", async () => {
+    vi.stubGlobal("location", { replace, search: "?token=good", hash: "", origin: "http://localhost" });
+    route({ "POST /api/auth/verify-email": [null, 204] });
+    render(<VerifyPage />);
+    expect(screen.getByText(/Confirming your email address/)).toBeTruthy();
+    const heading = await screen.findByRole("heading", { name: "Your email is confirmed" });
+    await waitFor(() => expect(document.activeElement).toBe(heading));
+    expect(screen.getByRole("link", { name: "Sign in" }).getAttribute("href")).toBe("/login.html");
+    expect(JSON.parse(calls("POST /api/auth/verify-email")[0][1].body)).toEqual({ token: "good" });
+  });
+
+  it("explains a used or expired link and lets the person ask for a new one", async () => {
+    vi.stubGlobal("location", { replace, search: "?token=old", hash: "", origin: "http://localhost" });
+    route({
+      "POST /api/auth/verify-email": [{ detail: "This link is invalid or has expired." }, 400],
+      "POST /api/auth/resend-verification": [null, 204],
+    });
+    render(<VerifyPage />);
+    expect(await screen.findByRole("heading", { name: "This link did not work" })).toBeTruthy();
+    expect(screen.getByText(/invalid or has expired/)).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "Sign in" })).toBeNull();
+    await fill(/Email/, "alex@acme.test");
+    await userEvent.click(screen.getByRole("button", { name: "Send a new link" }));
+    expect(await screen.findByText(/new link is on its way/)).toBeTruthy();
+    expect((await screen.findByRole("button", { name: /Send a new link \(/ })).disabled).toBe(true);
+  });
+
+  it("without a token it tells the person to check their inbox", async () => {
+    render(<VerifyPage />);
+    expect(await screen.findByRole("heading", { name: "Check your inbox" })).toBeTruthy();
+    expect(calls("POST /api/auth/verify-email")).toHaveLength(0);
   });
 });
 

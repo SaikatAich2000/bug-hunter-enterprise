@@ -1,71 +1,91 @@
-// Email verification: opens from the mailed link, confirms it, and offers a fresh link when the
-// old one is gone. (The animated multi-step sign-up wraps this later.)
-import { useEffect, useState } from "react";
+// Email verification: opens from the mailed link and shows one of four states: waiting for the link
+// (no token), confirming, confirmed, or a link that no longer works (with a way to get a fresh one).
+import { useEffect, useRef, useState } from "react";
 import AuthCard from "../components/AuthCard";
+import ResendVerification from "../components/ResendVerification";
 import { errorMessage, sendJson } from "../lib/publicApi";
+
+function StatusIcon({ kind }) {
+  return (
+    <div className={`auth-status ${kind}`} aria-hidden="true">
+      {kind === "ok" ? "✓" : kind === "bad" ? "!" : "…"}
+    </div>
+  );
+}
 
 export default function VerifyPage() {
   const [token] = useState(() => new URLSearchParams(location.search).get("token") || "");
-  const sent = new URLSearchParams(location.search).get("sent") === "1";
-  const [alert, setAlert] = useState(
-    token
-      ? { msg: "Confirming your email address…", kind: "success" }
-      : sent
-        ? { msg: "Check your inbox: we sent you a link to confirm your address.", kind: "success" }
-        : null,
-  );
-  const [verified, setVerified] = useState(false);
-  const [busy, setBusy] = useState(false);
+  // "waiting" (no token: check your inbox) | "checking" | "verified" | "failed"
+  const [state, setState] = useState(token ? "checking" : "waiting");
+  const [reason, setReason] = useState("");
+  const [alert, setAlert] = useState(null);
+  const headingRef = useRef(null);
 
   useEffect(() => {
-    if (!token) return;
+    if (!token) return undefined;
+    let cancelled = false;
     sendJson("/auth/verify-email", { json: { token } })
       .then((res) => {
-        if (res.ok) {
-          setVerified(true);
-          setAlert({ msg: "Your email is confirmed. You can sign in now.", kind: "success" });
-        } else {
-          setAlert({ msg: errorMessage(res.data, "This link is not valid anymore"), kind: "error" });
+        if (cancelled) return;
+        if (res.ok) setState("verified");
+        else {
+          setReason(errorMessage(res.data, "This link is not valid anymore."));
+          setState("failed");
         }
       })
-      .catch(() => setAlert({ msg: "Network error. Try again", kind: "error" }));
+      .catch(() => {
+        if (cancelled) return;
+        setReason("Network error. Check your connection and reload this page.");
+        setState("failed");
+      });
+    return () => { cancelled = true; };
   }, [token]);
 
-  async function onResend(e) {
-    e.preventDefault();
-    const email = e.currentTarget.elements.namedItem("email").value.trim();
-    setBusy(true);
-    try {
-      const res = await sendJson("/auth/resend-verification", { json: { email } });
-      setAlert(
-        res.ok
-          ? { msg: "If that address is waiting for confirmation, a new link is on its way.", kind: "success" }
-          : { msg: errorMessage(res.data, "Could not send a new link"), kind: "error" },
-      );
-    } catch {
-      setAlert({ msg: "Network error. Try again", kind: "error" });
-    } finally {
-      setBusy(false);
-    }
-  }
+  // Each outcome replaces the last: move focus to its heading so it is announced and keyboard users start there.
+  useEffect(() => {
+    if (state !== "checking") headingRef.current?.focus({ preventScroll: true });
+  }, [state]);
 
   return (
     <AuthCard title="Confirm your email" alert={alert}>
-      {verified ? (
-        <div className="auth-links">
-          <a href="/login.html">Sign in</a>
-        </div>
-      ) : (
-        <form className="auth-form" noValidate onSubmit={onResend}>
-          <label className="field">
-            <span>Email</span>
-            <input name="email" type="email" required maxLength={254} autoComplete="username" />
-          </label>
-          <button type="submit" className="btn primary auth-submit" disabled={busy}>
-            {busy ? "Sending…" : "Send a new link"}
-          </button>
-        </form>
-      )}
+      <div className="auth-step" data-dir="fwd" key={state} aria-busy={state === "checking"}>
+        {state === "checking" && (
+          <>
+            <StatusIcon kind="wait" />
+            <h2 className="auth-step-title" role="status">Confirming your email address...</h2>
+          </>
+        )}
+        {state === "verified" && (
+          <>
+            <StatusIcon kind="ok" />
+            <h2 className="auth-step-title" tabIndex={-1} ref={headingRef}>Your email is confirmed</h2>
+            <p className="auth-help">You can sign in now.</p>
+            <a className="btn primary auth-submit auth-cta" href="/login.html" id="verifySignIn">Sign in</a>
+          </>
+        )}
+        {state === "failed" && (
+          <>
+            <StatusIcon kind="bad" />
+            <h2 className="auth-step-title" tabIndex={-1} ref={headingRef}>This link did not work</h2>
+            <p className="auth-help" id="verifyReason">{reason} Links work once and expire, so ask for a new one.</p>
+            <ResendVerification onAlert={setAlert} />
+          </>
+        )}
+        {state === "waiting" && (
+          <>
+            <StatusIcon kind="wait" />
+            <h2 className="auth-step-title" tabIndex={-1} ref={headingRef}>Check your inbox</h2>
+            <p className="auth-help">
+              We emailed you a link to confirm your address. Open it on this device to finish. If it has not
+              arrived, check your spam folder or ask for a new one.
+            </p>
+            <ResendVerification onAlert={setAlert} />
+          </>
+        )}
+      </div>
+      <div className="auth-links">
+        <a href="/login.html">Back to sign in</a>
+      </div>
     </AuthCard>
   );
 }
