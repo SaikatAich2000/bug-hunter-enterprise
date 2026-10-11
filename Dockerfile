@@ -25,7 +25,7 @@ ARG BASE_IMAGE=python:3.12-slim
 # committed app/static (favicon, icon, fonts, vendor/) and let the build
 # overwrite index.html/login.html/reset.html/assets/ in place.
 # ---------------------------------------------------------------------------
-FROM node:22-slim AS frontend-build
+FROM node:25-slim AS frontend-build
 WORKDIR /repo
 COPY frontend ./frontend
 COPY app/static ./app/static
