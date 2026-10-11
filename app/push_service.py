@@ -84,9 +84,12 @@ def register(
     token: str,
     platform: str = "web",
     user_agent: str = "",
+    rebind: bool = False,
 ) -> PushSubscription:
-    """Upsert a device's FCM token for ``user_id``: refresh in place if already
-    this user's, else raise ``PushTokenConflict``."""
+    """Upsert a device's FCM token for ``user_id``: refresh in place if already this user's.
+    A token held by another user raises ``PushTokenConflict``, unless ``rebind`` (the signed-in
+    person presenting it is holding the device, e.g. after switching accounts on it): then it
+    moves to them and the previous account stops receiving pushes on that device."""
     def _refresh(sub: PushSubscription) -> PushSubscription:
         sub.platform = platform or "web"
         sub.user_agent = (user_agent or "")[:400]
@@ -94,7 +97,11 @@ def register(
         return sub
 
     def _claim_or_conflict(sub: PushSubscription) -> PushSubscription:
-        if sub.user_id != user_id:
+        if sub.user_id != user_id and rebind:
+            logger.info("Push token re-bound from user %s to user %s (account switch)",
+                        sub.user_id, user_id)
+            sub.user_id = user_id
+        elif sub.user_id != user_id:
             logger.warning(
                 "Refused cross-user push-token rehome: token bound to user %s, "
                 "subscribe attempted by user %s", sub.user_id, user_id,

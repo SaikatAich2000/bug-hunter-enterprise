@@ -6,16 +6,14 @@ Firebase web config; the service-account key stays server-side.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app import push_service
-from app.api_docs import CONFLICT_409
 from app.auth import get_current_user
 from app.config import get_settings
 from app.database import get_db
 from app.models import User
-from app.push_service import PushTokenConflict
 from app.schemas import PushConfigOut, PushSubscribeIn, PushUnsubscribeIn
 
 router = APIRouter(prefix="/api/push", tags=["push"])
@@ -41,27 +39,22 @@ def push_config() -> PushConfigOut:
     )
 
 
-@router.post("/subscribe", responses=CONFLICT_409)
+@router.post("/subscribe")
 def subscribe(
     payload: PushSubscribeIn,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> dict[str, bool]:
-    """Register (or refresh) this browser/device's FCM token for the user."""
-    try:
-        push_service.register(
-            db,
-            user_id=user.id,
-            token=payload.token,
-            platform=payload.platform,
-            user_agent=payload.user_agent,
-        )
-    except PushTokenConflict as exc:
-        # a replayed token must not redirect another account's pushes here
-        raise HTTPException(
-            status_code=409,
-            detail="This device token is already registered to another account.",
-        ) from exc
+    """Register (or refresh) this browser/device's FCM token for the user; a token last used by
+    another account on this device moves to the signed-in user."""
+    push_service.register(
+        db,
+        user_id=user.id,
+        token=payload.token,
+        platform=payload.platform,
+        user_agent=payload.user_agent,
+        rebind=True,
+    )
     db.commit()
     return {"ok": True}
 

@@ -383,8 +383,8 @@ def test_reset_password_tzaware_expiry_branch(client):
 
 
 # app/routes/push.py — token already bound to another account
-def test_push_subscribe_conflict_returns_409(admin_client):
-    # A token bound to one account is 409 when a second user claims it.
+def test_push_subscribe_rebinds_to_the_new_account(admin_client):
+    # A token bound to one account moves to a second user who presents it.
     admin_client.post("/api/push/subscribe", json={"token": "shared-token", "platform": "web"})
     # Create and log in as a second user; reuse the same token.
     admin_client.post("/api/users", json={
@@ -396,8 +396,7 @@ def test_push_subscribe_conflict_returns_409(admin_client):
         "email": "second@test.local", "password": "User12345",
     })
     r = admin_client.post("/api/push/subscribe", json={"token": "shared-token"})
-    assert r.status_code == 409
-    assert "another account" in r.json()["detail"].lower()
+    assert r.status_code == 200  # a device switching accounts re-binds its token
 
 
 # app/routes/sessions.py — empty list + sweep error rollback

@@ -23,8 +23,8 @@ def test_device_registration_is_idempotent_and_owned_by_one_account(client):
     assert first.status_code == 200, first.text
     assert first.json()["platform"] == "android"
     assert a.post("/api/devices/register", json={"token": TOKEN_A}).status_code == 200
-    # a token bound to another account cannot be taken over
-    assert b.post("/api/devices/register", json={"token": TOKEN_A}).status_code == 409
+    # a device switching accounts re-binds its token (tests/test_identity_sessions.py)
+    assert b.post("/api/devices/register", json={"token": TOKEN_A}).status_code == 200
     assert a.post("/api/devices/register", json={"token": "short"}).status_code == 422
 
 

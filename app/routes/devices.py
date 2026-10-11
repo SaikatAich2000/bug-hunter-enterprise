@@ -10,16 +10,14 @@ keyed by the signed-in user; nobody can touch another user's tokens.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app import push_service
-from app.api_docs import CONFLICT_409
 from app.auth import get_current_user
 from app.database import get_db
 from app.models import NotificationPreference, PushSubscription, User
-from app.push_service import PushTokenConflict
 from app.schemas import (
     DeviceTokenIn,
     DeviceTokenOut,
@@ -30,20 +28,17 @@ from app.schemas import (
 router = APIRouter(tags=["devices"])
 
 
-@router.post("/api/devices/register", response_model=DeviceTokenOut, responses=CONFLICT_409)
+@router.post("/api/devices/register", response_model=DeviceTokenOut)
 def register_device(
     payload: DeviceTokenIn, actor: User = Depends(get_current_user), db: Session = Depends(get_db),
 ) -> PushSubscription:
-    """Idempotent: registering the same token again just refreshes it. A token already bound to
-    another account is refused, so a replayed token cannot redirect that user's pushes."""
-    try:
-        push_service.register(
-            db, user_id=actor.id, token=payload.token, platform=payload.platform, user_agent="",
-        )
-    except PushTokenConflict as exc:
-        raise HTTPException(
-            status_code=409, detail="This device token is already registered to another account.",
-        ) from exc
+    """Idempotent: registering the same token again just refreshes it. A token bound to another
+    account moves to the caller (a device switching accounts); the previous account stops
+    receiving pushes on it."""
+    push_service.register(
+        db, user_id=actor.id, token=payload.token, platform=payload.platform, user_agent="",
+        rebind=True,
+    )
     db.commit()
     return db.scalar(select(PushSubscription).where(PushSubscription.token == payload.token))
 

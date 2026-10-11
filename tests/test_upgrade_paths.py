@@ -94,7 +94,7 @@ def test_old_enterprise_database_upgrades_in_place(legacy_enterprise_db, monkeyp
         assert member.get("/api/notifications/preferences").json() == {
             "mentions": True, "assignments": False, "activity": True}
         assert member.post("/api/devices/register", json={"token": "legacy-fcm-token-0000000001"}).status_code == 200
-        assert lead.post("/api/devices/register", json={"token": "legacy-fcm-token-0000000001"}).status_code == 409
+        assert lead.post("/api/devices/register", json={"token": "legacy-fcm-token-0000000001"}).status_code == 200  # re-bind on account switch
 
 
 def test_second_boot_of_an_upgraded_database_changes_nothing(legacy_enterprise_db, monkeypatch):
