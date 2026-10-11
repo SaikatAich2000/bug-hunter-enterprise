@@ -122,6 +122,7 @@ def test_earlier_edition_firebase_key_variable_still_configures_push(monkeypatch
 
     monkeypatch.delenv("FCM_CREDENTIALS_JSON", raising=False)
     monkeypatch.delenv("WEB_PUSH_ENABLED", raising=False)
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **k: False)  # ignore a developer's local .env
     try:
         monkeypatch.delenv("FIREBASE_SA_JSON", raising=False)
         assert importlib.reload(fresh_config).get_settings().WEB_PUSH_ENABLED is False
