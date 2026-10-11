@@ -5,7 +5,7 @@ import { GUIDES, findGuide, searchGuides } from "./guides.js";
 
 describe("guides", () => {
   it("covers every required topic in order", () => {
-    expect(GUIDES.map((g) => g.id)).toEqual(["items", "sprints", "reports", "notifications", "git", "admin", "roles"]);
+    expect(GUIDES.map((g) => g.id)).toEqual(["items", "sprints", "reports", "notifications", "git", "admin", "roles", "organizations", "security"]);
     for (const g of GUIDES) {
       expect(g.title.length).toBeGreaterThan(3);
       expect(g.summary.length).toBeGreaterThan(20);
