@@ -25,7 +25,15 @@ from app.models import (
     Activity,
     Attachment,
     Bug,
+    BugCustomValue,
+    ChatConversation,
     Comment,
+    CustomField,
+    EmailChangeRequest,
+    Invitation,
+    Notification,
+    NotificationPreference,
+    PushSubscription,
     SavedView,
     User,
     bug_assignees,
@@ -94,10 +102,59 @@ def export_my_data(user: User = Depends(get_current_user), db: Session = Depends
             for s in rows(SessionRow, SessionRow.user_id == user.id)
         ],
         "saved_views": [
-            {"id": v.id, "name": v.name, "shared_with_org": bool(v.shared_with_org)}
+            {"id": v.id, "name": v.name, "shared_with_org": bool(v.shared_with_org),
+             "filters": v.filters_json, "created_at": _iso(v.created_at)}
             for v in rows(SavedView, SavedView.owner_user_id == user.id)
         ],
+        "chat": [
+            {"id": c.id, "created_at": _iso(c.created_at),
+             "messages": [{"role": m.role, "content": m.content, "created_at": _iso(m.created_at)}
+                          for m in c.messages]}
+            for c in rows(ChatConversation, ChatConversation.user_id == user.id)
+        ],
+        "notifications": [
+            {"id": n.id, "kind": n.kind, "title": n.title, "body": n.body, "bug_id": n.bug_id,
+             "actor_name": n.actor_name, "read_at": _iso(n.read_at), "created_at": _iso(n.created_at)}
+            for n in rows(Notification, Notification.user_id == user.id)
+        ],
+        # The push token itself is a credential, so it is described, not handed out.
+        "devices": [
+            {"id": d.id, "platform": d.platform, "user_agent": d.user_agent,
+             "created_at": _iso(d.created_at), "last_seen_at": _iso(d.last_seen_at)}
+            for d in rows(PushSubscription, PushSubscription.user_id == user.id)
+        ],
+        "notification_preferences": [
+            {"mentions": bool(p.mentions), "assignments": bool(p.assignments),
+             "activity": bool(p.activity), "updated_at": _iso(p.updated_at)}
+            for p in rows(NotificationPreference, NotificationPreference.user_id == user.id)
+        ],
+        "invitations_sent": [
+            {"id": i.id, "email": i.email, "role": i.role, "expires_at": _iso(i.expires_at),
+             "accepted_at": _iso(i.accepted_at), "revoked_at": _iso(i.revoked_at),
+             "created_at": _iso(i.created_at)}
+            for i in rows(Invitation, Invitation.invited_by_user_id == user.id,
+                          Invitation.org_id == user.org_id)
+        ],
+        "email_change_requests": [
+            {"id": r.id, "new_email": r.new_email, "expires_at": _iso(r.expires_at),
+             "used_at": _iso(r.used_at), "created_at": _iso(r.created_at)}
+            for r in rows(EmailChangeRequest, EmailChangeRequest.user_id == user.id)
+        ],
+        "custom_values": _custom_values(db, user, [b.id for b in {*reported, *assigned}]),
     }
+
+
+def _custom_values(db: Session, user: User, bug_ids: list[int]) -> list[dict[str, Any]]:
+    """Custom-field values on the items the caller reported or is assigned to."""
+    if not bug_ids:
+        return []
+    found = db.execute(
+        select(BugCustomValue.bug_id, CustomField.name, BugCustomValue.value)
+        .join(CustomField, CustomField.id == BugCustomValue.field_id)
+        .where(BugCustomValue.bug_id.in_(bug_ids))
+        .limit(_EXPORT_ROW_CAP)
+    ).all()
+    return [{"bug_id": b, "field": n, "value": v} for b, n, v in found]
 
 
 @router.delete("/account", status_code=204, responses=BAD_REQUEST_FORBIDDEN_CONFLICT_NOT_FOUND_404)

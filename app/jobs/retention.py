@@ -3,7 +3,9 @@
 Removed on every run:
 * notifications older than NOTIFICATION_RETENTION_DAYS (0 keeps them),
 * Sleuth conversations idle for longer than CHAT_RETENTION_DAYS (0 keeps them),
-* expired sessions, used or expired password-reset tokens, and expired idempotency keys.
+* expired sessions, used or expired password-reset tokens, and expired idempotency keys,
+* invitations that expired more than INVITATION_GRACE_DAYS ago, and email-change requests that
+  expired or were used.
 
 Deletes go in batches of ids so a large backlog never holds one long lock, and the job is
 safe to run on several replicas at once (a row deleted twice is simply gone). The app runs it
@@ -18,11 +20,20 @@ from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.models import ChatConversation, IdempotencyKey, Notification, PasswordResetToken
+from app.models import (
+    ChatConversation,
+    EmailChangeRequest,
+    IdempotencyKey,
+    Invitation,
+    Notification,
+    PasswordResetToken,
+)
 from app.models import Session as SessionRow
 
 logger = logging.getLogger("bug_hunter.retention")
 
+# Expired invitations stay visible (as "expired") in the manager for this long.
+INVITATION_GRACE_DAYS = 30
 BATCH_SIZE = 1000
 
 
@@ -47,6 +58,12 @@ def run_retention(db: Session, now: datetime | None = None) -> dict[str, int]:
             PasswordResetToken.expires_at < now, PasswordResetToken.used_at.is_not(None),
         )),
         "idempotency_keys": _purge(db, IdempotencyKey, IdempotencyKey.expires_at < now),
+        "invitations": _purge(
+            db, Invitation, Invitation.expires_at < now - timedelta(days=INVITATION_GRACE_DAYS),
+        ),
+        "email_change_requests": _purge(db, EmailChangeRequest, or_(
+            EmailChangeRequest.expires_at < now, EmailChangeRequest.used_at.is_not(None),
+        )),
         "notifications": 0,
         "chat_conversations": 0,
     }

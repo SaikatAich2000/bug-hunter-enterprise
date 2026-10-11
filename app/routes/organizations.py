@@ -6,17 +6,30 @@ the URL space rather than of each handler.
 """
 from __future__ import annotations
 
+import logging
 import re
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from app.api_docs import BAD_REQUEST_422
-from app.auth import get_current_user, require_admin
+from app.api_docs import BAD_REQUEST_422, BAD_REQUEST_FORBIDDEN_CONFLICT_NOT_FOUND_404
+from app.auth import clear_session_cookie, get_current_user, require_admin, verify_password
 from app.database import get_db
-from app.models import Activity, Organization, User
+from app.models import (
+    Activity,
+    Attachment,
+    Bug,
+    Comment,
+    Invitation,
+    Organization,
+    Project,
+    SavedView,
+    User,
+    Webhook,
+)
 from app.schemas import OrganizationOut, OrganizationUpdate
 
 router = APIRouter(prefix="/api", tags=["organization"])
@@ -131,3 +144,69 @@ def update_branding(
         _audit(db, user, "branding_updated", f"Updated branding fields: {', '.join(changed)}")
         db.commit()
     return _branding_out(org)
+
+
+# --- deleting the whole organization ---------------------------------------------------------
+
+audit_log = logging.getLogger("bug_hunter.audit")
+
+
+class DeleteOrganizationIn(BaseModel):
+    password: str = Field(min_length=1, max_length=200)
+    # The organization's exact name, typed by the admin.
+    confirm_name: str = Field(min_length=1, max_length=200)
+
+
+def _deletion_summary(db: Session, org: Organization) -> dict[str, int]:
+    """What deleting the organization removes, counted inside this organization only."""
+    org_bugs = select(Bug.id).join(Project, Project.id == Bug.project_id).where(Project.org_id == org.id)
+
+    def count(stmt) -> int:
+        return db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+
+    return {
+        "users": count(select(User.id).where(User.org_id == org.id)),
+        "projects": count(select(Project.id).where(Project.org_id == org.id)),
+        "items": count(org_bugs),
+        "comments": count(select(Comment.id).where(Comment.bug_id.in_(org_bugs))),
+        "attachments": count(select(Attachment.id).where(Attachment.bug_id.in_(org_bugs))),
+        "webhooks": count(select(Webhook.id).where(Webhook.org_id == org.id)),
+        "invitations": count(select(Invitation.id).where(Invitation.org_id == org.id)),
+        "saved_views": count(select(SavedView.id).where(SavedView.org_id == org.id)),
+        "audit_entries": count(select(Activity.id).where(Activity.org_id == org.id)),
+    }
+
+
+@router.get("/organization/deletion-summary")
+def organization_deletion_summary(
+    user: User = Depends(require_admin), db: Session = Depends(get_db),
+) -> dict:
+    """Dry run: exactly what ``POST /api/organization/delete`` would remove. Changes nothing."""
+    return {"organization": user.organization.name, "will_delete": _deletion_summary(db, user.organization)}
+
+
+@router.post("/organization/delete", status_code=204,
+             responses=BAD_REQUEST_FORBIDDEN_CONFLICT_NOT_FOUND_404)
+def delete_my_organization(
+    payload: DeleteOrganizationIn, response: Response,
+    user: User = Depends(require_admin), db: Session = Depends(get_db),
+) -> None:
+    """Permanently delete the caller's organization and everything in it. Admin only; needs the
+    admin's password and the organization's name typed exactly. The database cascades the rows,
+    so nothing of the tenant survives; the deletion itself is recorded in the audit log stream
+    (the in-database audit trail goes with the organization)."""
+    if not verify_password(payload.password, user.password_hash):
+        raise HTTPException(status_code=400, detail="Current password is incorrect.")
+    org = user.organization
+    if payload.confirm_name != org.name:
+        raise HTTPException(status_code=400, detail="Type the organization's exact name to confirm.")
+    summary = _deletion_summary(db, org)
+    audit_log.warning(
+        "organization_deleted org_id=%s name=%r actor_user_id=%s actor_email=%s removed=%s",
+        org.id, org.name, user.id, user.email, summary,
+    )
+    org_id = org.id
+    db.expunge_all()
+    db.execute(delete(Organization).where(Organization.id == org_id))
+    db.commit()
+    clear_session_cookie(response)
