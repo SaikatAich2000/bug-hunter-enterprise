@@ -85,6 +85,14 @@
 }
 @keyframes bh-skeleton { 0%, 100% { opacity: 0.45; } 50% { opacity: 0.9; } }
 
+/* Multi-step flows (setup wizard, sign-up): the next step slides in from the side it came from. */
+.wiz-panel[data-dir="fwd"], .auth-step[data-dir="fwd"] { animation: bh-step-fwd var(--motion) var(--motion-ease) both; }
+.wiz-panel[data-dir="back"], .auth-step[data-dir="back"] { animation: bh-step-back var(--motion) var(--motion-ease) both; }
+@keyframes bh-step-fwd { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: none; } }
+@keyframes bh-step-back { from { opacity: 0; transform: translateX(-16px); } to { opacity: 1; transform: none; } }
+.wiz-num, .auth-pip { transition: transform var(--motion-fast) var(--motion-ease), opacity var(--motion-fast) var(--motion-ease); }
+.wiz-dot.current .wiz-num, .auth-pip.current { transform: scale(1.12); }
+
 /* Reduced motion: no animation and no transition anywhere; state changes are instant. Skeletons
    stay visible as static bars so loading is still communicated. */
 @media (prefers-reduced-motion: reduce) {
