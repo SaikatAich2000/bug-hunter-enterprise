@@ -12,12 +12,14 @@ def test_requires_login(client):
 def test_defaults_then_partial_merge(admin_client):
     assert admin_client.get(URL).json() == {
         "welcome_seen": False, "welcome_hidden": False, "tour_status": "none", "tour_step": 0,
+        "setup_status": "none", "setup_step": 0,
     }
     r = admin_client.put(URL, json={"welcome_seen": True, "tour_status": "running", "tour_step": 2})
     assert r.status_code == 200
     r = admin_client.put(URL, json={"welcome_hidden": True})
     assert r.json() == {
         "welcome_seen": True, "welcome_hidden": True, "tour_status": "running", "tour_step": 2,
+        "setup_status": "none", "setup_step": 0,
     }
     assert admin_client.get(URL).json()["tour_step"] == 2
 
@@ -26,6 +28,18 @@ def test_rejects_bad_values(admin_client):
     assert admin_client.put(URL, json={"tour_status": "bogus"}).status_code == 422
     assert admin_client.put(URL, json={"tour_step": -1}).status_code == 422
     assert admin_client.put(URL, json={"user_id": 5}).status_code == 422
+    assert admin_client.put(URL, json={"setup_status": "bogus"}).status_code == 422
+    assert admin_client.put(URL, json={"setup_step": -1}).status_code == 422
+
+
+def test_setup_wizard_progress_is_saved_and_resumable(admin_client):
+    r = admin_client.put(URL, json={"setup_status": "running", "setup_step": 2})
+    assert (r.json()["setup_status"], r.json()["setup_step"]) == ("running", 2)
+    # Other onboarding fields are untouched and the progress survives them.
+    admin_client.put(URL, json={"welcome_seen": True})
+    got = admin_client.get(URL).json()
+    assert (got["setup_status"], got["setup_step"], got["welcome_seen"]) == ("running", 2, True)
+    assert admin_client.put(URL, json={"setup_status": "done"}).json()["setup_step"] == 2
 
 
 def test_two_simultaneous_first_writes_both_succeed(admin_client):

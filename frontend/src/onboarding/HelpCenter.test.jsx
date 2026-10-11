@@ -13,7 +13,7 @@ describe("HelpCenter", () => {
   it("shows the first guide and lists all of them", () => {
     render(<HelpCenter />);
     expect(screen.getByRole("heading", { level: 1, name: "Creating and tracking items" })).toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: /./ }).filter((b) => b.classList.contains("help-list-item"))).toHaveLength(7);
+    expect(screen.getAllByRole("button", { name: /./ }).filter((b) => b.classList.contains("help-list-item"))).toHaveLength(9);
     expect(screen.getByRole("button", { name: "Creating and tracking items" })).toHaveAttribute("aria-current", "page");
   });
 

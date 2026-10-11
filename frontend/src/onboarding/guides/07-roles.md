@@ -16,6 +16,10 @@ There are three roles. Your role is shown in the account menu at the top right. 
 | Grant the admin role, edit admins | No | No | Yes |
 | View and revoke Sessions | No | No | Yes |
 
+## Project leads
+
+A project lead is a member who also manages that project: they add and remove its members, change member roles and define its custom fields. Leads are per project, not a role of their own. A project always keeps at least one lead. See [Organizations](#help/organizations).
+
 ## Project access
 
 Non-admins only see items in projects they are a member of. If something you expect is missing, ask a manager to add you to the project.

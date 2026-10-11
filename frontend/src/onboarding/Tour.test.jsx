@@ -5,7 +5,10 @@ import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import Tour, { placeCard } from "./Tour.jsx";
-import { TOUR_STEPS, stepsFor } from "./tourSteps.js";
+import { stepsFor } from "./tourSteps.js";
+
+// The plain-user track: work items, sprints, events, Sleuth, settings.
+const TOUR_STEPS = stepsFor(() => true, "user");
 
 afterEach(cleanup);
 
@@ -23,8 +26,8 @@ describe("Tour", () => {
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
     expect(screen.getByRole("dialog")).toHaveAccessibleName("Sprints");
     fireEvent.click(screen.getByRole("button", { name: "Back" }));
-    expect(screen.getByText("Step 1 of 6")).toBeInTheDocument();
-    for (let n = 0; n < 5; n++) fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(screen.getByText("Step 1 of 5")).toBeInTheDocument();
+    for (let n = 0; n < 4; n++) fireEvent.click(screen.getByRole("button", { name: "Next" }));
     fireEvent.click(screen.getByRole("button", { name: "Finish" }));
     expect(onFinish).toHaveBeenCalled();
   });
@@ -60,7 +63,7 @@ describe("Tour", () => {
     btn.id = "profileBtn";
     btn.getBoundingClientRect = () => ({ top: 10, left: 20, width: 100, height: 30 });
     document.body.appendChild(btn);
-    const { container } = render(<Tour steps={TOUR_STEPS} index={5} onIndex={() => {}} onPause={() => {}} onFinish={() => {}} />);
+    const { container } = render(<Tour steps={TOUR_STEPS} index={TOUR_STEPS.length - 1} onIndex={() => {}} onPause={() => {}} onFinish={() => {}} />);
     expect(container.querySelector(".tour-spot")).not.toBeNull();
     btn.remove();
   });
@@ -84,6 +87,8 @@ describe("placeCard", () => {
 describe("stepsFor", () => {
   it("hides steps the role cannot open", () => {
     expect(stepsFor(() => false).some((s) => s.id === "reports")).toBe(false);
-    expect(stepsFor(() => true)).toHaveLength(6);
+    expect(stepsFor(() => true, "manager").some((s) => s.id === "reports")).toBe(true);
+    expect(stepsFor(() => true, "user").some((s) => s.id === "reports")).toBe(false);
+    expect(stepsFor(() => true, "admin")).toHaveLength(9);
   });
 });

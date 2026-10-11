@@ -13,7 +13,7 @@ function currentTheme() {
 }
 
 export default function ProfileMenu() {
-  const { currentUser, setChangePasswordOpen, setAccountOpen, setView } = useApp();
+  const { currentUser, setChangePasswordOpen, setAccountOpen, setView, isAdmin } = useApp();
 
   const [open, setOpen] = useState(false);
   const [theme, setTheme] = useState(currentTheme);
@@ -87,6 +87,11 @@ export default function ProfileMenu() {
   const openTour = () => {
     setOpen(false);
     emitOnboarding("tour-resume");
+  };
+
+  const openSetup = () => {
+    setOpen(false);
+    emitOnboarding("setup");
   };
 
   const avatar = initials(currentUser.name) || "?";
@@ -188,6 +193,19 @@ export default function ProfileMenu() {
             <span className="profile-menu-ic" aria-hidden="true">🧭</span>{" "}
             Product tour
           </button>
+
+          {isAdmin && (
+            <button
+              type="button"
+              role="menuitem"
+              className="profile-menu-item"
+              id="orgSetupBtn"
+              onClick={openSetup}
+            >
+              <span className="profile-menu-ic" aria-hidden="true">{"⚙️"}</span>{" "}
+              Organization setup
+            </button>
+          )}
 
           <div className="profile-menu-sep" />
 

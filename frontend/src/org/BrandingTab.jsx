@@ -7,10 +7,10 @@ import { toast, toastError } from "../lib/toast";
 import { useApp } from "../state/AppContext";
 
 // The server accepts ~150 KB of data URL; a file of 100 KB encodes to about 134 KB.
-const MAX_LOGO_BYTES = 100 * 1024;
-const LOGO_TYPES = ["image/png", "image/jpeg", "image/svg+xml", "image/gif", "image/webp"];
+export const MAX_LOGO_BYTES = 100 * 1024;
+export const LOGO_TYPES = ["image/png", "image/jpeg", "image/svg+xml", "image/gif", "image/webp"];
 
-function readAsDataUrl(file) {
+export function readAsDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
