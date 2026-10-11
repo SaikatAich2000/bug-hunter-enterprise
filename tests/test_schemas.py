@@ -1,5 +1,6 @@
 """Pure-unit tests for app/schemas.py validators and the HTML sanitizer.
 app.schemas is imported lazily via _S() because conftest re-imports app.* between tests."""
+
 import pytest
 from pydantic import ValidationError
 
@@ -779,3 +780,34 @@ def test_cov_statuses_for_type_known_and_unknown():
     # An unrecognised type falls back to the Bug status list.
     assert s.statuses_for_type("Mystery") == s.STATUSES_BY_TYPE["Bug"]
     assert s.statuses_for_type("") == s.STATUSES_BY_TYPE["Bug"]
+
+
+# app/schemas.py — HTML sanitizer + bulk-action dedup validator edge cases
+def test_schema_sanitize_rejects_svg_data_url():
+    # data:image/svg+xml is scriptable; the src must be dropped entirely.
+    from app.schemas import sanitize_html
+    out = sanitize_html('<img src="data:image/svg+xml,<script>alert(1)</script>">')
+    assert "svg+xml" not in out  # src was dropped (no clean URL)
+
+
+def test_schema_sanitize_drops_unlisted_tag():
+    # Unlisted tags are dropped but their text survives; <marquee> is not RCDATA.
+    from app.schemas import sanitize_html
+    out = sanitize_html("<marquee>hello</marquee>")
+    assert "<marquee" not in out
+    assert "hello" in out  # the unlisted end tag is also dropped
+
+
+def test_schema_sanitize_self_closing_rcdata_does_not_stick():
+    # <script/> self-closing: startendtag must early-return so suppression depth isn't stuck.
+    from app.schemas import sanitize_html
+    out = sanitize_html("<script/>after")
+    assert "after" in out
+    assert "<script" not in out
+
+
+def test_bulk_action_dedup_skips_duplicate_id():
+    # Dedup preserves first-seen order.
+    from app.schemas import BulkActionIn
+    ba = BulkActionIn(action="delete", ids=[5, 5, 7, 5])
+    assert ba.ids == [5, 7]

@@ -8,21 +8,18 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 
 import httpx
+
+from app.config import env_bool
 
 logger = logging.getLogger("bug_hunter.password_breach")
 
 _API_URL = "https://api.pwnedpasswords.com/range/"
 _TIMEOUT_SECONDS = 3.0
 
-def _env_bool(name: str, default: bool) -> bool:
-    return os.getenv(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
-
-
 def _is_enabled() -> bool:
-    return _env_bool("PASSWORD_BREACH_CHECK_ENABLED", True)
+    return env_bool("PASSWORD_BREACH_CHECK_ENABLED", True)
 
 
 def _sha1_hex(plain: str) -> str:

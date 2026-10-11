@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -28,6 +27,7 @@ from app.git.provider import (
     sanitize_provider_message,
 )
 from app.models import ProjectRepository, User, WorkItemBranch
+from app.util import utcnow
 
 logger = logging.getLogger("bug_hunter.git.branches")
 
@@ -146,12 +146,6 @@ def preview_branch_name(
     return branch_name, base_branch, target.display_id
 
 
-def _now() -> datetime:
-    # Mirrors models._utcnow(): second-resolution UTC, so SQLite and Postgres
-    # round-trip the same values.
-    return datetime.now(timezone.utc).replace(microsecond=0)
-
-
 def _repo_label(repository: ProjectRepository) -> str:
     return f"{repository.owner}/{repository.name}" if repository.owner else repository.name
 
@@ -225,7 +219,7 @@ def _persist(
         status=STATUS_ACTIVE,
         created_by_id=actor.id,
         created_by_name=actor.name,
-        last_checked_at=_now(),
+        last_checked_at=utcnow(),
     )
     db.add(row)
     # A unique-index violation here means a concurrent request won the race; the
@@ -248,7 +242,7 @@ def record_failure(
         return
     message = getattr(error, "message", None) or str(error)
     existing.last_error = sanitize_provider_message(message)
-    existing.last_checked_at = _now()
+    existing.last_checked_at = utcnow()
     db.flush()
 
 

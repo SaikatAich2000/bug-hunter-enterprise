@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta, timezone
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.models import IdempotencyKey
+from app.util import utcnow
 
 EXPIRY_HOURS = 24
 
@@ -26,10 +27,6 @@ class IdempotencyConflict(Exception):
 def fingerprint(payload: dict) -> str:
     canonical = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc).replace(microsecond=0)
 
 
 def get_cached_response(
@@ -53,9 +50,9 @@ def get_cached_response(
     expires_at = row.expires_at
     if expires_at.tzinfo is None:
         # SQLite round-trips DateTime(timezone=True) as naive; treat as UTC
-        # (all Agile timestamps are written in UTC — see _utcnow()).
+        # (all Agile timestamps are written in UTC — see utcnow()).
         expires_at = expires_at.replace(tzinfo=timezone.utc)
-    if expires_at < _utcnow():
+    if expires_at < utcnow():
         db.execute(delete(IdempotencyKey).where(IdempotencyKey.id == row.id))
         db.flush()
         return None
@@ -78,7 +75,7 @@ def store_result(
         request_fingerprint=fingerprint(payload),
         response_status=response_status,
         response_body=response_body,
-        created_at=_utcnow(),
-        expires_at=_utcnow() + timedelta(hours=EXPIRY_HOURS),
+        created_at=utcnow(),
+        expires_at=utcnow() + timedelta(hours=EXPIRY_HOURS),
     ))
     db.flush()

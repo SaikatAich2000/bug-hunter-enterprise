@@ -424,11 +424,11 @@ def test_every_non_story_type_is_rejected_before_any_provider_call(
                          **{"item_type": item_type})
         preview = _preview_branch(admin_client, item["id"])
         assert preview.status_code == 422, preview.text
-        assert preview.json()["detail"] == STORY_ONLY_MESSAGE
+        assert preview.json()["detail"][0]["msg"] == STORY_ONLY_MESSAGE
         assert preview.headers.get("X-Error-Code") == "user_story_only"
         created = _post_branch(admin_client, item["id"])
         assert created.status_code == 422, created.text
-        assert created.json()["detail"] == STORY_ONLY_MESSAGE
+        assert created.json()["detail"][0]["msg"] == STORY_ONLY_MESSAGE
     assert provider.calls == []
 
 # ===========================================================================
@@ -1185,7 +1185,7 @@ def test_removal_is_story_only(git_project, admin_client, git_env):
         branch_id = row.id
     response = admin_client.delete(f"/api/git/branches/{branch_id}")
     assert response.status_code == 422, response.text
-    assert response.json()["detail"] == STORY_ONLY_MESSAGE
+    assert response.json()["detail"][0]["msg"] == STORY_ONLY_MESSAGE
 
 
 def test_removal_of_a_missing_record_is_a_scoped_404(git_project, admin_client, git_env):

@@ -97,7 +97,7 @@ export async function api(path, opts = {}) {
   if (res.status === 204) return null;
 
   const text = await res.text();
-  let parsed = null;
+  let parsed;
   try {
     parsed = text ? JSON.parse(text) : null;
   } catch {

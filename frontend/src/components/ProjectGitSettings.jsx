@@ -1,3 +1,4 @@
+import Skeleton from "./Skeleton";
 import { useCallback, useEffect, useRef, useState } from "react";
 import BhSelect from "./BhSelect";
 import { api } from "../lib/api";
@@ -204,7 +205,7 @@ export default function ProjectGitSettings({ projectId }) {
     }
   }
 
-  if (loading && !config) return <section className="project-git-settings"><p className="muted">Loading Git integration…</p></section>;
+  if (loading && !config) return <section className="project-git-settings"><Skeleton lines={3} label="Loading Git integration" /></section>;
   if (!config || !configDraft) return <section className="project-git-settings"><p className="muted">Git integration settings could not be loaded.</p></section>;
 
   // A draft test is worth allowing whenever a credential could exist: either one

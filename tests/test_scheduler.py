@@ -7,6 +7,8 @@ wall-clock timing (the only untested line is the infinite sleep loop itself).
 from __future__ import annotations
 
 import asyncio
+import importlib
+import types
 from datetime import datetime, timezone
 
 import pytest
@@ -181,6 +183,74 @@ def test_tick_swallows_run_failure(monkeypatch):
     monkeypatch.setattr(scheduler, "_run_digest_once", boom)
     c = CronSchedule("* * * * *")
     assert asyncio.run(scheduler._tick(c, timezone.utc, now=_dt(2026, 6, 15, 7, 0))) is None
+
+
+# scheduler.start: empty cron expression should be a no-op
+def test_scheduler_start_empty_cron_is_noop(monkeypatch):
+    from app import scheduler
+
+    monkeypatch.setattr(
+        scheduler, "get_settings",
+        lambda: types.SimpleNamespace(
+            EMAIL_DIGEST_CRON="", EMAIL_DIGEST_ENABLED=True, AUDIT_RETENTION_DAYS=0,
+        ),
+    )
+    scheduler._task = None
+    scheduler.start()
+    assert scheduler._task is None  # left unscheduled when cron is blank
+
+
+# app/scheduler.py — the async _loop's per-minute guard
+def test_scheduler_loop_skips_repeat_minute_and_non_matching(monkeypatch):
+    # Same-minute calls must not fire twice; a non-matching new minute is skipped.
+    sched = importlib.import_module("app.scheduler")
+
+    # Scripted clock: iter1 fires 07:00; iter2 same minute; iter3 07:01 no match; iter4 cancels.
+    times = [
+        datetime(2026, 6, 21, 7, 0, 5, tzinfo=timezone.utc),
+        datetime(2026, 6, 21, 7, 0, 5, tzinfo=timezone.utc),   # iter1 after-sleep
+        datetime(2026, 6, 21, 7, 0, 35, tzinfo=timezone.utc),  # iter2 (repeat min)
+        datetime(2026, 6, 21, 7, 0, 35, tzinfo=timezone.utc),
+        datetime(2026, 6, 21, 7, 1, 5, tzinfo=timezone.utc),   # iter3 (new minute)
+        datetime(2026, 6, 21, 7, 1, 5, tzinfo=timezone.utc),
+        datetime(2026, 6, 21, 7, 2, 5, tzinfo=timezone.utc),   # iter4 (terminate)
+        datetime(2026, 6, 21, 7, 2, 5, tzinfo=timezone.utc),
+    ]
+    idx = {"i": 0}
+    sleeps = {"n": 0}
+
+    class _FixedDatetime:
+        @staticmethod
+        def now(_tz=None):
+            i = idx["i"]
+            idx["i"] = min(i + 1, len(times) - 1)
+            return times[i]
+
+    async def fake_sleep(_secs):
+        sleeps["n"] += 1
+        if sleeps["n"] >= 4:
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(sched, "datetime", _FixedDatetime)
+    monkeypatch.setattr(sched.asyncio, "sleep", fake_sleep)
+
+    ticks = {"n": 0}
+
+    async def fake_tick(_schedule, _tz, _now):
+        ticks["n"] += 1
+
+    monkeypatch.setattr(sched, "_tick", fake_tick)
+
+    class _Schedule:
+        def matches(self, now):
+            # Only minute 0 matches, so iter1 fires and iter3 (07:01) does not.
+            return now.minute == 0
+
+    coro = sched._loop(_Schedule(), timezone.utc)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(coro)
+
+    assert ticks["n"] == 1  # fired exactly once
 
 
 def test_retention_loop_runs_audit_sweep_and_general_retention(monkeypatch):

@@ -2,6 +2,7 @@
  * Pick a report type, set filters, Run, then Download XLSX (same backend engine).
  * Catalog loads once on mount; XLSX export reuses the last successful run's filters, not current UI state.
  */
+import EmptyGuide from "../onboarding/EmptyGuide";
 import { useEffect, useRef, useState } from "react";
 import { api, apiBlob } from "../lib/api";
 import { hideLoader, showLoader } from "../lib/loader";
@@ -509,6 +510,7 @@ export default function ReportsView() {
           </div>
           <div className="reports-empty" id="reportEmpty" hidden={!result || result.rows.length > 0}>
             <p>No rows match your filters. Try widening the date range or removing a filter</p>
+            <EmptyGuide guide="reports" />
           </div>
           <div className="reports-truncated" id="reportTruncated" hidden={!showTruncated}>
             <p>

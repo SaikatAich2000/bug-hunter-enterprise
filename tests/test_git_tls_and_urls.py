@@ -579,7 +579,7 @@ def test_build_provider_none_vs_blank_resolution(monkeypatch):
         credential_encrypted="",
     )
     monkeypatch.setattr(
-        routes.credential_svc, "resolve_token", lambda config, base_url=None: "global-fallback"
+        __import__("app.git.credentials", fromlist=["x"]), "resolve_token", lambda config, base_url=None: "global-fallback"
     )
     monkeypatch.setattr(
         routes, "GitHubEnterpriseProvider",

@@ -13,7 +13,8 @@ from typing import TYPE_CHECKING
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.models import Notification, _utcnow
+from app.models import Notification
+from app.util import utcnow
 
 if TYPE_CHECKING:  # avoid importing FastAPI just for the type hint
     from fastapi import BackgroundTasks
@@ -41,7 +42,7 @@ def notify(
     """
     # Immediate-email mode stamps emailed_at now so a later switch to digest mode
     # never re-sends; digest mode leaves it NULL for the daily job to pick up once.
-    emailed_at = None if get_settings().EMAIL_DIGEST_ENABLED else _utcnow()
+    emailed_at = None if get_settings().EMAIL_DIGEST_ENABLED else utcnow()
 
     seen: set[int] = set()
     recipients: list[int] = []

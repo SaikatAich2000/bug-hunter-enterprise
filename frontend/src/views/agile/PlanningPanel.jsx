@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import Skeleton from "../../components/Skeleton";
 import { useApp } from "../../state/AppContext";
 import { api } from "../../lib/api";
 import { toast, toastError } from "../../lib/toast";
@@ -103,7 +104,7 @@ export default function PlanningPanel({ projectId, canManage }) {
     }));
   };
 
-  if (loading) return <div className="sprints-loading">Loading…</div>;
+  if (loading) return <Skeleton lines={4} className="sprints-loading" />;
   if (!board) return <div className="empty-state"><p>Scrum is not set up for this project yet.</p></div>;
 
   const unit = board.estimation_mode === "time" ? "minutes" : "points";

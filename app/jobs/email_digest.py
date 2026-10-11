@@ -36,7 +36,8 @@ from sqlalchemy.orm import Session
 from app import email_service
 from app.config import get_settings
 from app.database import SessionLocal
-from app.models import Notification, User, _utcnow
+from app.models import Notification, User
+from app.util import utcnow
 
 logger = logging.getLogger("bug_hunter.digest")
 
@@ -131,7 +132,7 @@ def run_digest(
     ``failed`` counts those the backend reported as undelivered.
     """
     settings = get_settings()
-    now = now or _utcnow()
+    now = now or utcnow()
     if lookback_hours is None:
         lookback_hours = settings.EMAIL_DIGEST_LOOKBACK_HOURS
     cutoff = now - timedelta(hours=lookback_hours)

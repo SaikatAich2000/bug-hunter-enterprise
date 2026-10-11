@@ -1,5 +1,7 @@
 /** Active sprint board: columns mapped to statuses, swimlanes,
  * quick filters, drag a card to another column to transition it. */
+import { dragDropAnimation } from "../../lib/motion";
+import Skeleton from "../../components/Skeleton";
 import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -201,7 +203,7 @@ export default function BoardPanel({ canManage, board, onOpenTab }) {
     void transition(card, column, status);
   };
 
-  if (!data) return view.loading ? <div className="sprints-loading">Loading…</div> : null;
+  if (!data) return view.loading ? <Skeleton lines={4} className="sprints-loading" /> : null;
 
   const sprint = data.sprint;
   if (!sprint) {
@@ -332,7 +334,7 @@ export default function BoardPanel({ canManage, board, onOpenTab }) {
           })}
         </div>
         {createPortal(
-          <DragOverlay>
+          <DragOverlay dropAnimation={dragDropAnimation()}>
             {dragCard ? (
               <div className="ag-card ag-card-overlay">
                 <div className="ag-card-top"><TypeIcon type={dragCard.item_type} /><span className="ag-key">{dragCard.display_id}</span></div>

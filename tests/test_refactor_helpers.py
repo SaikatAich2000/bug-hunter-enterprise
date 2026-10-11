@@ -543,21 +543,21 @@ def test_build_pq_from_llm_negative_bid_ignored():
 
 
 def test_normalize_choice_list_empties_stripped():
-    from app.routes.bugs import _normalize_choice_list
+    from app.services.bug_query import normalize_choice_list as _normalize_choice_list
     out = _normalize_choice_list(["New", None, "", "Closed"],
                                  ["New", "Closed"], "status")
     assert out == ["New", "Closed"]
 
 
 def test_normalize_choice_list_none_input():
-    from app.routes.bugs import _normalize_choice_list
+    from app.services.bug_query import normalize_choice_list as _normalize_choice_list
     assert _normalize_choice_list(None, ["a"], "x") == []
 
 
 def test_normalize_choice_list_rejects_unknown():
     from fastapi import HTTPException
 
-    from app.routes.bugs import _normalize_choice_list
+    from app.services.bug_query import normalize_choice_list as _normalize_choice_list
     with pytest.raises(HTTPException) as exc:
         _normalize_choice_list(["bogus"], ["New", "Closed"], "status")
     assert exc.value.status_code == 400

@@ -1,4 +1,5 @@
 // Top-bar bell with unread badge and dropdown panel; badge count comes from the session poll.
+import EmptyGuide from "../onboarding/EmptyGuide";
 import { useEffect, useRef, useState } from "react";
 import { useApp } from "../state/AppContext";
 import { timeAgo } from "../lib/format";
@@ -94,6 +95,7 @@ export default function NotificationsBell() {
               <div className="notif-empty">
                 <span className="notif-empty-glyph" aria-hidden="true">🔕</span>
                 <span>You&apos;re all caught up.</span>
+                <EmptyGuide guide="notifications" />
               </div>
             ) : (
               notifications.map((n) => (

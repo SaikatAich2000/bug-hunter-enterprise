@@ -38,6 +38,7 @@ function mount() {
   container?.remove();
   container = document.createElement("div");
   document.body.appendChild(container);
+  act(() => root?.unmount());
   root = createRoot(container);
   act(() => {
     root.render(React.createElement(ChangePasswordModal));

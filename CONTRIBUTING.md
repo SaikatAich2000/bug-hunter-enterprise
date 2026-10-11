@@ -70,8 +70,16 @@ created by `scripts/sonar_gate.py`).
 `addopts` does not include `--cov`, so pass it manually:
 
 ```bash
-python -m pytest -m "not ui" --cov=app      # backend suite + coverage gate
+python -m pytest -m "not ui" -n auto --cov=app   # backend suite, parallel (pytest-xdist) + coverage gate
+python -m pytest -m "not ui" tests/test_foo.py   # one file, single process
 ```
+
+The harness (`tests/conftest.py`) imports the app once per process and resets the
+database before every test, so tests are isolated and fast; each xdist worker gets its
+own database. Don't re-import `app.*` inside a test; use the `client` / `db_session`
+fixtures. To run the backend suite on PostgreSQL 16 as CI does, set
+`BH_TEST_DB=postgres` and `BH_TEST_POSTGRES_URL=postgresql+psycopg://user:pw@host:5432/postgres`.
+More in [docs/testing.md](docs/testing.md).
 
 ### Resetting the local database
 
@@ -102,17 +110,21 @@ Playwright UI suite covers the browser flows:
 
 ```bash
 cd frontend && npm ci && npm test && npm run build && cd ..
-python -m playwright install chromium firefox webkit
+python -m playwright install chromium                    # add firefox webkit for cross-browser runs
 python -m pytest -m ui                                   # Chromium
 PW_BROWSERS=chromium,firefox,webkit python -m pytest tests/test_e2e_browser.py tests/test_e2e_enterprise.py -m ui
 ```
 
-`tests/test_e2e_browser.py` (and `tests/test_e2e_enterprise.py`, which covers sign-up, two-factor
-sign-in, account settings, the Organization screens and the public pages) boot their own server,
-seed data through the API
+Browser env vars (`tests/browser_support.py`): `PW_BROWSERS` (comma list, default
+`chromium`), `PW_EXECUTABLE_PATH` (an installed browser binary instead of Playwright's
+download), `PW_HEADED=1` (show the window while debugging). CI runs this suite in its
+`playwright` job.
+
+`tests/test_e2e_browser.py` and `tests/test_e2e_enterprise.py` (sign-up, two-factor sign-in,
+account settings, the Organization screens, public pages) boot their own server, seed data through the API
 and fails on any page error, browser console error or HTTP 5xx, not only on
 its explicit assertions. Its accessibility tests inject axe-core from
-`frontend/node_modules`, so run `npm ci` first. New UI work should come with a
+`frontend/node_modules`, so run `npm ci` first (Node 22, see `.nvmrc`). New UI work should come with a
 workflow test there, and new views should be added to its axe checks.
 
 `tests/fixtures/legacy_enterprise.sql` is a database written by the earlier enterprise edition's
@@ -176,7 +188,9 @@ and fails if that value appears as a literal in any other file.
 
 - One concern per pull request.
 - Write a short description of the change and list any DB or config implications.
-- Tests must pass and coverage must stay at or above the 80% gate.
+- Tests must pass and coverage must stay at or above the 80% gate. CI also runs the suite on PostgreSQL 16, the browser tests, gitleaks, Trivy, bandit, hadolint and ShellCheck (`.github/workflows/`).
+- Changed the frontend? Commit the rebuilt `app/static` with it.
+- Don't weaken a test or constraint to get green; fix the cause.
 - Reference the related issue if one exists.
 
 ## Security

@@ -34,7 +34,7 @@ _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _FALSY = frozenset({"0", "false", "no", "off", ""})
 
 
-def _env_bool(name: str, default: bool = False) -> bool:
+def env_bool(name: str, default: bool = False) -> bool:
     # unrecognized values fall back to default, not False, so a typo can't disable a security control
     raw = os.getenv(name)
     if raw is None:
@@ -52,7 +52,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return default
 
 
-def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
+def env_int(name: str, default: int, *, minimum: int | None = None) -> int:
     raw = os.getenv(name)
     if raw in (None, ""):
         value = default
@@ -86,7 +86,7 @@ def _normalize_database_url(url: str) -> str:
     return f"postgresql+psycopg://{rest}"
 
 
-def _env_float(name: str, default: float, *, minimum: float | None = None) -> float:
+def env_float(name: str, default: float, *, minimum: float | None = None) -> float:
     raw = os.getenv(name)
     if raw in (None, ""):
         value = default
@@ -145,24 +145,24 @@ class Settings:
     ))
 
     # Postgres pool sizing (ignored for SQLite); lower on small VMs.
-    DB_POOL_SIZE: int = _env_int("DB_POOL_SIZE", 5, minimum=1)
-    DB_MAX_OVERFLOW: int = _env_int("DB_MAX_OVERFLOW", 10, minimum=0)
+    DB_POOL_SIZE: int = env_int("DB_POOL_SIZE", 5, minimum=1)
+    DB_MAX_OVERFLOW: int = env_int("DB_MAX_OVERFLOW", 10, minimum=0)
     # Fail-fast guards for application startup against a struggling database.
     # Without these, a firewalled/slow Postgres (or a DDL statement waiting
     # on a lock held by another replica) blocks SQLAlchemy's first connect
     # indefinitely and the container sits at "Waiting for application
     # startup" until the platform kills it. Tunable without a code change.
-    DB_CONNECT_TIMEOUT_SECONDS: int = _env_int(
+    DB_CONNECT_TIMEOUT_SECONDS: int = env_int(
         "DB_CONNECT_TIMEOUT_SECONDS", 10, minimum=1)
-    DB_STATEMENT_TIMEOUT_MS: int = _env_int(
+    DB_STATEMENT_TIMEOUT_MS: int = env_int(
         "DB_STATEMENT_TIMEOUT_MS", 30000, minimum=1000)
-    DB_LOCK_TIMEOUT_MS: int = _env_int(
+    DB_LOCK_TIMEOUT_MS: int = env_int(
         "DB_LOCK_TIMEOUT_MS", 10000, minimum=1000)
     # Overall budget for all blocking DB work during startup (init +
     # reconcile). The lifespan runs that work in a worker thread and gives
     # up loudly after this many seconds so the app serves (health reports
     # degraded) instead of hanging until the platform kills the replica.
-    DB_STARTUP_TIMEOUT_SECONDS: int = _env_int(
+    DB_STARTUP_TIMEOUT_SECONDS: int = env_int(
         "DB_STARTUP_TIMEOUT_SECONDS", 60, minimum=10)
 
     # Empty default = same-origin only; cross-origin clients must be allow-listed.
@@ -184,12 +184,12 @@ class Settings:
 
     # Upload (multipart) body ceiling; over-limit requests get 413 before the body
     # is read, so a huge Content-Length can't exhaust RAM.
-    MAX_REQUEST_BODY_BYTES: int = _env_int(
+    MAX_REQUEST_BODY_BYTES: int = env_int(
         "MAX_REQUEST_BODY_BYTES", 60 * 1024 * 1024, minimum=1024
     )
     # Ceiling for every non-upload body (JSON). The largest legitimate one is a
     # description at its 1,000,000-character limit.
-    MAX_JSON_BODY_BYTES: int = _env_int("MAX_JSON_BODY_BYTES", 2 * 1024 * 1024, minimum=1024)
+    MAX_JSON_BODY_BYTES: int = env_int("MAX_JSON_BODY_BYTES", 2 * 1024 * 1024, minimum=1024)
 
     APP_BASE_URL: str = os.getenv("APP_BASE_URL", "").strip() or _default_base_url()
 
@@ -198,18 +198,18 @@ class Settings:
     # (sessions die on restart — dev only).
     SESSION_SECRET: str = os.getenv("SESSION_SECRET", "")
     # Session lifetime in seconds (default 1 day).
-    SESSION_TTL_SECONDS: int = _env_int("SESSION_TTL_SECONDS", 86400, minimum=60)
+    SESSION_TTL_SECONDS: int = env_int("SESSION_TTL_SECONDS", 86400, minimum=60)
     # Set true behind HTTPS so the cookie is TLS-only.
-    COOKIE_SECURE: bool = _env_bool("COOKIE_SECURE", False)
+    COOKIE_SECURE: bool = env_bool("COOKIE_SECURE", False)
     # /docs, /redoc, /openapi.json are always on in development; a production
     # deploy (see is_production) turns them off unless this is true.
-    ENABLE_API_DOCS: bool = _env_bool("ENABLE_API_DOCS", False)
+    ENABLE_API_DOCS: bool = env_bool("ENABLE_API_DOCS", False)
     # Only trust X-Forwarded-For behind a trusted proxy; otherwise a spoofed
     # header bypasses the rate limiter.
-    TRUST_PROXY_FORWARDED_FOR: bool = _env_bool("TRUST_PROXY_FORWARDED_FOR", False)
+    TRUST_PROXY_FORWARDED_FOR: bool = env_bool("TRUST_PROXY_FORWARDED_FOR", False)
     # Trusted proxy hops: the client IP is the Nth XFF entry from the right;
     # the left-most entry is client-controlled.
-    TRUST_PROXY_HOP_COUNT: int = _env_int("TRUST_PROXY_HOP_COUNT", 1, minimum=1)
+    TRUST_PROXY_HOP_COUNT: int = env_int("TRUST_PROXY_HOP_COUNT", 1, minimum=1)
     # Bootstrap admin credentials, used only when the users table is empty.
     # Must be set via environment variables; no default password for security.
     BOOTSTRAP_ADMIN_EMAIL: str = os.getenv("BOOTSTRAP_ADMIN_EMAIL", "")
@@ -220,23 +220,23 @@ class Settings:
     # Recovery switch: when true and the bootstrap user already exists, the next boot resets
     # that user's password to BOOTSTRAP_ADMIN_PASSWORD, reactivates and promotes the account and
     # signs out its devices. Leave it off; it overwrites the password on every boot.
-    BOOTSTRAP_ADMIN_RESET_PASSWORD: bool = _env_bool("BOOTSTRAP_ADMIN_RESET_PASSWORD", False)
+    BOOTSTRAP_ADMIN_RESET_PASSWORD: bool = env_bool("BOOTSTRAP_ADMIN_RESET_PASSWORD", False)
     # Multi-tenant sign-up: when true anyone may create an organization (and become its
     # first admin) at /signup; when false (the default) only invitations and the bootstrap
     # admin exist. An open sign-up is an explicit decision of the operator.
-    ALLOW_PUBLIC_SIGNUP: bool = _env_bool("ALLOW_PUBLIC_SIGNUP", False)
+    ALLOW_PUBLIC_SIGNUP: bool = env_bool("ALLOW_PUBLIC_SIGNUP", False)
     # A public sign-up must prove ownership of its address (mailed link) before the first
     # login. Accounts made by an invitation or an admin are already vouched for.
-    EMAIL_VERIFICATION_REQUIRED: bool = _env_bool("EMAIL_VERIFICATION_REQUIRED", True)
+    EMAIL_VERIFICATION_REQUIRED: bool = env_bool("EMAIL_VERIFICATION_REQUIRED", True)
     # Invitations are email sends on the organization's behalf: cap them per organization
     # (a burst per minute, and a ceiling per rolling day) so one account cannot spam.
-    INVITE_RATE_PER_MINUTE: int = _env_int("INVITE_RATE_PER_MINUTE", 10, minimum=1)
-    INVITE_DAILY_CAP: int = _env_int("INVITE_DAILY_CAP", 200, minimum=1)
+    INVITE_RATE_PER_MINUTE: int = env_int("INVITE_RATE_PER_MINUTE", 10, minimum=1)
+    INVITE_DAILY_CAP: int = env_int("INVITE_DAILY_CAP", 200, minimum=1)
     # bcrypt cost for new password hashes (existing hashes keep verifying at their own cost).
-    BCRYPT_ROUNDS: int = _env_int("BCRYPT_ROUNDS", 12, minimum=10)
+    BCRYPT_ROUNDS: int = env_int("BCRYPT_ROUNDS", 12, minimum=10)
     # Two-factor sign-in with an authenticator app (TOTP). Each user still opts in.
-    TOTP_ENABLED: bool = _env_bool("TOTP_ENABLED", True)
-    TOTP_RECOVERY_CODE_COUNT: int = _env_int("TOTP_RECOVERY_CODE_COUNT", 10, minimum=1)
+    TOTP_ENABLED: bool = env_bool("TOTP_ENABLED", True)
+    TOTP_RECOVERY_CODE_COUNT: int = env_int("TOTP_RECOVERY_CODE_COUNT", 10, minimum=1)
     # Optional Fernet key encrypting TOTP secrets and webhook signing secrets at rest
     # (values written without a key stay readable and are encrypted when next saved).
     FIELD_ENCRYPTION_KEY: str = os.getenv("FIELD_ENCRYPTION_KEY", "").strip()
@@ -245,36 +245,36 @@ class Settings:
     # Shown on the public privacy page as the contact for privacy questions.
     PRIVACY_CONTACT_EMAIL: str = os.getenv("PRIVACY_CONTACT_EMAIL", "").strip()
     # Audit rows older than this many days are purged daily; 0 keeps everything.
-    AUDIT_RETENTION_DAYS: int = _env_int("AUDIT_RETENTION_DAYS", 365, minimum=0)
+    AUDIT_RETENTION_DAYS: int = env_int("AUDIT_RETENTION_DAYS", 365, minimum=0)
     # Outbound webhooks. Listeners on private networks are refused unless this is set.
-    WEBHOOK_TIMEOUT_SECONDS: int = _env_int("WEBHOOK_TIMEOUT_SECONDS", 8, minimum=1)
-    WEBHOOK_ALLOW_PRIVATE_NETWORKS: bool = _env_bool("WEBHOOK_ALLOW_PRIVATE_NETWORKS", False)
+    WEBHOOK_TIMEOUT_SECONDS: int = env_int("WEBHOOK_TIMEOUT_SECONDS", 8, minimum=1)
+    WEBHOOK_ALLOW_PRIVATE_NETWORKS: bool = env_bool("WEBHOOK_ALLOW_PRIVATE_NETWORKS", False)
     # Prometheus-format counters at GET /api/metrics; METRICS_TOKEN, when set, is required
     # as a Bearer token.
-    METRICS_ENABLED: bool = _env_bool("METRICS_ENABLED", False)
+    METRICS_ENABLED: bool = env_bool("METRICS_ENABLED", False)
     METRICS_TOKEN: str = os.getenv("METRICS_TOKEN", "")
     # Skips the login screen, signing every visitor in as the bootstrap admin.
     # Dev/local convenience only, not a hardened auth mode; logs a startup warning while on.
-    AUTO_LOGIN_ENABLED: bool = _env_bool("AUTO_LOGIN_ENABLED", False)
+    AUTO_LOGIN_ENABLED: bool = env_bool("AUTO_LOGIN_ENABLED", False)
 
     # --- Password policy ----------------------------------------------------
     # Enforced in app/schemas._check_password_strength whenever a password is set.
-    PASSWORD_MIN_LENGTH: int = _env_int("PASSWORD_MIN_LENGTH", 8, minimum=1)
+    PASSWORD_MIN_LENGTH: int = env_int("PASSWORD_MIN_LENGTH", 8, minimum=1)
     # Require at least one letter and one digit.
-    PASSWORD_REQUIRE_COMPLEXITY: bool = _env_bool("PASSWORD_REQUIRE_COMPLEXITY", True)
+    PASSWORD_REQUIRE_COMPLEXITY: bool = env_bool("PASSWORD_REQUIRE_COMPLEXITY", True)
     # When true, forgot-password always returns 204 so account existence never leaks.
-    FORGOT_PASSWORD_ENUMERATION_SAFE: bool = _env_bool(
+    FORGOT_PASSWORD_ENUMERATION_SAFE: bool = env_bool(
         "FORGOT_PASSWORD_ENUMERATION_SAFE", True
     )
 
     # --- Reports ------------------------------------------------------------
     # XLSX export row ceiling; the workbook is buffered in memory, so unbounded
     # exports could OOM a small worker (over-limit returns 413).
-    MAX_REPORT_ROWS: int = _env_int("MAX_REPORT_ROWS", 50000, minimum=1)
+    MAX_REPORT_ROWS: int = env_int("MAX_REPORT_ROWS", 50000, minimum=1)
 
     # --- Sleuth cloud LLM (optional) --- off by default; no outbound HTTP unless enabled + keyed.
     # Cloud layer never writes or invents counts: data questions route back through deterministic SQL.
-    SLEUTH_CLOUD_ENABLED: bool = _env_bool("SLEUTH_CLOUD_ENABLED", False)
+    SLEUTH_CLOUD_ENABLED: bool = env_bool("SLEUTH_CLOUD_ENABLED", False)
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")  # primary provider
     GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
     OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")  # fallback provider
@@ -282,51 +282,51 @@ class Settings:
     # RAG embeddings only (Groq has no embeddings endpoint); chat itself never calls Gemini.
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     GEMINI_EMBED_MODEL: str = os.getenv("GEMINI_EMBED_MODEL", "text-embedding-004")
-    SLEUTH_CLOUD_TIMEOUT_S: float = _env_float("SLEUTH_CLOUD_TIMEOUT_S", 20, minimum=1)
-    SLEUTH_CLOUD_MAX_TOKENS: int = _env_int("SLEUTH_CLOUD_MAX_TOKENS", 600, minimum=1)
+    SLEUTH_CLOUD_TIMEOUT_S: float = env_float("SLEUTH_CLOUD_TIMEOUT_S", 20, minimum=1)
+    SLEUTH_CLOUD_MAX_TOKENS: int = env_int("SLEUTH_CLOUD_MAX_TOKENS", 600, minimum=1)
     # Small temperature for the conversational path only; tool/eval sub-calls use TEMPERATURE_TOOLS (0.0).
-    SLEUTH_CLOUD_TEMPERATURE: float = _env_float("SLEUTH_CLOUD_TEMPERATURE", 0.6, minimum=0.0)
-    SLEUTH_CLOUD_TEMPERATURE_TOOLS: float = _env_float("SLEUTH_CLOUD_TEMPERATURE_TOOLS", 0.0, minimum=0.0)
-    SLEUTH_CLOUD_FREQUENCY_PENALTY: float = _env_float("SLEUTH_CLOUD_FREQUENCY_PENALTY", 0.3, minimum=0.0)
-    SLEUTH_CLOUD_PRESENCE_PENALTY: float = _env_float("SLEUTH_CLOUD_PRESENCE_PENALTY", 0.2, minimum=0.0)
+    SLEUTH_CLOUD_TEMPERATURE: float = env_float("SLEUTH_CLOUD_TEMPERATURE", 0.6, minimum=0.0)
+    SLEUTH_CLOUD_TEMPERATURE_TOOLS: float = env_float("SLEUTH_CLOUD_TEMPERATURE_TOOLS", 0.0, minimum=0.0)
+    SLEUTH_CLOUD_FREQUENCY_PENALTY: float = env_float("SLEUTH_CLOUD_FREQUENCY_PENALTY", 0.3, minimum=0.0)
+    SLEUTH_CLOUD_PRESENCE_PENALTY: float = env_float("SLEUTH_CLOUD_PRESENCE_PENALTY", 0.2, minimum=0.0)
 
     # RAG retrieval over bugs/comments/docs; requires chromadb, disables itself if the import fails.
-    SLEUTH_RAG_ENABLED: bool = _env_bool("SLEUTH_RAG_ENABLED", False)
+    SLEUTH_RAG_ENABLED: bool = env_bool("SLEUTH_RAG_ENABLED", False)
     SLEUTH_RAG_DIR: str = os.getenv(
         "SLEUTH_RAG_DIR", str(BASE_DIR / ".sleuth_rag")
     )
-    SLEUTH_RAG_TOP_K: int = _env_int("SLEUTH_RAG_TOP_K", 5, minimum=1)
+    SLEUTH_RAG_TOP_K: int = env_int("SLEUTH_RAG_TOP_K", 5, minimum=1)
     SLEUTH_DOCS_DIR: str = os.getenv("SLEUTH_DOCS_DIR", str(BASE_DIR / "docs"))
 
     # Dependency-free keyword retrieval; same read scope as the REST API.
-    SLEUTH_RETRIEVAL_ENABLED: bool = _env_bool("SLEUTH_RETRIEVAL_ENABLED", False)
+    SLEUTH_RETRIEVAL_ENABLED: bool = env_bool("SLEUTH_RETRIEVAL_ENABLED", False)
     # Flags cited bug numbers the retrieval step didn't actually surface.
-    SLEUTH_VERIFY_ANSWERS: bool = _env_bool("SLEUTH_VERIFY_ANSWERS", False)
+    SLEUTH_VERIFY_ANSWERS: bool = env_bool("SLEUTH_VERIFY_ANSWERS", False)
 
     # --- Sleuth agent (optional, bounded read-only ReAct loop over SQL/retrieval tools) ---
-    SLEUTH_AGENT_ENABLED: bool = _env_bool("SLEUTH_AGENT_ENABLED", False)
-    SLEUTH_AGENT_MAX_STEPS: int = _env_int("SLEUTH_AGENT_MAX_STEPS", 4, minimum=1)
+    SLEUTH_AGENT_ENABLED: bool = env_bool("SLEUTH_AGENT_ENABLED", False)
+    SLEUTH_AGENT_MAX_STEPS: int = env_int("SLEUTH_AGENT_MAX_STEPS", 4, minimum=1)
 
     # --- Sleuth LLM-driven tool-calling agent — off by default. When
     # enabled, every message is interpreted by the LLM via allow-listed
     # read/write tools (app/chatbot/tools.py); mutating tool calls always stop
     # for explicit user confirmation before executing. Requires the cloud layer
     # (SLEUTH_CLOUD_ENABLED + a provider key) — it reuses that HTTP client.
-    SLEUTH_LLM_TOOLS_ENABLED: bool = _env_bool("SLEUTH_LLM_TOOLS_ENABLED", False)
-    SLEUTH_LLM_TOOLS_MAX_ROUNDS: int = _env_int("SLEUTH_LLM_TOOLS_MAX_ROUNDS", 4, minimum=1)
+    SLEUTH_LLM_TOOLS_ENABLED: bool = env_bool("SLEUTH_LLM_TOOLS_ENABLED", False)
+    SLEUTH_LLM_TOOLS_MAX_ROUNDS: int = env_int("SLEUTH_LLM_TOOLS_MAX_ROUNDS", 4, minimum=1)
 
     # --- Sleuth answer evaluation (optional LLM-as-judge; fails open, only ever appends a caveat) ---
-    SLEUTH_EVAL_ENABLED: bool = _env_bool("SLEUTH_EVAL_ENABLED", False)
-    SLEUTH_EVAL_MIN_SCORE: float = _env_float("SLEUTH_EVAL_MIN_SCORE", 0.5, minimum=0.0)
+    SLEUTH_EVAL_ENABLED: bool = env_bool("SLEUTH_EVAL_ENABLED", False)
+    SLEUTH_EVAL_MIN_SCORE: float = env_float("SLEUTH_EVAL_MIN_SCORE", 0.5, minimum=0.0)
     # Character ceiling on a cloud answer, applied last so it can't cut an appended caveat.
-    SLEUTH_ANSWER_MAX_CHARS: int = _env_int("SLEUTH_ANSWER_MAX_CHARS", 4000, minimum=1)
+    SLEUTH_ANSWER_MAX_CHARS: int = env_int("SLEUTH_ANSWER_MAX_CHARS", 4000, minimum=1)
 
-    SLEUTH_CHAT_MEMORY_ENABLED: bool = _env_bool("SLEUTH_CHAT_MEMORY_ENABLED", True)
+    SLEUTH_CHAT_MEMORY_ENABLED: bool = env_bool("SLEUTH_CHAT_MEMORY_ENABLED", True)
 
     EMAIL_BACKEND: str = os.getenv("EMAIL_BACKEND", "console").strip().lower()
     EMAIL_FROM: str = os.getenv("EMAIL_FROM", "bughunter@localhost")
     SMTP_HOST: str = os.getenv("SMTP_HOST", "")
-    SMTP_PORT: int = _env_int("SMTP_PORT", 587, minimum=1)
+    SMTP_PORT: int = env_int("SMTP_PORT", 587, minimum=1)
     SMTP_USERNAME: str = os.getenv("SMTP_USERNAME", "")
     # Gmail (and most providers) display app passwords as 4 space-separated
     # groups for on-screen readability, but the actual secret has no spaces.
@@ -334,16 +334,16 @@ class Settings:
     # and SMTP AUTH fails silently from the caller's point of view — strip any
     # spaces so both the raw and display-formatted values work.
     SMTP_PASSWORD: str = os.getenv("SMTP_PASSWORD", "").replace(" ", "")
-    SMTP_USE_TLS: bool = _env_bool("SMTP_USE_TLS", True)
-    SMTP_USE_SSL: bool = _env_bool("SMTP_USE_SSL", False)
-    SMTP_TIMEOUT: int = _env_int("SMTP_TIMEOUT", 10, minimum=1)
+    SMTP_USE_TLS: bool = env_bool("SMTP_USE_TLS", True)
+    SMTP_USE_SSL: bool = env_bool("SMTP_USE_SSL", False)
+    SMTP_TIMEOUT: int = env_int("SMTP_TIMEOUT", 10, minimum=1)
 
     # --- Daily email digest --- batches per-operation emails into one per user per day.
     # Password reset and other transactional emails are never batched.
-    EMAIL_DIGEST_ENABLED: bool = _env_bool("EMAIL_DIGEST_ENABLED", False)
+    EMAIL_DIGEST_ENABLED: bool = env_bool("EMAIL_DIGEST_ENABLED", False)
     # Lookback window for un-emailed rows; wide enough to catch up a missed run, rows are
     # claimed on emailed_at IS NULL so a wider window can never double-send.
-    EMAIL_DIGEST_LOOKBACK_HOURS: int = _env_int(
+    EMAIL_DIGEST_LOOKBACK_HOURS: int = env_int(
         "EMAIL_DIGEST_LOOKBACK_HOURS", 50, minimum=1
     )
     # Optional in-app scheduler (5-field cron, e.g. "0 7 * * *"); empty leaves scheduling to external cron.
@@ -361,7 +361,7 @@ class Settings:
     )
     FCM_CREDENTIALS_JSON: str = os.getenv("FCM_CREDENTIALS_JSON", "") or os.getenv("FIREBASE_SA_JSON", "")
     # Off unless an inline key is provided or WEB_PUSH_ENABLED says otherwise.
-    WEB_PUSH_ENABLED: bool = _env_bool("WEB_PUSH_ENABLED", bool(FCM_CREDENTIALS_JSON))
+    WEB_PUSH_ENABLED: bool = env_bool("WEB_PUSH_ENABLED", bool(FCM_CREDENTIALS_JSON))
     FIREBASE_API_KEY: str = os.getenv("FIREBASE_API_KEY", "")
     FIREBASE_AUTH_DOMAIN: str = os.getenv("FIREBASE_AUTH_DOMAIN", "")
     FIREBASE_PROJECT_ID: str = os.getenv("FIREBASE_PROJECT_ID", "")
@@ -372,9 +372,9 @@ class Settings:
     # --- Retention (app/jobs/retention.py, run daily by the app) ---
     # Days to keep notifications and Sleuth conversations (by last activity); 0 keeps them
     # forever. Expired sessions, reset tokens and idempotency keys are always removed.
-    NOTIFICATION_RETENTION_DAYS: int = _env_int("NOTIFICATION_RETENTION_DAYS", 180, minimum=0)
-    CHAT_RETENTION_DAYS: int = _env_int("CHAT_RETENTION_DAYS", 180, minimum=0)
-    RETENTION_JOB_ENABLED: bool = _env_bool("RETENTION_JOB_ENABLED", True)
+    NOTIFICATION_RETENTION_DAYS: int = env_int("NOTIFICATION_RETENTION_DAYS", 180, minimum=0)
+    CHAT_RETENTION_DAYS: int = env_int("CHAT_RETENTION_DAYS", 180, minimum=0)
+    RETENTION_JOB_ENABLED: bool = env_bool("RETENTION_JOB_ENABLED", True)
 
     # --- GitHub (optional; branch creation only) ---
     # PAT-only auth. Two credential sources, in this order: a per-project PAT
@@ -383,8 +383,8 @@ class Settings:
     # GITHUB_API_URL). Project rows also override the non-secret base URL /
     # organization / default base branch, and those overrides always win over
     # the environment.
-    GIT_BRANCH_CREATION_ENABLED: bool = _env_bool("GIT_BRANCH_CREATION_ENABLED", False)
-    GIT_BRANCH_DELETION_ENABLED: bool = _env_bool("GIT_BRANCH_DELETION_ENABLED", False)
+    GIT_BRANCH_CREATION_ENABLED: bool = env_bool("GIT_BRANCH_CREATION_ENABLED", False)
+    GIT_BRANCH_DELETION_ENABLED: bool = env_bool("GIT_BRANCH_DELETION_ENABLED", False)
     GITHUB_API_URL: str = os.getenv(
         "GITHUB_API_URL", "https://api.github.com"
     ).strip() or "https://api.github.com"
@@ -395,7 +395,7 @@ class Settings:
     GITHUB_TOKEN: str = os.getenv("GITHUB_TOKEN", "").strip()
     # The Git server may resolve to a private or loopback address only when this is on (an
     # on-prem GitHub Enterprise). Link-local and cloud metadata addresses are never reachable.
-    GIT_ALLOW_PRIVATE_HOSTS: bool = _env_bool("GIT_ALLOW_PRIVATE_HOSTS", False)
+    GIT_ALLOW_PRIVATE_HOSTS: bool = env_bool("GIT_ALLOW_PRIVATE_HOSTS", False)
     # Server-only Fernet key protecting project Git credentials at rest. Absent
     # means "no new project credential may be stored"; legacy global-token
     # operation keeps working. Never derived from SESSION_SECRET.
@@ -415,19 +415,19 @@ class Settings:
         if os.getenv("GIT_CA_BUNDLE_FILE", "").strip()
         else ""
     )
-    GITHUB_CONNECT_TIMEOUT_SECONDS: float = _env_float(
+    GITHUB_CONNECT_TIMEOUT_SECONDS: float = env_float(
         "GITHUB_CONNECT_TIMEOUT_SECONDS", 5.0, minimum=0.5
     )
-    GITHUB_READ_TIMEOUT_SECONDS: float = _env_float(
+    GITHUB_READ_TIMEOUT_SECONDS: float = env_float(
         "GITHUB_READ_TIMEOUT_SECONDS", 15.0, minimum=0.5
     )
     # Bounded retries for safe transient failures only (never auth/validation).
-    GITHUB_MAX_RETRIES: int = _env_int("GITHUB_MAX_RETRIES", 2, minimum=0)
+    GITHUB_MAX_RETRIES: int = env_int("GITHUB_MAX_RETRIES", 2, minimum=0)
     # Generated branch-name ceilings (deterministic, backend-owned).
-    GITHUB_BRANCH_NAME_MAX_LENGTH: int = _env_int(
+    GITHUB_BRANCH_NAME_MAX_LENGTH: int = env_int(
         "GITHUB_BRANCH_NAME_MAX_LENGTH", 120, minimum=20
     )
-    GITHUB_BRANCH_TITLE_MAX_LENGTH: int = _env_int(
+    GITHUB_BRANCH_TITLE_MAX_LENGTH: int = env_int(
         "GITHUB_BRANCH_TITLE_MAX_LENGTH", 25, minimum=1
     )
     # Used by fail-closed startup checks. COOKIE_SECURE=true is treated as
@@ -455,3 +455,8 @@ class Settings:
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
+
+
+def env_str(name: str, default: str | None = "") -> str | None:
+    """Raw env var (``default`` when unset). Read per call, so tests may change it."""
+    return os.getenv(name, default)

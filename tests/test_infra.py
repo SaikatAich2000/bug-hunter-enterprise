@@ -5,9 +5,15 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from collections import deque
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
+
+from app import account_lockout, image_strip, scheduler
+from app.auth import trusted_forwarded_ip
+from tests.conftest import BOOTSTRAP_EMAIL
 
 
 # Shared helpers
@@ -864,7 +870,6 @@ def test_cov_notification_emailed_at_branch(admin_client, monkeypatch):
 
 
 # app/email_service.py
-from types import SimpleNamespace  # noqa: E402  (test-local helper imports)
 
 
 def _email_cfg(backend="smtp", **over):
@@ -1127,7 +1132,8 @@ def test_cov_digest_main_returns_zero_on_success(admin_client, monkeypatch):
 
     db = _session()
     admin_id = _uid(db, "admin@test.local")
-    from app.models import Notification, _utcnow
+    from app.models import Notification
+    from app.util import utcnow as _utcnow
     n = Notification(user_id=admin_id, kind="assigned",
                      title="Assigned to Bug #1", body="x assigned you",
                      actor_name="Actor")
@@ -1184,7 +1190,7 @@ def test_cov_digest_render_links_and_other_category(admin_client):
 
 def test_cov_digest_run_digest_empty_returns_zeroes(admin_client):
     from app.jobs.email_digest import run_digest
-    from app.models import _utcnow
+    from app.util import utcnow as _utcnow
     db = _session()
     stats = run_digest(db, now=_utcnow(), lookback_hours=1)
     db.close()
@@ -1554,3 +1560,227 @@ def test_cov_database_add_missing_indexes_handles_introspection_error(monkeypatc
     monkeypatch.setattr(sqlalchemy, "inspect", lambda _engine: _BoomInspector())
     with database.engine.begin() as conn:
         database._add_missing_indexes(conn)
+
+
+# account_lockout._reclaim_buckets
+def test_reclaim_deletes_idle_bucket():
+    account_lockout._buckets.clear()
+    # Idle: unlocked (locked_until 0) and no in-window failures → reclaimed.
+    account_lockout._buckets["idle@x"] = account_lockout._Bucket(
+        fails=deque(), locked_until=0.0)
+    account_lockout._reclaim_buckets(1000.0)
+    assert "idle@x" not in account_lockout._buckets
+    account_lockout._buckets.clear()
+
+
+def test_reclaim_evicts_soonest_expiring_when_all_locked(monkeypatch):
+    account_lockout._buckets.clear()
+    monkeypatch.setattr(account_lockout, "_LOCKOUT_BUCKETS_MAX", 2)
+    # Two locked buckets (locked_until in the future, recent fails so neither is idle).
+    account_lockout._buckets["a@x"] = account_lockout._Bucket(
+        fails=deque([999.0]), locked_until=5000.0)
+    account_lockout._buckets["b@x"] = account_lockout._Bucket(
+        fails=deque([999.0]), locked_until=6000.0)
+    account_lockout._reclaim_buckets(1000.0)
+    # No idle buckets: reclaim falls back to evicting the soonest-to-expire (a@x).
+    assert "a@x" not in account_lockout._buckets
+    assert "b@x" in account_lockout._buckets
+    account_lockout._buckets.clear()
+
+
+# auth.trusted_forwarded_ip — empty input guard (line 79)
+def test_trusted_forwarded_ip_empty_returns_none():
+    assert trusted_forwarded_ip("", 1) is None
+    assert trusted_forwarded_ip("   ,  ,", 1) is None
+    assert trusted_forwarded_ip(None, 1) is None
+
+
+# image_strip — animated/multi-frame images are preserved untouched (85-86)
+def test_strip_preserves_animated_image(monkeypatch):
+    from PIL import Image
+
+    class _FakeAnimated:
+        size = (4, 4)
+        is_animated = True
+        n_frames = 3
+
+    # Saving multi-frame would drop all but the first frame; must return original bytes.
+    monkeypatch.setattr(Image, "open", lambda src: _FakeAnimated())
+    data = b"GIF89a-fake-animated-bytes"
+    assert image_strip.strip_image_metadata(data, "image/gif") == data
+
+
+# scheduler.start() re-entry guard (193-194)
+def test_scheduler_start_reentry_is_noop(monkeypatch):
+    class _FakeTask:
+        def done(self):
+            return False
+
+    fake = _FakeTask()
+    monkeypatch.setattr(scheduler, "_task", fake)
+    scheduler.start()  # already running: should log and return without replacing _task
+    assert scheduler._task is fake
+
+
+# app/main.py - asset hash, body-limit ASGI, cache headers, rate buckets, IP, CSRF.
+class _FakeURL_misc_branches:
+    def __init__(self, path):
+        self.path = path
+
+
+class _FakeReq:
+    def __init__(self, path="/api/x", method="POST", headers=None, client_host="1.2.3.4"):
+        self.url = _FakeURL_misc_branches(path)
+        self.method = method
+        self.headers = headers or {}
+        self.client = _FakeClient(client_host) if client_host else None
+        self.cookies = {}
+
+
+def test_main_asset_version_large_file_uses_size(tmp_path, monkeypatch):
+    # Over-cap files are hashed by size (not read); shrink the cap to trip the branch.
+    import app.main as main
+    monkeypatch.setattr(main, "_MAX_ASSET_FILE_BYTES", 4)
+    big = tmp_path / "big.js"
+    big.write_text("0123456789")  # 10 bytes > 4-byte cap
+    v = main._compute_asset_version(tmp_path)
+    assert v
+    assert v != "dev"
+
+
+def test_main_cache_control_static_non_fingerprinted(monkeypatch):
+    # Non-assets /static/ paths get the 1-hour header, not the immutable one.
+    from starlette.datastructures import MutableHeaders
+
+    import app.main as main
+
+    headers = MutableHeaders()
+    main._apply_cache_headers(headers, "/static/firebase-messaging-sw.js")
+    assert headers["Cache-Control"] == "public, max-age=3600"
+    kept = MutableHeaders({"Cache-Control": "private"})
+    main._apply_cache_headers(kept, "/api/x")
+    assert kept["Cache-Control"] == "private"
+
+
+def test_main_body_limit_skips_non_request_messages():
+    # Non-http.request messages (http.disconnect) pass through without the byte counter.
+    import app.main as main
+
+    received = {"msgs": []}
+
+    async def app_inner(_scope, receive, _send):
+        msg = await receive()
+        received["msgs"].append(msg)
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    async def send(_msg):
+        return None
+
+    mw = main.BodyLimitMiddleware(app_inner)
+    scope = {"type": "http", "path": "/api/x"}
+    asyncio.run(mw(scope, receive, send))
+    assert received["msgs"] == [{"type": "http.disconnect"}]
+
+
+def test_main_body_limit_413_on_oversized_body(monkeypatch):
+    # Oversized body triggers 413 when the response hasn't started.
+    import app.main as main
+    monkeypatch.setattr(main.settings, "MAX_JSON_BODY_BYTES", 8)
+
+    async def app_inner(_scope, receive, _send):
+        await receive()
+
+    async def receive():
+        return {"type": "http.request", "body": b"x" * 100, "more_body": False}
+
+    sent = []
+
+    async def send(msg):
+        sent.append(msg)
+
+    mw = main.BodyLimitMiddleware(app_inner)
+    scope = {"type": "http", "path": "/api/x"}
+    asyncio.run(mw(scope, receive, send))
+    starts = [m for m in sent if m.get("type") == "http.response.start"]
+    assert starts
+    assert starts[0]["status"] == 413
+
+
+def test_main_body_limit_reraises_when_response_started(monkeypatch):
+    # Response already started: no clean 413, so _RequestBodyTooLarge is re-raised.
+    import app.main as main
+    monkeypatch.setattr(main.settings, "MAX_JSON_BODY_BYTES", 8)
+
+    async def app_inner(_scope, receive, send):
+        # Start the response before reading the oversized body.
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await receive()  # this read overflows, raising _RequestBodyTooLarge
+
+    async def receive():
+        return {"type": "http.request", "body": b"x" * 100, "more_body": False}
+
+    async def send(_msg):
+        return None
+
+    mw = main.BodyLimitMiddleware(app_inner)
+    scope = {"type": "http", "path": "/api/x"}
+    coro = mw(scope, receive, send)
+    with pytest.raises(main._RequestBodyTooLarge):
+        asyncio.run(coro)
+
+
+def test_main_evict_dead_rate_bucket(monkeypatch):
+    # Buckets past the eviction horizon and empty buckets are deleted; under cap, nothing more.
+    import time as _time
+
+    import app.main as main
+    main._rate_buckets.clear()
+    old = _time.monotonic() - 10_000  # older than _MAX_RATE_WINDOW
+    main._rate_buckets[("/old", "ipX")] = main.deque([old])
+    main._rate_buckets[("/empty", "ipY")] = main.deque()
+    main._evict_one_rate_bucket(_time.monotonic())
+    assert ("/old", "ipX") not in main._rate_buckets
+    assert ("/empty", "ipY") not in main._rate_buckets
+    main._rate_buckets.clear()
+
+
+def test_main_client_ip_trusted_xff_none_falls_through(monkeypatch):
+    # TRUST_PROXY on but trusted_forwarded_ip None: fall back to request.client.host.
+    import app.main as main
+    monkeypatch.setattr(main.settings, "TRUST_PROXY_FORWARDED_FOR", True)
+    monkeypatch.setattr(main.settings, "TRUST_PROXY_HOP_COUNT", 5)
+    monkeypatch.setattr(main, "trusted_forwarded_ip", lambda _xff, _hops: None)
+    req = _FakeReq(headers={"x-forwarded-for": "1.1.1.1"}, client_host="9.9.9.9")
+    assert main._client_ip(req) == "9.9.9.9"
+
+
+def test_main_csrf_origin_present_not_allowed_blocks(monkeypatch):
+    # Unknown Origin is 403. ('elif referer:' false is unreachable: the earlier guard returns first.)
+    import app.main as main
+    monkeypatch.setattr(main, "_allowed_origins", lambda: set())
+    req = _FakeReq(path="/api/projects", method="POST",
+                   headers={"origin": "https://evil.example.com"})  # no host/referer
+    assert main.csrf_check(req).status_code == 403
+
+
+def test_main_has_valid_session_missing_row_returns_false(client):
+    # A valid-looking token whose jti was never persisted must be rejected.
+    from sqlalchemy import select
+
+    import app.main as main
+    from app.auth import COOKIE_NAME, make_session_token, new_jti
+    from app.database import SessionLocal
+    from app.models import User
+
+    db = SessionLocal()
+    try:
+        admin = db.scalar(select(User).where(User.email == BOOTSTRAP_EMAIL))
+        token = make_session_token(admin.id, admin.session_version or 0, jti=new_jti())
+    finally:
+        db.close()
+
+    req = _FakeReq(method="GET", headers={})
+    req.cookies = {COOKIE_NAME: token}
+    assert main._has_valid_session(req) is False

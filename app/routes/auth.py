@@ -15,10 +15,13 @@ from sqlalchemy.orm import Session
 
 from app import account_lockout
 from app.api_docs import (
-    AUTH_401,
+    AUTH_400_401,
+    AUTH_401_403,
     FORGOT_PASSWORD_404,
     PASSWORD_CHANGE_400,
+    PASSWORD_CHANGE_400_409,
     RESET_TOKEN_400,
+    SIGNUP_400_403_409,
 )
 from app.auth import (
     PASSWORD_RESET_TTL,
@@ -46,7 +49,6 @@ from app.email_service import (
 from app.metrics import record_event
 from app.models import (
     ROLE_ADMIN,
-    Activity,
     EmailChangeRequest,
     EmailVerificationToken,
     PasswordResetToken,
@@ -67,6 +69,7 @@ from app.schemas import (
     SignupIn,
     VerifyEmailIn,
 )
+from app.services.audit import audit
 from app.tenancy import create_organization
 from app.totp import (
     accept_code,
@@ -110,12 +113,7 @@ def _audit(
 ) -> None:
     """One audit row in ``user``'s organization, attributed to them unless ``as_system``
     (events that are not an action of a signed-in person, such as a reset request)."""
-    db.add(Activity(
-        org_id=user.org_id, bug_id=None, entity_type="auth", entity_id=entity_id,
-        actor_user_id=None if as_system else user.id,
-        actor_name="system" if as_system else user.name,
-        action=action, detail=detail,
-    ))
+    audit(db, None if as_system else user, "auth", entity_id, action, detail, org_id=user.org_id)
 
 
 def _reject_if_breached(plain: str) -> None:
@@ -196,7 +194,7 @@ def _issue_verification(db: Session, user: User, background: BackgroundTasks) ->
 
 
 @router.post("/signup", response_model=MeOut, status_code=201,
-             responses={**AUTH_401, 202: {"description": "Check your email to finish sign-up"}})
+             responses={**SIGNUP_400_403_409, "202": {"description": "Check your email to finish sign-up"}})
 def signup(
     payload: SignupIn, request: Request, response: Response, background: BackgroundTasks,
     db: Session = Depends(get_db),
@@ -312,7 +310,7 @@ def _complete_login(
 def _record_failed_login(db: Session, user: User | None, email: str, ip: str, reason: str) -> None:
     """Log every failed sign-in (email masked) and audit those on real accounts, including the
     one that locks the account. Unknown emails are logged only, so typos never fill the audit."""
-    locked = account_lockout.record_failure(email)
+    locked = account_lockout.record_failure(email, ip)
     logger.warning("Sign-in failed (%s): %s from %s", reason, mask_email(email), ip)
     if locked:
         logger.warning("Sign-in locked after repeated failures: %s from %s", mask_email(email), ip)
@@ -324,7 +322,7 @@ def _record_failed_login(db: Session, user: User | None, email: str, ip: str, re
     db.commit()
 
 
-@router.post("/login", responses=AUTH_401)
+@router.post("/login", responses=AUTH_401_403)
 def login(
     payload: LoginIn, request: Request, response: Response, db: Session = Depends(get_db),
 ) -> dict:
@@ -332,10 +330,11 @@ def login(
     ``pending_token`` to trade for a session at /login/totp. The cookie's `jti` maps back to
     the session row, enabling per-session admin revocation."""
     # Check lockout before bcrypt so a login flood doesn't become a CPU flood.
+    client_ip = _client_ip(request)
     try:
-        account_lockout.check_locked(payload.email)
+        account_lockout.check_locked(payload.email, client_ip)
     except HTTPException:
-        logger.info("Sign-in refused while locked: %s from %s", mask_email(payload.email), _client_ip(request))
+        logger.info("Sign-in refused while locked: %s from %s", mask_email(payload.email), client_ip)
         raise
 
     # LoginIn already lowercases the email.
@@ -350,7 +349,7 @@ def login(
     if user is None or not password_ok or not user.is_active:
         record_event("login_failure")
         reason = "unknown account" if user is None else ("wrong password" if not password_ok else "inactive account")
-        _record_failed_login(db, user, payload.email, _client_ip(request), reason)
+        _record_failed_login(db, user, payload.email, client_ip, reason)
         raise HTTPException(status_code=401, detail=_DETAIL_INVALID_LOGIN)
     # Said only after the password checked out, so it cannot be used to probe for accounts.
     if get_settings().EMAIL_VERIFICATION_REQUIRED and user.email_verified_at is None:
@@ -366,7 +365,7 @@ def login(
                 "pending_token": make_pending_token(user.id, user.session_version or 0)}
 
     # Clear the lockout bucket so transient typos don't carry forward.
-    account_lockout.clear(payload.email)
+    account_lockout.clear(payload.email, client_ip)
     return _complete_login(db, user, request, response)
 
 
@@ -378,7 +377,7 @@ def _consume_second_factor(db: Session, user: User, code: str) -> bool | None:
     return True if consume_recovery_code(db, user, code) else None
 
 
-@router.post("/login/totp", responses=AUTH_401)
+@router.post("/login/totp", responses=AUTH_400_401)
 def login_totp(
     payload: LoginTotpIn, request: Request, response: Response, db: Session = Depends(get_db),
 ) -> dict:
@@ -393,11 +392,12 @@ def login_totp(
             or (user.session_version or 0) != session_version):
         raise HTTPException(status_code=400, detail="Login session invalid. Sign in again.")
     # The second factor is a credential too: rate-limit it like the password.
-    account_lockout.check_locked(user.email)
+    client_ip = _client_ip(request)
+    account_lockout.check_locked(user.email, client_ip)
     used_recovery = _consume_second_factor(db, user, payload.code.strip().upper())
     if used_recovery is None:
         record_event("login_totp_failure")
-        account_lockout.record_failure(user.email)
+        account_lockout.record_failure(user.email, client_ip)
         raise HTTPException(
             status_code=400, detail="Invalid code. Try again or use a recovery code.",
         )
@@ -407,16 +407,15 @@ def login_totp(
         f"{user.email} signed in with "
         + ("a one-time recovery code" if used_recovery else "a 2FA code"),
     )
-    account_lockout.clear(user.email)
+    account_lockout.clear(user.email, client_ip)
     return _complete_login(db, user, request, response)
 
 
 @router.post("/logout", status_code=204)
 def logout(request: Request, db: Session = Depends(get_db)) -> Response:
     """Clear the session cookie and its server-side row; always 204 (idempotent)."""
-    from app.auth import COOKIE_NAME, parse_session_token
-    token = request.cookies.get(COOKIE_NAME, "")
-    parsed = parse_session_token(token)
+    from app.auth import parse_session_token, session_cookie_value
+    parsed = parse_session_token(session_cookie_value(request))
     if parsed:
         user_id, _version, jti = parsed
         user = db.get(User, user_id)
@@ -453,7 +452,7 @@ def update_profile(
     return to_me(user)
 
 
-@router.post("/email-change/request", status_code=202, responses=PASSWORD_CHANGE_400)
+@router.post("/email-change/request", status_code=202, responses=PASSWORD_CHANGE_400_409)
 def request_email_change(
     payload: EmailChangeRequestIn,
     background: BackgroundTasks,
@@ -498,7 +497,7 @@ def _void(db: Session, req: EmailChangeRequest, now: datetime, detail: str) -> H
     return HTTPException(status_code=400, detail=detail)
 
 
-@router.post("/email-change/confirm", response_model=MeOut, responses=PASSWORD_CHANGE_400)
+@router.post("/email-change/confirm", response_model=MeOut, responses=PASSWORD_CHANGE_400_409)
 def confirm_email_change(
     payload: EmailChangeConfirmIn,
     background: BackgroundTasks,

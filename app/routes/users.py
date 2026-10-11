@@ -33,9 +33,23 @@ from app.auth import (
     require_manager_or_admin,
 )
 from app.database import get_db
-from app.models import ROLE_ADMIN, Activity, Project, TotpRecoveryCode, User, user_projects
+from app.models import (
+    ROLE_ADMIN,
+    Activity,
+    Bug,
+    Event,
+    Project,
+    Sprint,
+    TotpRecoveryCode,
+    User,
+    event_managers,
+    sprint_assignees,
+    user_projects,
+)
 from app.password_breach import is_password_breached
 from app.schemas import UserIn, UserOut, UserUpdate
+from app.services.audit import audit
+from app.util import like_escape
 
 
 def _reject_if_breached(plain: str) -> None:
@@ -53,12 +67,8 @@ router = APIRouter(prefix="/api/users", tags=["users"])
 _DETAIL_USER_NOT_FOUND = "User not found"
 _DETAIL_EMAIL_EXISTS = "Email already exists"
 
-def _audit(db: Session, actor: User, action: str, entity_id: int, detail: str) -> None:
-    db.add(Activity(
-        org_id=actor.org_id, bug_id=None, entity_type="user", entity_id=entity_id,
-        actor_user_id=actor.id, actor_name=actor.name,
-        action=action, detail=detail,
-    ))
+def _audit(db: Session, actor: User | None, action: str, entity_id: int, detail: str) -> None:
+    audit(db, actor, "user", entity_id, action, detail)
 
 
 def _org_user_or_404(db: Session, user_id: int, actor: User) -> User:
@@ -68,13 +78,33 @@ def _org_user_or_404(db: Session, user_id: int, actor: User) -> User:
     return user
 
 
-def _like_escape(needle: str) -> str:
-    """Escape LIKE wildcards; pair with escape='\\\\' on the LIKE clause."""
-    return (
-        needle.replace("\\", "\\\\")
-              .replace("%", "\\%")
-              .replace("_", "\\_")
-    )
+def _log_removals(db: Session, actor: User, user: User, label: str) -> None:
+    """One activity row per item the deleted user is removed from.
+
+    The FKs null or cascade these links silently, so without this the item
+    history would show people vanishing with no explanation."""
+    def row(entity_type: str, entity_id: int, bug_id: int | None, title: str, roles: str) -> None:
+        db.add(Activity(
+            org_id=actor.org_id, bug_id=bug_id, entity_type=entity_type, entity_id=entity_id,
+            actor_user_id=actor.id, actor_name=actor.name, action="user_removed",
+            detail=f"User {label} was deleted and removed as {roles} of '{title}'",
+        ))
+
+    bugs: dict[int, tuple[Bug, list[str]]] = {}
+    for bug in db.scalars(select(Bug).where(Bug.assignees.any(User.id == user.id))):
+        bugs.setdefault(bug.id, (bug, []))[1].append("assignee")
+    for column, role in ((Bug.reporter_id, "reporter"), (Bug.owner_id, "owner")):
+        for bug in db.scalars(select(Bug).where(column == user.id)):
+            bugs.setdefault(bug.id, (bug, []))[1].append(role)
+    for bug, roles in bugs.values():
+        row("bug", bug.id, bug.id, bug.title, " and ".join(roles))
+    for event in db.scalars(select(Event).where(Event.id.in_(
+            select(event_managers.c.event_id).where(event_managers.c.user_id == user.id)))):
+        row("event", event.id, None, event.name, "manager")
+    for sprint in db.scalars(select(Sprint).where(Sprint.id.in_(
+            select(sprint_assignees.c.sprint_id).where(sprint_assignees.c.user_id == user.id)))):
+        row("sprint", sprint.id, None, sprint.name, "assignee")
+
 
 
 def _email_in_use(db: Session, email: str, exclude_id: Optional[int] = None) -> bool:
@@ -143,7 +173,7 @@ def list_users(
         stmt = stmt.where(User.is_active.is_(True))
     if q:
         # name/email only — searching role would let anyone enumerate admins
-        like = f"%{_like_escape(q.lower())}%"
+        like = f"%{like_escape(q.lower())}%"
         stmt = stmt.where(or_(
             func.lower(User.name).like(like, escape="\\"),
             func.lower(User.email).like(like, escape="\\"),
@@ -386,6 +416,7 @@ def delete_user(
         )
 
     label = f"{user.name} <{user.email}>"
+    _log_removals(db, actor, user, label)
     db.delete(user)
     _audit(db, actor, "user_deleted", user_id, f"Deleted user {label}")
     db.commit()

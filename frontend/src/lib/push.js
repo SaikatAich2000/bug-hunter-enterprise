@@ -253,7 +253,7 @@ if (typeof window !== "undefined") {
   // Network dropped and came back (VPN reconnect, Wi-Fi flap, proxy recovered):
   // re-attempt subscription if we still don't have a live token.
   window.addEventListener("online", () => {
-    let hasToken = true;
+    let hasToken;
     try {
       hasToken = !!localStorage.getItem(_PUSH_TOKEN_KEY);
     } catch {

@@ -3,11 +3,13 @@ Excel formula defang, inline-disposition safelist, security headers, cached HTML
 """
 from __future__ import annotations
 
+from tests._attachments import insert_attachment
+
 
 # 1. Chatbot Excel formula defang
 class TestChatbotExcelDefang:
     def test_defang_helper(self, client):
-        from app.chatbot.excel import _defang_formula_text
+        from app.util import defang_formula as _defang_formula_text
         assert _defang_formula_text("=cmd|'/c calc'!A1") == "'=cmd|'/c calc'!A1"
         assert _defang_formula_text("+1") == "'+1"
         assert _defang_formula_text("-1") == "'-1"
@@ -38,7 +40,7 @@ class TestChatbotExcelDefang:
 
 # 2. Attachment inline-disposition safelist
 class TestAttachmentDispositionSafelist:
-    def _make_bug_with_attachment(self, client, filename, content, ctype):
+    def _make_bug_with_attachment(self, client, filename, content, ctype, legacy=False):
         r = client.post("/api/projects", json={"name": "AttProj", "color": "#000000"})
         assert r.status_code == 201, r.text
         project = r.json()
@@ -48,6 +50,8 @@ class TestAttachmentDispositionSafelist:
         })
         assert r.status_code == 201, r.text
         bug = r.json()
+        if legacy:  # types the upload allowlist refuses, as stored before it existed
+            return bug["id"], insert_attachment(bug["id"], filename, ctype, content)
         r = client.post(
             f"/api/bugs/{bug['id']}/attachments",
             files={"file": (filename, content, ctype)},
@@ -71,13 +75,13 @@ class TestAttachmentDispositionSafelist:
     def test_unknown_type_forced_to_attachment(self, admin_client):
         # application/x-anything isn't safelisted, so it must download, not render inline.
         bug_id, att_id = self._make_bug_with_attachment(
-            admin_client, "blob.bin", b"\x00\x01", "application/x-custom")
+            admin_client, "blob.bin", b"\x00\x01", "application/x-custom", legacy=True)
         r = admin_client.get(f"/api/bugs/{bug_id}/attachments/{att_id}/download")
         assert r.headers["content-disposition"].startswith("attachment;")
 
     def test_active_type_still_neutralised(self, admin_client):
         bug_id, att_id = self._make_bug_with_attachment(
-            admin_client, "evil.svg", b"<svg/>", "image/svg+xml")
+            admin_client, "evil.svg", b"<svg/>", "image/svg+xml", legacy=True)
         r = admin_client.get(f"/api/bugs/{bug_id}/attachments/{att_id}/download")
         assert r.headers["content-disposition"].startswith("attachment;")
         assert r.headers["content-type"].startswith("application/octet-stream")

@@ -7,6 +7,8 @@ import io
 import re
 from pathlib import Path
 
+from tests._attachments import MP4_HEAD, insert_attachment
+
 
 def _make_user(c, name="Some User", email="user@x.com", role="user", password="TestUserPwd9X"):
     body = {"name": name, "email": email, "role": role, "password": password}
@@ -180,11 +182,7 @@ class TestAttachmentSafety:
         p = _make_project(admin_client, "ATX-1")
         bug = _make_bug(admin_client, p["id"])
         evil = b"<html><script>alert(1)</script></html>"
-        r = admin_client.post(
-            f"/api/bugs/{bug['id']}/attachments",
-            files={"file": ("evil.html", io.BytesIO(evil), "text/html")},
-        )
-        att_id = r.json()["id"]
+        att_id = insert_attachment(bug["id"], "evil.html", "text/html", evil)
         d = admin_client.get(f"/api/bugs/{bug['id']}/attachments/{att_id}/download")
         assert d.status_code == 200
         ct = d.headers.get("content-type", "")
@@ -200,11 +198,7 @@ class TestAttachmentSafety:
         p = _make_project(admin_client, "ATX-2")
         bug = _make_bug(admin_client, p["id"])
         svg = b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'
-        r = admin_client.post(
-            f"/api/bugs/{bug['id']}/attachments",
-            files={"file": ("img.svg", io.BytesIO(svg), "image/svg+xml")},
-        )
-        att_id = r.json()["id"]
+        att_id = insert_attachment(bug["id"], "img.svg", "image/svg+xml", svg)
         d = admin_client.get(f"/api/bugs/{bug['id']}/attachments/{att_id}/download")
         ct = d.headers.get("content-type", "")
         cd = d.headers.get("content-disposition", "")
@@ -215,11 +209,7 @@ class TestAttachmentSafety:
         p = _make_project(admin_client, "ATX-3")
         bug = _make_bug(admin_client, p["id"])
         js = b"alert(document.cookie)"
-        r = admin_client.post(
-            f"/api/bugs/{bug['id']}/attachments",
-            files={"file": ("evil.js", io.BytesIO(js), "application/javascript")},
-        )
-        att_id = r.json()["id"]
+        att_id = insert_attachment(bug["id"], "evil.js", "application/javascript", js)
         d = admin_client.get(f"/api/bugs/{bug['id']}/attachments/{att_id}/download")
         assert d.headers.get("content-type", "").startswith("application/octet-stream")
         assert "attachment" in (d.headers.get("content-disposition") or "").lower()
@@ -261,7 +251,7 @@ class TestAttachmentSafety:
         """Full (200) response advertises Accept-Ranges so the browser will seek."""
         p = _make_project(admin_client, "ATX-6")
         bug = _make_bug(admin_client, p["id"])
-        blob = bytes(range(256)) * 4  # 1024 bytes
+        blob = MP4_HEAD + bytes(range(256)) * 4
         r = admin_client.post(
             f"/api/bugs/{bug['id']}/attachments",
             files={"file": ("clip.mp4", io.BytesIO(blob), "video/mp4")},
@@ -277,7 +267,7 @@ class TestAttachmentSafety:
         """A Range request returns 206 with the exact slice and a correct Content-Range."""
         p = _make_project(admin_client, "ATX-7")
         bug = _make_bug(admin_client, p["id"])
-        blob = bytes(range(256)) * 4  # 1024 bytes
+        blob = MP4_HEAD + bytes(range(256)) * 4
         r = admin_client.post(
             f"/api/bugs/{bug['id']}/attachments",
             files={"file": ("clip.mp4", io.BytesIO(blob), "video/mp4")},
@@ -308,7 +298,7 @@ class TestAttachmentSafety:
         """A malformed or out-of-bounds Range falls back to the full 200 body."""
         p = _make_project(admin_client, "ATX-8")
         bug = _make_bug(admin_client, p["id"])
-        blob = b"0123456789"
+        blob = MP4_HEAD + b"0123456789"
         r = admin_client.post(
             f"/api/bugs/{bug['id']}/attachments",
             files={"file": ("clip.mp4", io.BytesIO(blob), "video/mp4")},

@@ -109,8 +109,12 @@ def test_index_exists_after_init_and_init_is_idempotent(client):
 
     assert init_db() is True
     with engine.connect() as c:
-        sql = c.execute(text("SELECT sql FROM sqlite_master WHERE name = 'uq_users_email_lower'")).scalar()
-    assert sql and "lower(email)" in sql.lower()
+        if engine.dialect.name == "sqlite":
+            query = "SELECT sql FROM sqlite_master WHERE name = 'uq_users_email_lower'"
+        else:
+            query = "SELECT indexdef FROM pg_indexes WHERE indexname = 'uq_users_email_lower'"
+        sql = c.execute(text(query)).scalar()
+    assert sql and "lower(" in sql.lower() and "email" in sql.lower()
 
 
 def test_postgres_enforces_the_lower_email_index():

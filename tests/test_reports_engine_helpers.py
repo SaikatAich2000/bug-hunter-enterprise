@@ -8,7 +8,7 @@ column defaults (applied only at flush) read back as None or [].
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -317,3 +317,63 @@ def test_int_list_variants():
 def test_age_bucket_boundaries(days, bucket):
     from app.reports.engine import _age_bucket
     assert _age_bucket(days) == bucket
+
+
+# app/reports/engine.py — helpers
+def test_engine_parse_prior_status_empty_and_no_match():
+    from app.reports.engine import _parse_prior_status
+    assert _parse_prior_status("") is None               # empty detail
+    assert _parse_prior_status("no arrow here") is None  # no matches
+
+
+def test_engine_fetch_resolution_skips_unresolved_transition():
+    # A transition to a non-resolved state must not be credited.
+    from app.reports.engine import _fold_throughput_row
+    per_user: dict = {}
+    details: list = []
+    raw = (
+        7, 3, "Dana",
+        datetime(2026, 1, 2, tzinfo=timezone.utc),
+        "status: 'New' -> 'In Progress'", "Bug", "T", "High", "In Progress", "Apollo",
+    )
+    _fold_throughput_row(raw, per_user, details)
+    assert per_user == {}
+
+
+def test_engine_fold_throughput_skips_resolved_to_resolved():
+    # Resolved -> Closed is not a new resolution; the double-count guard returns early.
+    from app.reports.engine import _fold_throughput_row
+    per_user: dict = {}
+    details: list = []
+    raw = (
+        9, 4, "Eve",
+        datetime(2026, 1, 3, tzinfo=timezone.utc),
+        "status: 'Resolved' -> 'Closed'", "Bug", "T", "High", "Closed", "Apollo",
+    )
+    _fold_throughput_row(raw, per_user, details)
+    assert per_user == {}  # already resolved, skipped
+
+
+def test_engine_utc_date_postgresql_branch():
+    # Postgres wraps the column in func.timezone('UTC', col); fake bind reports postgresql.
+    from app.models import Bug
+    from app.reports.engine import _utc_date
+
+    class _Dialect:
+        name = "postgresql"
+
+    class _Bind:
+        dialect = _Dialect()
+
+    class _FakeDB:
+        def get_bind(self):
+            return _Bind()
+
+    expr = _utc_date(_FakeDB(), Bug.created_at)
+    assert "timezone" in str(expr).lower()
+
+
+def test_engine_utc_day_key_accepts_plain_date():
+    # A bare date (not a datetime) takes the isoformat() fallback path.
+    from app.reports.engine import _utc_day_key
+    assert _utc_day_key(date(2026, 6, 21)) == "2026-06-21"

@@ -28,15 +28,16 @@ Include:
 
 ## Security posture
 
-- **Login** — passwords are hashed with bcrypt. Session cookies are signed, HttpOnly, and SameSite (`Secure` over HTTPS). Sessions are stored server-side so admins can revoke any device.
-- **Account protection** — accounts lock after repeated failed logins. Login timing is normalized so attackers cannot enumerate emails. An optional HaveIBeenPwned check runs whenever a password is set.
+- **Login** — passwords are hashed with bcrypt. The session cookie holds an encrypted, signed token (the user id is not readable by the client); it is HttpOnly and `SameSite=Lax`. Over HTTPS (`COOKIE_SECURE=true` or an `https://` `APP_BASE_URL`) it is `Secure` and named `__Host-bh_session`, so browsers pin it to the exact host (no `Domain`, `Path=/`); over plain HTTP it is `bh_session`. A cookie without a live server-side session id is refused, and admins can revoke any session.
+- **Account protection** — failed sign-ins are counted per email+IP pair (`LOGIN_FAIL_LIMIT`, default 10 within `LOGIN_FAIL_WINDOW_SECONDS`, 15 min) and per email overall (`LOGIN_FAIL_EMAIL_LIMIT`, default 50, never below the pair limit). A pair that reaches its limit is locked for `LOGIN_LOCKOUT_SECONDS` (15 min), so a stranger guessing a known address locks only their own IP, not the owner. The check runs before bcrypt and unknown emails count too. Counters are in memory, per process. A HaveIBeenPwned k-anonymity check (only a 5-character hash prefix leaves the server; an outage never blocks) runs when a password is set, unless `PASSWORD_BREACH_CHECK_ENABLED=false`.
 - **Password reset** — reset does not reveal whether an email exists. Tokens are single-use, hashed, and expire.
 - **Email** — outbound headers are stripped of line breaks to block header injection. The console backend never logs message bodies (including live reset links).
 - **CSRF** — state-changing requests get an Origin/Referer check on top of SameSite cookies.
-- **Rate limiting** — per-IP and per-account limits on sensitive endpoints (login, reset, change-password, commenting, chat).
+- **Rate limiting** — per-IP sliding windows on `POST /api/auth/login` (8/min), `forgot-password` (3/min), `reset-password` and `change-password` (5/min each); per-user limits on comments (30/min), attachment uploads (20/min) and chat (30/min). All are in memory and per process; add a proxy-level limit if you run several workers or replicas.
 - **HTTP headers** — Content-Security-Policy (`script-src 'self'`, no CDN), plus `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy`, cross-origin isolation headers, and HSTS over HTTPS. The same headers apply to error responses (`429`, `403`, and a generic `500`).
 - **API surface** — interactive API docs (`/docs`, `/redoc`, `/openapi.json`) are served in development. A production deploy (`APP_ENV=production` or `COOKIE_SECURE=true`) disables them unless `ENABLE_API_DOCS=true`; the pages are self-hosted and CSP-safe.
-- **Request limits** — a global cap on request body size, and row limits on list and report endpoints.
+- **Request limits** — body ceilings of `MAX_REQUEST_BODY_BYTES` (uploads, 60 MiB) and `MAX_JSON_BODY_BYTES` (everything else, 2 MiB), checked before the body is read; 50 MB per attachment; `MAX_REPORT_ROWS` for Excel exports; paged work-item lists.
+- **Validation errors** — every `422` has one shape, `{"detail": [{"type", "loc", "msg"}]}`, and never echoes the submitted value (it can be a password).
 - **Authorization** — role checks are enforced the same way on both the REST and chat write paths, with a guard against mass-assignment when an item's type changes.
 - **Tenant isolation** — every user, project, event, audit entry, invitation, saved view and webhook belongs to one organization, and everything else is scoped through its project. The scope is applied in every route, in bulk import, and in the assistant's retrieval and actions; another organization's id answers `404`, indistinguishable from a missing one. Email addresses are unique across organizations, so sign-in cannot reveal which organization an address belongs to.
 - **Two-factor sign-in** — optional TOTP (RFC 6238). A correct password only yields a short-lived signed pending token; the session starts after a valid code. Each code is accepted once (a conditional update closes the race), the second step counts toward the per-account lockout, recovery codes are stored hashed and burn on use, and turning 2FA off or regenerating codes needs the password. Authenticator secrets are encrypted at rest when `FIELD_ENCRYPTION_KEY` is set.
@@ -44,11 +45,11 @@ Include:
 - **Webhooks** — payloads are signed with HMAC-SHA256 (`X-BugHunter-Signature`); the secret is shown once and encrypted at rest with `FIELD_ENCRYPTION_KEY`. Targets on loopback, private, link-local and metadata addresses (including integer and IPv6 forms) are refused when saved and re-checked against the resolved addresses at delivery; redirects are never followed and the timeout is bounded.
 - **Privacy** — people can export their data and delete their account; the last admin of an organization cannot. Audit rows older than `AUDIT_RETENTION_DAYS` are purged daily. `/api/metrics` is off by default and can require a bearer token.
 - **Concurrent edits** — bug updates use optimistic concurrency. A stale save returns `409` instead of silently overwriting another user's change.
-- **Uploads** — EXIF metadata is stripped on upload. Oversized or decompression-bomb images are rejected by a pixel budget. Content-type checks apply to all attachments.
+- **Uploads** — Metadata is stripped from images on upload: JPEG, PNG and WebP at the byte level without decoding; GIF, BMP and TIFF are re-encoded within a 16-megapixel budget and refused above it (`app/image_strip.py`). Attachments are accepted by allowlist, not denylist: images, PDF, video, Office documents (`doc`, `docx`, `xls`, `xlsx`, `ppt`, `pptx`, `odt`, `ods`, `odp`, `rtf`), and `txt`, `csv`, `log` or `zip` files. A file must carry an allowed extension and its leading bytes must match that format (a `.png` that is not a PNG is refused). The stored content type comes from the extension, never from the client. SVG and HTML are not accepted. Downloads of anything other than images, video, PDF and plain text are forced to attachment with `nosniff` and a sandboxing CSP.
 - **Output** — stored rich text is sanitized server-side against an allowlist, then again in the browser with DOMPurify before rendering.
 - **Data export** — the Excel writer defends against spreadsheet formula injection.
 - **Assistant egress** — the optional cloud LLM is off by default. When enabled, all outbound text passes through a secret-redaction filter first. Sleuth never writes data through the model: even the multi-step agent uses only read-only tools, which re-check through the same write firewall as the REST API.
-- **Audit trail** — every create, update, delete, and login is logged. The log survives item deletion.
+- **Audit trail** — work-item, project, user, sprint, board, release, label and component changes are recorded, as are sign-ins, failed sign-ins, lockouts, logouts and password changes or resets. Audit rows survive deletion of the item they refer to. Not every read or setting change is logged. Each response carries an `X-Request-ID` (a safe client-supplied one is kept) that also appears on every log line it causes.
 - **Telemetry egress** — OTLP export to SigNoz stays off until `OTEL_EXPORTER_OTLP_ENDPOINT` is set; the collector URL and any auth headers live in `.env`/platform secrets (never in code or the image), and exported attributes matching password/token/secret/cookie patterns are stripped first (`OTEL_LOG_REDACT_SENSITIVE=true`).
 
 ## Git integration (branch creation and removal)
@@ -62,13 +63,11 @@ branch dialog, where the browser picks a provider repository id returned by the
 read-only discovery endpoint.
 
 - **Token handling.** A project PAT is entered in Project Git Settings as a
-  write-only password input, sent only in the save/test HTTPS request, and
-  encrypted immediately with the server-only `GIT_CREDENTIAL_ENCRYPTION_KEY`
-  (Fernet; never derived from `SESSION_SECRET`). It is never returned by any
-  API (responses expose only `credentials_configured`), never stored in
-  plaintext, never placed in a query string, `localStorage` or
-  `sessionStorage`, never prefetched into the input, and never written to
-  logs or audit rows. A blank PAT entry preserves the stored credential;
+  write-only password input and encrypted before storage with the server-only
+  `GIT_CREDENTIAL_ENCRYPTION_KEY` (Fernet; never derived from `SESSION_SECRET`).
+  APIs expose only `credentials_configured`, never the token. Credentials are sent
+  only to the Git server they were saved for, and never to internal addresses
+  unless `GIT_ALLOW_PRIVATE_HOSTS=true`. A blank PAT entry preserves the stored credential;
   `Clear credential` removes only that project's PAT. `GITHUB_TOKEN` is read
   from server-side settings only and used solely when a project has no PAT.
 - **Precedence.** Test Connection with a body tests exactly the visible draft
@@ -114,10 +113,9 @@ read-only discovery endpoint.
   Back up the Fernet key: losing or rotating it makes stored project PATs
   unreadable until re-entered. Rotate tokens on your normal schedule and
   immediately after any suspected exposure, and revoke replaced tokens.
-- **Log redaction.** Provider errors are sanitized before they reach a client or
-  a log; stored failure text is truncated and stripped of anything resembling a
-  credential. Audit entries record safe identifiers (work item, repository,
-  branch name) only - never the token and never a raw provider response.
+- **Error text.** Provider errors are sanitized before they reach a client; stored
+  failure text is truncated and stripped of anything resembling a credential.
+  Audit entries record identifiers (work item, repository, branch name), not the token.
 - **Outbound requests.** Provider base URLs must be HTTPS (loopback HTTP only
   for local tests), are validated with no userinfo/query/fragment/path, and
   requests are bounded by a timeout with limited retries so a slow or hostile
@@ -163,4 +161,4 @@ service-account file was ever committed:
 
 Keep `.env.example` placeholder-only, and never commit a real `.env`.
 
-See also the *Live-data safety* and *Production checklist* sections of [README.md](README.md).
+See also [docs/security-model.md](docs/security-model.md) and the *Production checklist* in [README.md](README.md).

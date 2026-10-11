@@ -26,15 +26,14 @@ from app.agile.permissions import (
     require_permission,
 )
 from app.api_docs import (
-    BAD_REQUEST_NOT_FOUND_CONFLICT_422,
+    BAD_REQUEST_FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422,
+    FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422,
+    FORBIDDEN_NOT_FOUND_VALIDATION_422,
     NOT_FOUND_404,
-    NOT_FOUND_CONFLICT_409,
-    NOT_FOUND_CONFLICT_VALIDATION_422,
 )
 from app.auth import get_current_user
 from app.database import get_db
 from app.models import (
-    Activity,
     Board,
     Bug,
     Project,
@@ -56,6 +55,7 @@ from app.schemas import (
     WorkItemTaxonomyIn,
     WorkItemTransitionIn,
 )
+from app.services.audit import audit as _audit
 
 router = APIRouter(prefix="/api/agile", tags=["agile-board"])
 logger = logging.getLogger("bug_hunter.agile_board")
@@ -64,13 +64,6 @@ _DETAIL_BOARD_NOT_FOUND = "Sprint Board not found"
 _DETAIL_ITEM_NOT_FOUND = "Work item not found"
 _DETAIL_VERSION_CONFLICT = "Item was modified by someone else; reload and retry"
 _DETAIL_FILTER_NOT_FOUND = "Quick filter not found"
-
-
-def _audit(db: Session, actor: User, entity_type: str, entity_id: int, action: str, detail: str) -> None:
-    db.add(Activity(
-        bug_id=None, entity_type=entity_type, entity_id=entity_id,
-        actor_user_id=actor.id, actor_name=actor.name, action=action, detail=detail,
-    ))
 
 
 def _get_board_or_404(db: Session, board_id: int, user: User) -> Board:
@@ -144,7 +137,7 @@ def get_hierarchy_view(
     return views_svc.hierarchy_view(db, project_id, user, board, q=q, include_done=include_done)
 
 
-@router.post("/boards/{board_id}/move", response_model=list[AgileIssueOut], responses=NOT_FOUND_CONFLICT_409)
+@router.post("/boards/{board_id}/move", response_model=list[AgileIssueOut], responses=FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422)
 def move_issues(
     board_id: int, payload: SprintMoveIn,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
@@ -181,7 +174,7 @@ def move_issues(
     return views_svc.issue_payloads(db, items, actor, done=done)
 
 
-@router.post("/work-items/{item_id}/transition", response_model=AgileIssueOut, responses=BAD_REQUEST_NOT_FOUND_CONFLICT_422)
+@router.post("/work-items/{item_id}/transition", response_model=AgileIssueOut, responses=BAD_REQUEST_FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422)
 def transition_item(
     item_id: int, payload: WorkItemTransitionIn, background: BackgroundTasks,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
@@ -234,7 +227,7 @@ def transition_item(
     return _issue_out(db, item, actor)
 
 
-@router.put("/work-items/{item_id}/estimate", response_model=AgileIssueOut, responses=NOT_FOUND_CONFLICT_VALIDATION_422)
+@router.put("/work-items/{item_id}/estimate", response_model=AgileIssueOut, responses=FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422)
 def update_item_estimate(
     item_id: int, payload: WorkItemEstimateIn,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
@@ -272,7 +265,7 @@ def update_item_estimate(
     return _issue_out(db, item, actor)
 
 
-@router.post("/work-items/{item_id}/flag", response_model=AgileIssueOut, responses=NOT_FOUND_CONFLICT_409)
+@router.post("/work-items/{item_id}/flag", response_model=AgileIssueOut, responses=FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422)
 def flag_item(
     item_id: int, payload: WorkItemFlagIn,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
@@ -291,7 +284,7 @@ def flag_item(
     return _issue_out(db, item, actor)
 
 
-@router.put("/work-items/{item_id}/taxonomy", response_model=AgileIssueOut, responses=NOT_FOUND_CONFLICT_409)
+@router.put("/work-items/{item_id}/taxonomy", response_model=AgileIssueOut, responses=FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422)
 def update_item_taxonomy(
     item_id: int, payload: WorkItemTaxonomyIn,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
@@ -331,7 +324,7 @@ def list_quick_filters(
     ).all())
 
 
-@router.post("/boards/{board_id}/quick-filters", response_model=QuickFilterOut, status_code=status.HTTP_201_CREATED, responses=NOT_FOUND_404)
+@router.post("/boards/{board_id}/quick-filters", response_model=QuickFilterOut, status_code=status.HTTP_201_CREATED, responses=FORBIDDEN_NOT_FOUND_VALIDATION_422)
 def create_quick_filter(
     board_id: int, payload: QuickFilterIn,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
@@ -355,7 +348,7 @@ def create_quick_filter(
     return qf
 
 
-@router.put("/quick-filters/{filter_id}", response_model=QuickFilterOut, responses=NOT_FOUND_CONFLICT_409)
+@router.put("/quick-filters/{filter_id}", response_model=QuickFilterOut, responses=FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422)
 def update_quick_filter(
     filter_id: int, payload: QuickFilterUpdateIn,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
@@ -380,7 +373,7 @@ def update_quick_filter(
     return qf
 
 
-@router.delete("/quick-filters/{filter_id}", responses=NOT_FOUND_404)
+@router.delete("/quick-filters/{filter_id}", responses=FORBIDDEN_NOT_FOUND_VALIDATION_422)
 def delete_quick_filter(
     filter_id: int, db: Session = Depends(get_db), actor: User = Depends(get_current_user),
 ) -> dict:

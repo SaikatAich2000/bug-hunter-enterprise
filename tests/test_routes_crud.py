@@ -4,7 +4,12 @@ Uses the conftest fixtures; row-level setups go through the app's SessionLocal.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
+import pytest
 from fastapi.testclient import TestClient
+
+from tests.conftest import BOOTSTRAP_EMAIL, default_org_id
 
 _BOOTSTRAP_EMAIL = "admin@test.local"
 _BOOTSTRAP_PW = "Admin1234"
@@ -251,7 +256,7 @@ def test_cov_sessions_list_and_is_current(admin_client):
 
 def test_cov_sessions_hides_then_retention_removes_expired_rows(admin_client):
     """Listing sessions hides rows whose expires_at is past; the retention job deletes them."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timezone
 
     from app.database import SessionLocal
     from app.models import Session as SessionRow
@@ -382,3 +387,446 @@ def test_cov_mark_read_already_read_skips_commit(admin_client):
 #   users.py last-admin guardrail raises (update/delete) — self-edit guard or count>=1 always pre-empts them
 #     (count queries covered by test_cov_update_user_demote_other_admin_runs_last_admin_check /
 #      test_cov_delete_user_admin_runs_last_admin_count).
+
+
+# app/routes/bugs.py — helpers + route edge cases
+def test_upload_policy_extension_check(client):
+    from app.upload_policy import check_extension
+    assert "without an extension" in check_extension("README")
+    assert ".exe" in check_extension("evil.exe")
+    assert check_extension("notes.TXT") is None
+
+
+def test_people_resolve_user_unknown_raises_400(client):
+    # None is allowed (no filter); a non-existent id is a hard 400.
+    from fastapi import HTTPException
+
+    from app.database import SessionLocal
+    from app.people import resolve_user
+    db = SessionLocal()
+    try:
+        org_id = default_org_id()
+        assert resolve_user(db, None, org_id) is None
+        with pytest.raises(HTTPException) as ei:
+            resolve_user(db, 999999, org_id)
+        assert ei.value.status_code == 400
+    finally:
+        db.close()
+
+
+def test_bugs_reject_overflow_ids_raises_422(client):
+    # An id filter outside the int4 range is a clean 422.
+    from fastapi import HTTPException
+
+    from app.services.bug_query import reject_overflow_ids as _reject_overflow_ids
+    from app.util import MAX_PK_INT as _MAX_PK_INT
+    with pytest.raises(HTTPException) as ei:
+        _reject_overflow_ids(reporter_id=_MAX_PK_INT + 1)
+    assert ei.value.status_code == 422
+
+
+def test_bugs_directional_link_reaches_multi_hop(client):
+    # BFS walks an intermediate node before finding the goal one hop further.
+    from sqlalchemy import select
+
+    from app import models
+    from app.database import SessionLocal
+    from app.services.bug_links import directional_link_reaches as _directional_link_reaches
+
+    db = SessionLocal()
+    try:
+        actor = db.scalar(
+            select(models.User).where(models.User.email == BOOTSTRAP_EMAIL))
+        proj = models.Project(org_id=default_org_id(), name="LinkProj", description="")
+        db.add(proj)
+        db.flush()
+        a = models.Bug(title="A", description="", status="New", priority="Low",
+                       environment="DEV", project_id=proj.id, reporter_id=actor.id)
+        b = models.Bug(title="B", description="", status="New", priority="Low",
+                       environment="DEV", project_id=proj.id, reporter_id=actor.id)
+        c = models.Bug(title="C", description="", status="New", priority="Low",
+                       environment="DEV", project_id=proj.id, reporter_id=actor.id)
+        db.add_all([a, b, c])
+        db.flush()
+        # A --blocks--> B --blocks--> C; reaching C from A walks through B.
+        db.add_all([
+            models.BugLink(source_bug_id=a.id, target_bug_id=b.id,
+                           link_type="blocks", created_by_user_id=actor.id),
+            models.BugLink(source_bug_id=b.id, target_bug_id=c.id,
+                           link_type="blocks", created_by_user_id=actor.id),
+        ])
+        db.commit()
+        reached = _directional_link_reaches(db, a.id, c.id, "blocks")
+    finally:
+        db.close()
+    assert reached is True
+
+
+def test_bugs_directional_link_reaches_diamond_revisits_node(client):
+    # A --blocks--> B --blocks--> E and A --blocks--> C --blocks--> E, then
+    # E --blocks--> D (goal): the same frontier level discovers E twice (via B
+    # and via C) before D is reached, so the second discovery must skip E as
+    # already-seen rather than re-queuing it.
+    from sqlalchemy import select
+
+    from app import models
+    from app.database import SessionLocal
+    from app.services.bug_links import directional_link_reaches as _directional_link_reaches
+
+    db = SessionLocal()
+    try:
+        actor = db.scalar(
+            select(models.User).where(models.User.email == BOOTSTRAP_EMAIL))
+        proj = models.Project(org_id=default_org_id(), name="DiamondProj", description="")
+        db.add(proj)
+        db.flush()
+        a, b, c, e, d = (
+            models.Bug(title=t, description="", status="New", priority="Low",
+                      environment="DEV", project_id=proj.id, reporter_id=actor.id)
+            for t in ("A", "B", "C", "E", "D")
+        )
+        db.add_all([a, b, c, e, d])
+        db.flush()
+        db.add_all([
+            models.BugLink(source_bug_id=a.id, target_bug_id=b.id,
+                           link_type="blocks", created_by_user_id=actor.id),
+            models.BugLink(source_bug_id=a.id, target_bug_id=c.id,
+                           link_type="blocks", created_by_user_id=actor.id),
+            models.BugLink(source_bug_id=b.id, target_bug_id=e.id,
+                           link_type="blocks", created_by_user_id=actor.id),
+            models.BugLink(source_bug_id=c.id, target_bug_id=e.id,
+                           link_type="blocks", created_by_user_id=actor.id),
+            models.BugLink(source_bug_id=e.id, target_bug_id=d.id,
+                           link_type="blocks", created_by_user_id=actor.id),
+        ])
+        db.commit()
+        reached = _directional_link_reaches(db, a.id, d.id, "blocks")
+    finally:
+        db.close()
+    assert reached is True
+
+
+def test_bugs_reject_updated_at_drift_aware_current(client):
+    # tz-aware current_updated skips naive coercion; same instant, no conflict.
+    from app.services.bug_update import reject_if_updated_at_drifted as _reject_if_updated_at_drifted
+    aware = datetime(2026, 6, 21, 12, 0, 0, tzinfo=timezone.utc)
+    _reject_if_updated_at_drifted(aware.isoformat(), aware)
+
+
+def test_bugs_list_deep_page_returns_empty(admin_client):
+    # A page far past the end short-circuits to [] instead of a deep OFFSET scan.
+    proj = admin_client.post("/api/projects", json={"name": "DeepPage"}).json()
+    admin_client.post("/api/bugs", json={
+        "project_id": proj["id"], "title": "only one", "priority": "Low",
+        "environment": "DEV",
+    })
+    r = admin_client.get("/api/bugs?page=10000000&page_size=20")
+    assert r.status_code == 200
+    assert r.json()["items"] == []
+
+
+def test_bugs_attachment_dangerous_ext_rejected(admin_client):
+    proj = admin_client.post("/api/projects", json={"name": "AttProj"}).json()
+    bug = admin_client.post("/api/bugs", json={
+        "project_id": proj["id"], "title": "needs file", "priority": "Low",
+        "environment": "DEV",
+    }).json()
+    r = admin_client.post(
+        f"/api/bugs/{bug['id']}/attachments",
+        files={"file": ("evil.exe", b"MZ\x90\x00", "application/octet-stream")},
+    )
+    assert r.status_code == 400
+    assert "exe" in r.json()["detail"].lower()
+
+
+def _mk_user_via_api(admin_client, name, email, project_ids=()):
+    r = admin_client.post("/api/users", json={
+        "name": name, "email": email, "role": "user", "password": "User12345",
+        "project_ids": list(project_ids),
+    })
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+
+def test_bugs_update_changes_reporter_and_notifies(admin_client):
+    # Reporter change is recorded; a tracked-field update stages 'updated' notifications.
+    proj = admin_client.post("/api/projects", json={"name": "UpdProj"}).json()
+    uid = _mk_user_via_api(admin_client, "Redo", "redo@test.local", [proj["id"]])
+    bug = admin_client.post("/api/bugs", json={
+        "project_id": proj["id"], "title": "orig", "priority": "Low",
+        "environment": "DEV", "assignee_ids": [uid],
+    }).json()
+    r = admin_client.put(f"/api/bugs/{bug['id']}", json={
+        "title": "renamed", "reporter_id": uid,
+    })
+    assert r.status_code == 200, r.text
+    assert r.json()["title"] == "renamed"
+    assert r.json()["reporter"]["id"] == uid
+
+
+def test_bugs_update_reporter_change_same_display_name_not_tracked(admin_client):
+    # Two different users sharing a display name: the reporter_id genuinely
+    # changes, and even though the plain display-name label is identical, the
+    # write must not be silently rolled back as a no-op — the audit entry
+    # disambiguates via email instead.
+    proj = admin_client.post("/api/projects", json={"name": "SameNameProj"}).json()
+    uid1 = _mk_user_via_api(admin_client, "Same Name", "same1@test.local", [proj["id"]])
+    uid2 = _mk_user_via_api(admin_client, "Same Name", "same2@test.local", [proj["id"]])
+    bug = admin_client.post("/api/bugs", json={
+        "project_id": proj["id"], "title": "orig", "priority": "Low",
+        "environment": "DEV", "reporter_id": uid1,
+    }).json()
+    r = admin_client.put(f"/api/bugs/{bug['id']}", json={"reporter_id": uid2})
+    assert r.status_code == 200, r.text
+    assert r.json()["reporter"]["id"] == uid2
+    activity = admin_client.get(f"/api/bugs/{bug['id']}/activity").json()
+    assert any(
+        "reporter" in a["detail"].lower() and "same2@test.local" in a["detail"]
+        for a in activity
+    )
+
+
+def test_bugs_update_legacy_invalid_status_tolerated(admin_client):
+    # Legacy status invalid for the current type is tolerated when unchanged by the update.
+    from app.database import SessionLocal
+    from app.models import Bug
+    proj = admin_client.post("/api/projects", json={"name": "LegacyProj"}).json()
+    bug = admin_client.post("/api/bugs", json={
+        "project_id": proj["id"], "title": "legacy", "priority": "Low",
+        "environment": "DEV",
+    }).json()
+    # 'Done' is Task-only; force it directly to simulate a legacy row.
+    db = SessionLocal()
+    try:
+        row = db.get(Bug, bug["id"])
+        row.status = "Done"  # valid enum, but not valid for item_type Bug
+        db.commit()
+    finally:
+        db.close()
+    r = admin_client.put(f"/api/bugs/{bug['id']}", json={
+        "title": "legacy-renamed", "status": "Done",
+    })
+    assert r.status_code == 200, r.text
+
+
+def test_bugs_add_reverse_relates_link_is_idempotent(admin_client):
+    # Reverse-direction 'relates' returns the existing edge, no duplicate.
+    proj = admin_client.post("/api/projects", json={"name": "RelProj"}).json()
+    a = admin_client.post("/api/bugs", json={
+        "project_id": proj["id"], "title": "Aye bug", "priority": "Low", "environment": "DEV",
+    }).json()
+    b = admin_client.post("/api/bugs", json={
+        "project_id": proj["id"], "title": "Bee bug", "priority": "Low", "environment": "DEV",
+    }).json()
+    r1 = admin_client.post(f"/api/bugs/{a['id']}/links", json={
+        "target_bug_id": b["id"], "link_type": "relates",
+    })
+    assert r1.status_code == 201, r1.text
+    r2 = admin_client.post(f"/api/bugs/{b['id']}/links", json={
+        "target_bug_id": a["id"], "link_type": "relates",
+    })
+    assert r2.status_code in (200, 201)
+
+
+def test_bugs_remove_link_other_endpoint_present(admin_client):
+    # Other endpoint exists, so the authz/stakeholder-notification branch is taken.
+    proj = admin_client.post("/api/projects", json={"name": "DelLink"}).json()
+    a = admin_client.post("/api/bugs", json={
+        "project_id": proj["id"], "title": "Aye bug", "priority": "Low", "environment": "DEV",
+    }).json()
+    b = admin_client.post("/api/bugs", json={
+        "project_id": proj["id"], "title": "Bee bug", "priority": "Low", "environment": "DEV",
+    }).json()
+    link = admin_client.post(f"/api/bugs/{a['id']}/links", json={
+        "target_bug_id": b["id"], "link_type": "blocks",
+    }).json()
+    r = admin_client.delete(f"/api/bugs/{a['id']}/links/{link['id']}")
+    assert r.status_code == 200, r.text
+
+
+def test_bugs_attachment_grows_past_limit_after_strip(admin_client, monkeypatch):
+    # Stripping can re-encode larger; post-strip re-check must 413 over the cap.
+    import app.routes.bugs as bugs_mod
+    monkeypatch.setattr(bugs_mod, "MAX_FILE_BYTES", 100)
+    monkeypatch.setattr(bugs_mod, "strip_image_metadata", lambda _d, _ct: b"x" * 500)
+
+    proj = admin_client.post("/api/projects", json={"name": "GrowProj"}).json()
+    bug = admin_client.post("/api/bugs", json={
+        "project_id": proj["id"], "title": "grow test", "priority": "Low",
+        "environment": "DEV",
+    }).json()
+    r = admin_client.post(
+        f"/api/bugs/{bug['id']}/attachments",
+        files={"file": ("pic.png", b"\x89PNG\r\n\x1a\n", "image/png")},
+    )
+    assert r.status_code == 413
+
+
+def test_bugs_reload_link_missing_raises_409(client):
+    # A concurrently deleted row (db.scalar returns None) must give a clean 409.
+    from fastapi import HTTPException
+
+    from app.services.bug_links import reload_link as _reload_link
+
+    class _FakeDB:
+        def scalar(self, _stmt):
+            return None
+
+    fake_db = _FakeDB()
+    with pytest.raises(HTTPException) as ei:
+        _reload_link(fake_db, 123)
+    assert ei.value.status_code == 409
+
+
+def test_bugs_insert_link_race_returns_existing(admin_client, monkeypatch):
+    # Losing the unique-index race returns the existing edge idempotently, not a 500.
+    import app.routes.bugs as bugs_mod
+
+    proj = admin_client.post("/api/projects", json={"name": "RaceProj"}).json()
+    a = admin_client.post("/api/bugs", json={
+        "project_id": proj["id"], "title": "Aye bug", "priority": "Low", "environment": "DEV",
+    }).json()
+    b = admin_client.post("/api/bugs", json={
+        "project_id": proj["id"], "title": "Bee bug", "priority": "Low", "environment": "DEV",
+    }).json()
+    first = admin_client.post(f"/api/bugs/{a['id']}/links", json={
+        "target_bug_id": b["id"], "link_type": "blocks",
+    }).json()
+
+    from sqlalchemy import select
+
+    from app.database import SessionLocal
+    from app.models import BugLink
+
+    db = SessionLocal()
+    try:
+        existing_link = db.scalar(select(BugLink).where(BugLink.id == first["id"]))
+        existing_id = existing_link.id
+    finally:
+        db.close()
+
+    # Simulate losing the race: created=False triggers the idempotent return.
+    def lost_race(_db, _link, _refetch):
+        from app.database import SessionLocal as SL
+        from app.models import BugLink as BL
+        s = SL()
+        try:
+            row = s.scalar(select(BL).where(BL.id == existing_id))
+            s.expunge(row)
+        finally:
+            s.close()
+        return row, False  # created=False
+
+    monkeypatch.setattr(bugs_mod, "insert_link_or_existing", lost_race)
+    # Fresh (source, target, type) so _find_existing is None and our patched helper runs.
+    again = admin_client.post(f"/api/bugs/{a['id']}/links", json={
+        "target_bug_id": b["id"], "link_type": "duplicate",
+    })
+    assert again.status_code in (200, 201)
+
+
+def _orphan_link(admin_client, *, drop="other"):
+    """Create A--blocks-->B, delete one bug with FK off so the link survives orphaned; returns (path_bug_id, link_id)."""
+    from sqlalchemy import delete, text
+
+    from app.database import SessionLocal
+    from app.models import Bug
+
+    proj = admin_client.post("/api/projects", json={"name": f"Orphan{drop}"}).json()
+    a = admin_client.post("/api/bugs", json={
+        "project_id": proj["id"], "title": "Aye orphan", "priority": "Low",
+        "environment": "DEV",
+    }).json()
+    b = admin_client.post("/api/bugs", json={
+        "project_id": proj["id"], "title": "Bee orphan", "priority": "Low",
+        "environment": "DEV",
+    }).json()
+    link = admin_client.post(f"/api/bugs/{a['id']}/links", json={
+        "target_bug_id": b["id"], "link_type": "blocks",
+    }).json()
+    victim = b["id"] if drop == "other" else a["id"]
+    db = SessionLocal()
+    try:
+        db.execute(text("PRAGMA foreign_keys = OFF"))
+        db.execute(delete(Bug).where(Bug.id == victim))
+        db.commit()
+    finally:
+        db.close()
+    return a["id"], link["id"]
+
+
+def test_bugs_remove_link_other_endpoint_gone(admin_client):
+    # Other endpoint gone (orphaned): the block is skipped and the link deleted directly.
+    path_bug_id, link_id = _orphan_link(admin_client, drop="other")
+    r = admin_client.delete(f"/api/bugs/{path_bug_id}/links/{link_id}")
+    assert r.status_code == 200, r.text
+
+
+def test_bugs_remove_link_path_bug_gone_404(admin_client):
+    # The path bug itself is gone (orphaned link); the route must return 404.
+    path_bug_id, link_id = _orphan_link(admin_client, drop="path")
+    r = admin_client.delete(f"/api/bugs/{path_bug_id}/links/{link_id}")
+    assert r.status_code == 404
+
+
+def test_bugs_download_range_row_vanished_404(admin_client):
+    # TOCTOU: row deleted between metadata read and byte-slice must 404, not empty 206.
+    from app.database import SessionLocal, get_db
+    from app.main import app
+
+    proj = admin_client.post("/api/projects", json={"name": "DlRace"}).json()
+    bug = admin_client.post("/api/bugs", json={
+        "project_id": proj["id"], "title": "dl race", "priority": "Low",
+        "environment": "DEV",
+    }).json()
+    up = admin_client.post(
+        f"/api/bugs/{bug['id']}/attachments",
+        files={"file": ("note.txt", b"hello world data", "text/plain")},
+    )
+    assert up.status_code == 201, up.text
+    att_id = up.json()["id"]
+
+    class _SliceVanishSession:
+        def __init__(self, real):
+            self._real = real
+
+        def scalar(self, stmt):
+            if "substr" in str(stmt).lower():
+                return None  # concurrent delete of the blob row
+            return self._real.scalar(stmt)
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    def _override_db():
+        real = SessionLocal()
+        try:
+            yield _SliceVanishSession(real)
+        finally:
+            real.close()
+
+    app.dependency_overrides[get_db] = _override_db
+    try:
+        r = admin_client.get(
+            f"/api/bugs/{bug['id']}/attachments/{att_id}/download",
+            headers={"Range": "bytes=0-3"},
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+    assert r.status_code == 404
+
+
+def test_bugs_update_assignee_only_skips_changes_notify(admin_client):
+    # Assignee-only update: empty changes but newly_assigned set, so only the assign-notify block runs.
+    proj = admin_client.post("/api/projects", json={"name": "AssignOnly"}).json()
+    uid = _mk_user_via_api(admin_client, "Assignee Only", "assignonly@test.local", [proj["id"]])
+    bug = admin_client.post("/api/bugs", json={
+        "project_id": proj["id"], "title": "assignee only", "priority": "Low",
+        "environment": "DEV",
+    }).json()
+    r = admin_client.put(f"/api/bugs/{bug['id']}", json={
+        "title": "assignee only", "priority": "Low", "environment": "DEV",
+        "assignee_ids": [uid],
+    })
+    assert r.status_code == 200, r.text
+    assert uid in [a["id"] for a in r.json()["assignees"]]

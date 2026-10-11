@@ -5,7 +5,6 @@ import hashlib
 import html
 import json
 import logging
-import os
 import secrets
 import time
 from collections import deque
@@ -40,15 +39,16 @@ from sqlalchemy.orm import Session as OrmSession
 from starlette.datastructures import MutableHeaders
 
 from app.auth import (
-    COOKIE_NAME,
+    COOKIE_NAME,  # noqa: F401  (legacy cookie name, addressed through this module by tests)
     hash_password,
     new_jti,
     parse_session_token,
+    session_cookie_value,
     set_session_cookie,
     trusted_forwarded_ip,
 )
 from app.chatbot.router import router as chatbot_router
-from app.config import get_settings
+from app.config import env_int, env_str, get_settings
 from app.database import SessionLocal, get_db, init_db
 from app.metrics import MetricsMiddleware
 from app.metrics import render as render_metrics
@@ -74,6 +74,7 @@ from app.routes import (
     memberships,
     notifications,
     organizations,
+    preferences,
     projects,
     push,
     reports,
@@ -384,15 +385,19 @@ def _reconcile_status_transitions(db) -> bool:
 
     Returns True when any transition row was added.
     """
-    from app.agile.workflow import reconcile_transitions
+    from app.agile.workflow import reconcile_transitions, seed_default_transitions
     from app.models import WorkflowStatus
     changed = False
     work_item_types = db.scalars(
         select(WorkflowStatus.work_item_type).where(WorkflowStatus.scope_key == "global").distinct()
     ).all()
     for work_item_type in work_item_types:
+        # A type with no transitions at all is a fresh install seeding itself, not a gap to repair.
+        seeded = seed_default_transitions(db, work_item_type)
         if reconcile_transitions(db, work_item_type):
             changed = True
+        if seeded:
+            db.commit()
     return changed
 
 
@@ -1008,8 +1013,7 @@ def _has_valid_session(request: Request) -> bool:
     Must check revocation, not just the signature — accepting a revoked cookie
     here makes / and /login.html redirect-loop each other.
     """
-    token = request.cookies.get(COOKIE_NAME, "")
-    parsed = parse_session_token(token)
+    parsed = parse_session_token(session_cookie_value(request))
     if parsed is None:
         return False
     user_id, _session_version, jti = parsed
@@ -1268,6 +1272,7 @@ app.include_router(webhooks.router)
 app.include_router(notifications.router)
 app.include_router(push.router)
 app.include_router(devices.router)
+app.include_router(preferences.router)
 app.include_router(agile.router)
 app.include_router(agile_board.router)
 app.include_router(agile_planning.router)
@@ -1281,9 +1286,10 @@ app.include_router(chatbot_router)
 async def http_exc_handler(request: Request, exc: HTTPException) -> JSONResponse:
     # Preserve headers attached by the raiser (Retry-After on 429,
     # WWW-Authenticate on 401); FastAPI's default handler drops them.
+    detail = _validation_detail(exc.detail) if exc.status_code == 422 else exc.detail
     return JSONResponse(
         status_code=exc.status_code,
-        content={"detail": exc.detail},
+        content={"detail": detail},
         headers=getattr(exc, "headers", None) or None,
     )
 
@@ -1309,6 +1315,24 @@ def _validation_error_out(err: dict) -> dict:
     return {"type": err.get("type", "value_error"), "loc": loc, "msg": msg}
 
 
+def _validation_detail(detail) -> list[dict]:
+    """A 422 raised by hand (a message string, or a dict) in the same list shape as a
+    schema validation error, so clients parse every 422 one way."""
+    if isinstance(detail, list):
+        return [
+            {"type": str(e.get("type", "value_error")), "loc": list(e.get("loc") or ["request"]),
+             "msg": str(e.get("msg", ""))} if isinstance(e, dict) else _single_error(str(e))
+            for e in detail
+        ]
+    if isinstance(detail, dict):
+        return [_single_error(str(detail.get("message") or detail.get("msg") or detail))]
+    return [_single_error(str(detail))]
+
+
+def _single_error(msg: str) -> dict:
+    return {"type": "value_error", "loc": ["request"], "msg": msg}
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     return JSONResponse(
@@ -1328,10 +1352,9 @@ async def out_of_range_handler(request: Request, exc: Exception) -> JSONResponse
         request.method, request.url.path, type(exc).__name__,
     )
     # Same shape as FastAPI's own 422 (documented as HTTPValidationError).
-    return JSONResponse(status_code=422, content={"detail": [{
-        "type": "value_error", "loc": ["request"],
-        "msg": "A value in the request is out of range.", "input": None,
-    }]})
+    return JSONResponse(status_code=422, content={
+        "detail": [_single_error("A value in the request is out of range.")],
+    })
 
 
 @app.exception_handler(Exception)
@@ -1355,6 +1378,6 @@ if __name__ == "__main__":
     import uvicorn
     # Default to loopback. Set UVICORN_HOST=0.0.0.0 in containers where the
     # container boundary and reverse proxy make it safe to bind all interfaces.
-    _host = os.getenv("UVICORN_HOST", "127.0.0.1")
-    _port = int(os.getenv("UVICORN_PORT", "8000"))
+    _host = env_str("UVICORN_HOST", "127.0.0.1")
+    _port = env_int("UVICORN_PORT", 8000)
     uvicorn.run("app.main:app", host=_host, port=_port, reload=False)

@@ -332,3 +332,30 @@ def test_retrieve_text_formats_and_defangs(monkeypatch):
     assert out.endswith("<<END DATA>>")
     # The injected literal fence inside the doc body is defanged.
     assert "< <DATA>>" in out
+
+
+# rag.upsert_bug: embedding returns nothing, so nothing is written
+def test_upsert_bug_embed_returns_none_skips_upsert(monkeypatch):
+    from app.chatbot import rag
+
+    class _Col:
+        def __init__(self):
+            self.upserts = []
+
+        def upsert(self, **kw):
+            self.upserts.append(kw)
+
+    col = _Col()
+    bug = types.SimpleNamespace(
+        id=5, item_type="Bug", title="T", status="New",
+        priority="Low", environment="DEV", description=None,
+    )
+
+    class _DB:
+        def get(self, model, pk):
+            return bug
+
+    monkeypatch.setattr(rag, "_collection", lambda: col)
+    monkeypatch.setattr(rag, "_embed", lambda texts: None)  # simulate embedding failure
+    rag.upsert_bug(_DB(), 5)
+    assert col.upserts == []  # nothing written without vectors

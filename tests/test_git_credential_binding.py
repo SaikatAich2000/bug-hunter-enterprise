@@ -124,7 +124,7 @@ def test_changing_the_server_requires_the_token_again(git, admin_client):
     assert first.status_code == 200
     moved = _save(admin_client, git.url, base_url="https://attacker.example")
     assert moved.status_code == 422
-    assert "Re-enter the access token" in moved.json()["detail"]
+    assert "Re-enter the access token" in moved.json()["detail"][0]["msg"]
     # Re-entering the token (or clearing it) makes the change explicit and allowed.
     assert _save(admin_client, git.url, base_url="https://attacker.example",
                  credential="new-server-token-123").status_code == 200
@@ -136,7 +136,7 @@ def test_changing_the_server_requires_the_token_again(git, admin_client):
 def test_internal_servers_are_refused(git, admin_client, base_url):
     res = _save(admin_client, git.url, base_url=base_url)
     assert res.status_code == 422, res.text
-    assert "GIT_ALLOW_PRIVATE_HOSTS" in res.json()["detail"]
+    assert "GIT_ALLOW_PRIVATE_HOSTS" in res.json()["detail"][0]["msg"]
 
 
 def test_private_servers_are_allowed_when_the_deployment_opts_in(git, admin_client, monkeypatch):
@@ -179,7 +179,7 @@ def test_org_admin_of_another_tenant_cannot_exfiltrate_the_deployment_token(git)
     # A token the admin types in is theirs to send anywhere; a saved one stays with its server.
     assert _save(tenant, url, base_url="https://ghe.evil.test", credential=SAVED_PAT).status_code == 200
     moved = _save(tenant, url, base_url="https://attacker.example")
-    assert moved.status_code == 422 and "Re-enter the access token" in moved.json()["detail"]
+    assert moved.status_code == 422 and "Re-enter the access token" in moved.json()["detail"][0]["msg"]
     res = tenant.post(f"{url}/test", json={"base_url": "https://attacker.example"})
     assert res.json()["ok"] is False
     assert git.seen == []

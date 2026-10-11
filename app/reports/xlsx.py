@@ -19,6 +19,7 @@ except ImportError:   # pragma: no cover — broken installs only
 
 from app.config import get_settings
 from app.reports.engine import ReportColumn, ReportResult
+from app.util import defang_formula
 
 
 class XlsxBuildError(Exception):
@@ -32,29 +33,14 @@ _BANNER_FG = "FFFFFF"
 _ZEBRA_FILL = "F2F4F8"
 
 
-# Formula-injection guard: a leading char here makes Excel treat the cell as
-# a formula (e.g. `=cmd|'/c calc'!A1`). OWASP fix: prefix with a quote.
-_FORMULA_TRIGGERS = ("=", "+", "-", "@", "\t", "\r", "\n")
-
-
 # Characters a worksheet cannot hold (C0 controls except tab/newline/CR); openpyxl raises on
 # them, which failed the whole export for one stray character in old data.
 _ILLEGAL_XML_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 
 def _defang_formula_text(s: str) -> str:
-    """Drop characters a worksheet can't hold, then prefix with a quote if s starts with a
-    formula trigger (checks both the raw and whitespace-stripped first char — Excel trims
-    leading spaces)."""
-    if not s:
-        return s
-    s = _ILLEGAL_XML_CHARS.sub("", s)
-    if not s:
-        return s
-    stripped = s.lstrip()
-    if s[0] in _FORMULA_TRIGGERS or (stripped and stripped[0] in _FORMULA_TRIGGERS):
-        return "'" + s
-    return s
+    """Drop characters a worksheet can't hold, then defang a leading formula trigger."""
+    return defang_formula(_ILLEGAL_XML_CHARS.sub("", s)) if s else s
 
 
 def _ensure_openpyxl() -> None:

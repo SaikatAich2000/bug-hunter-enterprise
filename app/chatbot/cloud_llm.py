@@ -208,11 +208,6 @@ def metrics_snapshot() -> dict[str, int]:
     return dict(_metrics)
 
 
-def _reset_metrics_for_test() -> None:
-    """Clear the counters. Test hook only."""
-    _metrics.clear()
-
-
 # Circuit breaker: after both providers fail, skip cloud calls for a short
 # window rather than paying a round-trip on every message. The rule-based
 # layers keep answering during the cooldown.

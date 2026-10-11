@@ -265,7 +265,7 @@ def register(session_factory) -> None:
         event.listen(session_factory, "before_flush", _before_flush)
 
 
-def _before_flush(session: Session, flush_context, instances) -> None:
+def _before_flush(session: Session, _flush_context, _instances) -> None:
     from app.models import Bug
 
     new_items = [o for o in session.new if isinstance(o, Bug)]

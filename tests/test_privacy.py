@@ -25,8 +25,12 @@ def _seed_personal_data(c, email):
     """One row of everything the export promises, for the user ``email`` of the client ``c``."""
     from app.database import SessionLocal
     from app.models import (
-        ChatConversation, ChatMessage, EmailChangeRequest, Invitation, Notification,
-        NotificationPreference, User,
+        ChatConversation,
+        ChatMessage,
+        EmailChangeRequest,
+        Invitation,
+        Notification,
+        User,
     )
 
     pid = c.get("/api/projects").json()[0]["id"]
@@ -89,7 +93,15 @@ def test_export_of_one_user_never_includes_a_colleagues_personal_rows(client):
 def _counts():
     from app.database import SessionLocal
     from app.models import (
-        Activity, Bug, Comment, Invitation, Organization, Project, SavedView, User, Webhook,
+        Activity,
+        Bug,
+        Comment,
+        Invitation,
+        Organization,
+        Project,
+        SavedView,
+        User,
+        Webhook,
     )
 
     with SessionLocal() as db:

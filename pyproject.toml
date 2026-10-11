@@ -41,16 +41,6 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# These standalone Sleuth test modules MUST set DATABASE_URL / SESSION_SECRET /
-# BOOTSTRAP_* in os.environ BEFORE importing any app module, so their app
-# imports are deliberately below module-level setup. E402 is correct there, not
-# a defect. Run them directly (`python tests/test_sleuth_parser.py`) or via pytest.
-"tests/test_sleuth_parser.py" = ["E402"]
-"tests/test_sleuth_safety.py" = ["E402"]
-"tests/test_sleuth_actions.py" = ["E402"]
-"tests/test_sleuth_bulk.py" = ["E402"]
-"tests/test_sleuth_classifier.py" = ["E402"]
-"tests/test_sleuth_comprehensive.py" = ["E402"]
 # Browser suites import Playwright only after pytest.importorskip.
 "tests/test_e2e_browser.py" = ["E402"]
 # Imports the main suite's fixtures and overrides some of them (server, open_page).

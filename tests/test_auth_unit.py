@@ -94,7 +94,7 @@ def test_permission_predicates(fn, admin, manager, user):
 
 def test_can_edit_bug_per_type():
     # Regular bugs are open to all roles; Requirements and Tasks are manager-or-above.
-    assert auth.can_edit_bug(_u("user"), None, [], "Bug") is True
-    assert auth.can_edit_bug(_u("user"), None, [], "Requirement") is False
-    assert auth.can_edit_bug(_u("manager"), None, [], "Task") is True
-    assert auth.can_edit_bug(_u("admin"), None, [], "Requirement") is True
+    assert auth.can_edit_bug(_u("user"), "Bug") is True
+    assert auth.can_edit_bug(_u("user"), "Requirement") is False
+    assert auth.can_edit_bug(_u("manager"), "Task") is True
+    assert auth.can_edit_bug(_u("admin"), "Requirement") is True

@@ -1,12 +1,28 @@
-"""Pytest fixtures: hermetic temp-SQLite app; client (anon), admin_client, user_client."""
+"""Pytest harness: the app is imported once per session and the database is reset per test.
+
+Re-importing app.* for every test leaked roughly 12 MB per test (engines, mappers,
+routers) and cost most of the suite's wall-clock. Instead:
+
+* the environment is pinned before anything imports app.*;
+* one temp SQLite file (or one throwaway PostgreSQL database when
+  BH_TEST_DB=postgres and BH_TEST_POSTGRES_URL are set) serves the whole process;
+* ``_fresh_db`` truncates every table and ``client``/``db_session`` re-run the
+  normal startup, so each test sees a freshly installed instance;
+* ``_isolate`` rolls module-level state (rate limiters, caches, singletons), the
+  Settings class and sys.modules back to their post-import baseline, so tests
+  that purge or reload app.* themselves cannot leak into their neighbours.
+
+xdist workers each load this file, so each gets its own database.
+"""
 from __future__ import annotations
 
-import faulthandler
+import atexit
 import os
-import signal
+import shutil
 import sys
-import threading
-import time
+import tempfile
+import uuid
+from collections import deque
 from pathlib import Path
 
 import pytest
@@ -15,21 +31,22 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+pytest_plugins = ["tests.forensics_plugin"]
+
+BOOTSTRAP_EMAIL = "admin@test.local"
+BOOTSTRAP_PASSWORD = "Admin1234"
+
 
 def _test_app_version() -> str:
-    """Resolve APP_VERSION for the suite without hardcoding a release number.
+    """APP_VERSION from the environment or .env, else a clearly non-release sentinel.
 
-    Precedence: the real environment/.env value if present (so tests exercise
-    the same version the app ships), else a clearly non-release sentinel. Tests
-    must never assert a literal product version - the release-hygiene tests
-    compare against the live settings value instead.
+    Tests compare against the live setting and never assert a literal release number.
     """
     value = os.environ.get("APP_VERSION", "").strip()
     if value:
         return value
-    env_file = ROOT / ".env"
     try:
-        for line in env_file.read_text(encoding="utf-8").splitlines():
+        for line in (ROOT / ".env").read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line.startswith("APP_VERSION="):
                 value = line.split("=", 1)[1].strip().strip("\"'")
@@ -41,321 +58,355 @@ def _test_app_version() -> str:
 
 
 TEST_APP_VERSION = _test_app_version()
-# Modules that import app.main at collection time (before any fixture runs)
-# must see a version too, so the suite never depends on a developer's .env.
-os.environ.setdefault("APP_VERSION", TEST_APP_VERSION)
 
-# Hard-set (not setdefault): config.py auto-loads .env, and cloud layers must stay off in CI.
-for _flag in (
-    "SLEUTH_CLOUD_ENABLED",
-    "SLEUTH_RETRIEVAL_ENABLED",
-    "SLEUTH_VERIFY_ANSWERS",
-    "SLEUTH_AGENT_ENABLED",
-    "SLEUTH_EVAL_ENABLED",
-    "SLEUTH_RAG_ENABLED",
-):
-    os.environ[_flag] = "0"
-
-# Fast bcrypt for the suite: hashing at production cost (rounds=12) burns most
-# of CI's wall-clock (~0.3-0.6s per hash, hundreds of hashes). The app reads
-# BCRYPT_TEST_ROUNDS dynamically at hash time (capped at 12), and verify works
-# against any cost, so existing stored hashes stay valid.
-os.environ["BCRYPT_TEST_ROUNDS"] = "4"
-
-# Digest off: when on, immediate notify_* emails defer to the batch job.
-os.environ["EMAIL_DIGEST_ENABLED"] = "false"
-
-# SigNoz export must never fire from the suite (endpoint would be a live collector).
-# load_dotenv uses override=False, so this hard-set wins over .env.
-os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = ""
-# Keep the console format stable regardless of a developer's .env (LOG_FORMAT=json).
-os.environ["LOG_FORMAT"] = "text"
+_SESSION_DIR = Path(tempfile.mkdtemp(prefix="bh-tests-"))
+_PG_ADMIN_URL = os.environ.get("BH_TEST_POSTGRES_URL", "")
+_USE_POSTGRES = os.environ.get("BH_TEST_DB", "").lower() == "postgres" and bool(_PG_ADMIN_URL)
+_PG_DB_NAME = f"bh_test_{uuid.uuid4().hex[:10]}"
 
 
-# ============================================================================
-# CI forensics harness ("CI black box"): off by default, armed in CI via
-#   CI_TEST_FORENSICS=1 pytest ...
-#
-# Two output channels with different jobs:
-#   * stdout (streamed live into the Actions log) -- LOW VOLUME, ACTIONABLE
-#     only: a heartbeat that fires *only* while a single test has outlived the
-#     heartbeat interval, one completion line for a failed or slow test, a
-#     one-line session summary, and the SIGTERM/SIGABRT thread dump a cancelled
-#     runner produces. A healthy run prints a handful of lines, not one pair
-#     per test (the old per-test pair was ~4,800 lines and buried the real
-#     signal).
-#   * ci-forensics.log -- FULL per-test detail, one file per pytest process
-#     (CI_TEST_FORENSICS_LOG picks the path), uploaded as an artifact. A single
-#     reused handle is opened lazily, so an event is a write, not an
-#     open/write/close cycle.
-#
-# Why not rely on junit.xml? When the runner is killed, the pytest process
-# never finishes, so junit.xml/coverage.xml are never flushed to disk.
-# Streaming to stdout keeps the evidence in the Actions log either way.
-# ============================================================================
-_FORENSICS_ENABLED = os.environ.get("CI_TEST_FORENSICS", "") == "1"
-_FORENSICS_LOG = Path(
-    os.environ.get("CI_TEST_FORENSICS_LOG", "ci-forensics.log")
-).resolve()
-_FORENSICS_HEARTBEAT_SECONDS = max(
-    15, int(os.environ.get("CI_TEST_FORENSICS_HEARTBEAT", "60") or 60)
-)
-_FORENSICS_SLOW_SECONDS = max(
-    30, int(os.environ.get("CI_TEST_FORENSICS_SLOW", "30") or 30)
-)
-_forensics_lock = threading.Lock()
-_forensics_current: dict[str, object] = {}
-_forensics_heartbeat_stop = threading.Event()
-_forensics_handle = None
-_forensics_totals = {"tests": 0, "failed": 0, "slow": 0, "slowest": 0.0, "slowest_id": "-"}
+def _create_postgres_database() -> str:
+    from sqlalchemy import create_engine, text
+
+    admin = create_engine(_PG_ADMIN_URL, isolation_level="AUTOCOMMIT")
+    with admin.connect() as conn:
+        conn.execute(text(f'CREATE DATABASE "{_PG_DB_NAME}"'))
+    admin.dispose()
+    return f"{_PG_ADMIN_URL.rpartition('/')[0]}/{_PG_DB_NAME}"
 
 
-def _forensics_log_line(line: str) -> None:
-    """Append one line to the forensics log through a single reused handle."""
-    global _forensics_handle
-    try:
-        if _forensics_handle is None or _forensics_handle.closed:
-            _FORENSICS_LOG.parent.mkdir(parents=True, exist_ok=True)
-            _forensics_handle = _FORENSICS_LOG.open("a", encoding="utf-8", buffering=1)
-        _forensics_handle.write(line + "\n")
-    except (OSError, ValueError):
-        pass
+def _drop_postgres_database() -> None:
+    from sqlalchemy import create_engine, text
+
+    admin = create_engine(_PG_ADMIN_URL, isolation_level="AUTOCOMMIT")
+    with admin.connect() as conn:
+        conn.execute(text(f'DROP DATABASE IF EXISTS "{_PG_DB_NAME}" WITH (FORCE)'))
+    admin.dispose()
 
 
-def _forensics_close() -> None:
-    """Flush and close the forensics log (called at session teardown)."""
-    global _forensics_handle
-    try:
-        if _forensics_handle is not None and not _forensics_handle.closed:
-            _forensics_handle.flush()
-            _forensics_handle.close()
-    except (OSError, ValueError):
-        pass
-    _forensics_handle = None
+# Hard-set rather than setdefault: config.py loads .env, and the suite must never
+# depend on a developer's local settings (cloud layers, SigNoz export, bcrypt cost).
+_TEST_ENV = {
+    "DATABASE_URL": (
+        _create_postgres_database() if _USE_POSTGRES else f"sqlite:///{(_SESSION_DIR / 'test.db').as_posix()}"
+    ),
+    "EMAIL_BACKEND": "disabled",
+    "SESSION_SECRET": "test_secret_for_tests_only",
+    "BOOTSTRAP_ADMIN_EMAIL": BOOTSTRAP_EMAIL,
+    "BOOTSTRAP_ADMIN_PASSWORD": BOOTSTRAP_PASSWORD,
+    "BOOTSTRAP_ADMIN_NAME": "Test Admin",
+    "APP_NAME": "Bug Hunter",
+    "APP_VERSION": TEST_APP_VERSION,
+    "PASSWORD_BREACH_CHECK_ENABLED": "false",  # no real HaveIBeenPwned calls
+    "WEB_PUSH_ENABLED": "false",
+    "AUTO_LOGIN_ENABLED": "false",  # most tests assume normal login gating
+    # Sign-up is off by default in the product; the suite's helpers create organizations
+    # through it. Verification has its own tests (tests/test_identity.py) that switch it on.
+    "ALLOW_PUBLIC_SIGNUP": "true",
+    "EMAIL_VERIFICATION_REQUIRED": "false",
+    "SLEUTH_CLOUD_ENABLED": "0",
+    "SLEUTH_RETRIEVAL_ENABLED": "0",
+    "SLEUTH_VERIFY_ANSWERS": "0",
+    "SLEUTH_AGENT_ENABLED": "0",
+    "SLEUTH_EVAL_ENABLED": "0",
+    "SLEUTH_RAG_ENABLED": "0",
+    "SLEUTH_LLM_MODEL_PATH": str(_SESSION_DIR / "no-model.gguf"),  # keeps the local LLM unavailable
+    "BCRYPT_TEST_ROUNDS": "4",  # production cost would dominate wall-clock
+    "EMAIL_DIGEST_ENABLED": "false",  # when on, notify_* emails defer to the batch job
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "",  # never reach a live collector
+    "LOG_FORMAT": "text",
+}
+os.environ.update(_TEST_ENV)
 
-
-def _forensics_emit(kind: str, message: str, stream: bool = True) -> None:
-    """Record one timestamped line; echo it to stdout only when stream=True.
-
-    stream=False keeps per-test bookkeeping out of the job log while the full
-    detail still lands in the artifact.
-    """
-    stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
-    line = f"[{stamp}Z] [ci-forensics pid={os.getpid()}] {kind}: {message}"
-    _forensics_log_line(line)
-    if not stream:
-        return
-    try:
-        print(line, flush=True)
-    except OSError:
-        pass
-
-
-def _forensics_heartbeat() -> None:
-    """Emit a line ONLY while a single test has outlived the heartbeat interval.
-
-    A healthy suite never trips this (every test finishes inside the window),
-    so the job log stays quiet; a wedged test produces one line per interval
-    naming it and how long it has held the worker.
-    """
-    while not _forensics_heartbeat_stop.wait(_FORENSICS_HEARTBEAT_SECONDS):
-        with _forensics_lock:
-            test_id = _forensics_current.get("test")
-            since = _forensics_current.get("since")
-        if not test_id or since is None:
-            continue
-        held = time.monotonic() - float(since)
-        if held < _FORENSICS_HEARTBEAT_SECONDS:
-            continue
-        _forensics_emit("heartbeat", f"test still running after {held:.0f}s: {test_id}")
-
-
-def _forensics_on_signal(signum: int, _frame) -> None:  # pragma: no cover
-    """Trap: dump every thread's stack, then let the default action proceed."""
-    try:
-        name = signal.Signals(signum).name
-    except (AttributeError, ValueError):
-        name = str(signum)
-    _forensics_emit("signal", f"received {name}; dumping all thread stacks")
-    try:
-        faulthandler.dump_traceback(file=sys.stderr)
-    except (OSError, ValueError):
-        pass
-    # Re-raise with the default disposition so the runner still sees the
-    # real exit behaviour (143 on SIGTERM, etc.) instead of a silent swallow.
-    signal.signal(signum, signal.SIG_DFL)
-    try:
-        os.kill(os.getpid(), signum)
-    except OSError:
-        pass
-
-
-def pytest_configure(config):
-    if not _FORENSICS_ENABLED:
-        return
-    for signum in (signal.SIGTERM, signal.SIGABRT):
-        try:
-            # faulthandler first: it needs the raw frames at kill time.
-            # (Guarded with getattr: python -X faulthandler pre-imports the
-            # module early, which can surface a partially-initialized copy
-            # missing 'register' on some interpreters.)
-            faulthandler_register = getattr(faulthandler, "register", None)
-            if callable(faulthandler_register):
-                faulthandler_register(signum, file=sys.stderr, all_threads=True)
-            previous = signal.getsignal(signum)
-            if callable(previous):
-
-                def _chained(signum_inner, frame, _prev=previous):
-                    _forensics_on_signal(signum_inner, frame)
-                    _prev(signum_inner, frame)
-
-                signal.signal(signum, _chained)
-            else:
-                signal.signal(signum, _forensics_on_signal)
-        except (OSError, ValueError, RuntimeError):
-            pass
-    _forensics_heartbeat_stop.clear()
-    worker = threading.Thread(
-        target=_forensics_heartbeat, name="ci-forensics-heartbeat", daemon=True
+# Settings are read once at import, but a few modules re-read these per call, and
+# unit tests without a fixture expect the developer's own values. So they are set
+# for the import and re-applied by `_fresh_db`, not left in the environment.
+_FIXTURE_ENV = {
+    k: _TEST_ENV[k]
+    for k in (
+        "DATABASE_URL", "EMAIL_BACKEND", "SESSION_SECRET", "BOOTSTRAP_ADMIN_EMAIL",
+        "BOOTSTRAP_ADMIN_PASSWORD", "BOOTSTRAP_ADMIN_NAME", "APP_NAME",
+        "PASSWORD_BREACH_CHECK_ENABLED", "WEB_PUSH_ENABLED", "AUTO_LOGIN_ENABLED",
     )
-    worker.start()
-    # stream=False: with one pytest process per test file this line would
-    # otherwise repeat ~105 times. The artifact keeps the process boundaries.
-    _forensics_emit(
-        "session-start",
-        f"pid={os.getpid()} heartbeat={_FORENSICS_HEARTBEAT_SECONDS}s "
-        f"slow-threshold={_FORENSICS_SLOW_SECONDS}s log={_FORENSICS_LOG}",
-        stream=False,
-    )
+}
 
 
-def pytest_unconfigure(config):
-    if not _FORENSICS_ENABLED:
-        return
-    _forensics_heartbeat_stop.set()
-    _forensics_emit("session-finish", "pytest session teardown reached", stream=False)
-    totals = _forensics_totals
-    # The one line that replaces ~4,800 per-test stdout lines.
-    _forensics_emit(
-        "session-summary",
-        f"tests={totals['tests']} failed={totals['failed']} "
-        f"slow(>={_FORENSICS_SLOW_SECONDS}s)={totals['slow']} "
-        f"slowest={totals['slowest_id']} ({totals['slowest']:.1f}s)",
-    )
-    _forensics_close()
-
-
-@pytest.hookimpl(hookwrapper=True)
-def pytest_runtest_protocol(item, nextitem):
-    if not _FORENSICS_ENABLED:
-        yield
-        return
-    test_id = getattr(item, "nodeid", str(item))
-    started = time.monotonic()
-    with _forensics_lock:
-        _forensics_current["test"] = test_id
-        _forensics_current["since"] = started
-    # Artifact only: ~2,200 of these per run is pure noise in the job log.
-    _forensics_emit("test-start", test_id, stream=False)
-    try:
-        yield
-    finally:
-        # Phase outcomes recorded by pytest_runtest_logreport below.
-        failed = [
-            phase
-            for phase in ("setup", "call", "teardown")
-            if _forensics_reports.pop((test_id, phase), False)
-        ]
-        elapsed = time.monotonic() - started
-        slow = elapsed >= _FORENSICS_SLOW_SECONDS
-        with _forensics_lock:
-            _forensics_current.pop("test", None)
-            _forensics_current.pop("since", None)
-            _forensics_totals["tests"] += 1
-            _forensics_totals["slow"] += 1 if slow else 0
-            _forensics_totals["failed"] += 1 if failed else 0
-            if elapsed > _forensics_totals["slowest"]:
-                _forensics_totals["slowest"] = elapsed
-                _forensics_totals["slowest_id"] = test_id
-        _forensics_emit(
-            f"test-end {'FAILED:' + ','.join(failed) if failed else 'ok'} "
-            f"{elapsed:.1f}s{' SLOW' if slow else ''}",
-            test_id,
-            # Only the interesting tests reach stdout.
-            stream=bool(failed) or slow,
-        )
-
-
-_forensics_reports: dict[tuple[str, str], bool] = {}
-
-
-@pytest.hookimpl
-def pytest_runtest_logreport(report) -> None:
-    """Record each phase outcome; pytest_runtest_protocol reads it on test-end.
-
-    (A plain hook, not a wrapper: it fires exactly when the setup/call/
-    teardown report object exists, so no pluggy ordering pitfalls.)
-    """
-    if not _FORENSICS_ENABLED:
-        return
-    try:
-        _forensics_reports[(report.nodeid, report.when)] = bool(
-            getattr(report, "failed", False)
-        )
-    except Exception:  # never break reporting because of forensics
-        pass
-
-
-BOOTSTRAP_EMAIL = "admin@test.local"
-BOOTSTRAP_PASSWORD = "Admin1234"
-
-
-@pytest.fixture(autouse=True)
-def dispose_database_engine():
-    """Close pooled connections left by hermetic app re-imports."""
-    yield
+@atexit.register
+def _cleanup_session_resources() -> None:
     database = sys.modules.get("app.database")
     if database is not None:
         database.engine.dispose()
+    if _USE_POSTGRES:
+        try:
+            _drop_postgres_database()
+        except Exception:  # best effort: a CI service container is discarded anyway
+            pass
+    shutil.rmtree(_SESSION_DIR, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Baseline capture and rollback of in-process state
+# ---------------------------------------------------------------------------
+_CONTAINERS = (dict, list, set, deque)
+_SCALARS = (int, float, str, bytes, bool, type(None))
+_baseline: dict = {}
+_MISSING = object()
+
+
+def _copy_container(value):
+    return value.copy()
+
+
+def _restore_container(live, snapshot) -> None:
+    if isinstance(live, dict):
+        live.clear()
+        live.update(snapshot)
+    elif isinstance(live, list):
+        live[:] = snapshot
+    elif isinstance(live, set):
+        live.clear()
+        live.update(snapshot)
+    else:  # deque
+        live.clear()
+        live.extend(snapshot)
+
+
+def _is_app_instance(value) -> bool:
+    cls = type(value)
+    return (
+        cls.__module__.startswith("app.")
+        and hasattr(value, "__dict__")
+        and not isinstance(value, type)
+    )
+
+
+def _capture_module_state(module) -> dict:
+    """Containers and scalars bound at module level, plus containers on app-owned singletons."""
+    state: dict = {
+        "bindings": {k: v for k, v in vars(module).items() if not k.startswith("__")},
+        "containers": {}, "scalars": {}, "objects": {},
+    }
+    for name, value in list(vars(module).items()):
+        if name.startswith("__"):
+            continue
+        if isinstance(value, _CONTAINERS):
+            state["containers"][name] = (value, _copy_container(value))
+        elif isinstance(value, _SCALARS):
+            state["scalars"][name] = value
+        elif _is_app_instance(value):
+            attrs = {
+                k: (v, _copy_container(v))
+                for k, v in list(vars(value).items())
+                if isinstance(v, _CONTAINERS)
+            }
+            scalars = {k: v for k, v in vars(value).items() if isinstance(v, _SCALARS)}
+            if attrs or scalars:
+                state["objects"][name] = (value, attrs, scalars)
+    return state
+
+
+def _restore_pairs(pairs: dict) -> None:
+    for live, snapshot in pairs.values():
+        try:
+            if live != snapshot:
+                _restore_container(live, snapshot)
+        except Exception:  # elements with exotic __eq__: restore unconditionally
+            _restore_container(live, snapshot)
+
+
+def _restore_module_state(module, state: dict) -> None:
+    # Undoes importlib.reload() and direct `module.attr = fake` assignments.
+    for name, value in state["bindings"].items():
+        if vars(module).get(name, _MISSING) is not value:
+            setattr(module, name, value)
+    _restore_pairs(state["containers"])
+    for name, value in state["scalars"].items():
+        if vars(module).get(name, value) != value:
+            setattr(module, name, value)
+    for obj, attrs, scalars in state["objects"].values():
+        _restore_pairs(attrs)
+        for name, value in scalars.items():
+            if vars(obj).get(name, value) != value:
+                setattr(obj, name, value)
+
+
+def _import_all_app_modules() -> None:
+    """Import every app module up front so the baseline covers lazily-imported ones."""
+    import importlib
+    import pkgutil
+
+    import app
+
+    for info in pkgutil.walk_packages(app.__path__, "app."):
+        if ".static" in info.name:
+            continue
+        try:
+            importlib.import_module(info.name)
+        except Exception:  # optional-dependency modules may legitimately fail to import
+            pass
+
+
+def _settings_snapshot(settings_cls) -> dict:
+    return {
+        k: v for k, v in vars(settings_cls).items()
+        if not k.startswith("__") and not isinstance(v, (property, classmethod, staticmethod))
+        and not callable(v)
+    }
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _app_runtime():
+    """Import the app once and record the baseline every test is rolled back to."""
+    import app.main as main  # noqa: F401  (side effect: builds the app against the session DB)
+
+    _import_all_app_modules()
+    for key in _FIXTURE_ENV:
+        os.environ.pop(key, None)
+    from app.config import Settings, get_settings
+
+    _baseline["modules"] = {
+        name: mod for name, mod in sys.modules.items() if name == "app" or name.startswith("app.")
+    }
+    _baseline["state"] = {
+        name: _capture_module_state(mod) for name, mod in _baseline["modules"].items()
+    }
+    _baseline["settings_cls"] = Settings
+    _baseline["settings_attrs"] = _settings_snapshot(Settings)
+    _baseline["settings_obj"] = get_settings()
+    _baseline["settings_obj_dict"] = dict(vars(get_settings()))
+    _baseline["overrides"] = dict(main.app.dependency_overrides)
+    _baseline["routes"] = list(main.app.router.routes)
+    yield
+    _baseline.clear()
+
+
+def _restore_sys_modules() -> None:
+    """Undo tests that purge or re-import app.* themselves, disposing the engines they created."""
+    live = {n: m for n, m in sys.modules.items() if n == "app" or n.startswith("app.")}
+    baseline = _baseline["modules"]
+    if all(live.get(n) is m for n, m in baseline.items()) and len(live) == len(baseline):
+        return
+    for name, mod in live.items():
+        if baseline.get(name) is not mod and name == "app.database":
+            try:
+                mod.engine.dispose()
+            except Exception:
+                pass
+    for name in live:
+        if name not in baseline:
+            del sys.modules[name]
+    for name, mod in baseline.items():
+        sys.modules[name] = mod
+        parent, _, child = name.rpartition(".")
+        if parent:
+            setattr(baseline[parent], child, mod)
+
+
+def _restore_settings() -> None:
+    cls = _baseline["settings_cls"]
+    saved = _baseline["settings_attrs"]
+    for key, value in saved.items():
+        if vars(cls).get(key, value) is not value:
+            setattr(cls, key, value)
+    for key in set(_settings_snapshot(cls)) - set(saved):
+        delattr(cls, key)
+    # Tests that call get_settings.cache_clear() would otherwise leave later tests
+    # patching one Settings instance while modules that captured another keep reading
+    # it; pin the cache back to the baseline instance (and drop attribute shadows
+    # monkeypatch leaves on it when it undoes an instance-level patch).
+    obj = _baseline["settings_obj"]
+    obj_dict = _baseline["settings_obj_dict"]
+    if vars(obj) != obj_dict:
+        vars(obj).clear()
+        vars(obj).update(obj_dict)
+    config = _baseline["modules"]["app.config"]
+    if config.get_settings() is not obj:
+        config.get_settings.cache_clear()
+        factory = config.Settings
+        config.Settings = lambda: obj  # get_settings() resolves Settings at call time
+        try:
+            config.get_settings()
+        finally:
+            config.Settings = factory
+
+
+@pytest.fixture(autouse=True)
+def _isolate(_app_runtime):
+    """Roll every kind of leaked in-process state back after each test."""
+    yield
+    _restore_sys_modules()
+    for name, mod in _baseline["modules"].items():
+        _restore_module_state(mod, _baseline["state"][name])
+    _restore_settings()
+    main = _baseline["modules"]["app.main"]
+    main.app.dependency_overrides.clear()
+    main.app.dependency_overrides.update(_baseline["overrides"])
+    if main.app.router.routes != _baseline["routes"]:  # a test registered a throwaway route
+        main.app.router.routes[:] = _baseline["routes"]
+        main.app.openapi_schema = None
+    _baseline["modules"]["app.database"].engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Database reset and the public fixtures
+# ---------------------------------------------------------------------------
+def _truncate_all_tables(engine) -> None:
+    from sqlalchemy import inspect, text
+
+    tables = inspect(engine).get_table_names()
+    if not tables:
+        return
+    if engine.dialect.name == "sqlite":
+        with engine.connect() as conn:
+            conn.exec_driver_sql("PRAGMA foreign_keys = OFF")
+            for table in tables:
+                conn.execute(text(f'DELETE FROM "{table}"'))
+            if conn.execute(text("SELECT 1 FROM sqlite_master WHERE name = 'sqlite_sequence'")).first():
+                conn.execute(text("DELETE FROM sqlite_sequence"))
+            conn.commit()
+            conn.exec_driver_sql("PRAGMA foreign_keys = ON")
+    else:
+        quoted = ", ".join(f'"{t}"' for t in tables)
+        with engine.begin() as conn:
+            conn.execute(text(f"TRUNCATE TABLE {quoted} RESTART IDENTITY CASCADE"))
+
+
+def _drop_foreign_tables(engine, base) -> None:
+    """Drop tables the models do not own, so a legacy-schema test cannot leak into the next."""
+    from sqlalchemy import inspect, text
+
+    owned = set(base.metadata.tables) | {"app_migrations"}
+    extra = [t for t in inspect(engine).get_table_names() if t not in owned]
+    if not extra:
+        return
+    suffix = "" if engine.dialect.name == "sqlite" else " CASCADE"
+    with engine.connect() as conn:
+        if engine.dialect.name == "sqlite":
+            conn.exec_driver_sql("PRAGMA foreign_keys = OFF")
+        for table in extra:
+            conn.execute(text(f'DROP TABLE IF EXISTS "{table}"{suffix}'))
+        conn.commit()
+        if engine.dialect.name == "sqlite":
+            conn.exec_driver_sql("PRAGMA foreign_keys = ON")
 
 
 @pytest.fixture
-def client(tmp_path, monkeypatch):
-    db_file = tmp_path / "test.db"
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_file}")
-    monkeypatch.setenv("EMAIL_BACKEND", "disabled")
-    monkeypatch.setenv("SESSION_SECRET", "test_secret_for_tests_only")
-    monkeypatch.setenv("BOOTSTRAP_ADMIN_EMAIL", BOOTSTRAP_EMAIL)
-    monkeypatch.setenv("BOOTSTRAP_ADMIN_PASSWORD", BOOTSTRAP_PASSWORD)
-    monkeypatch.setenv("BOOTSTRAP_ADMIN_NAME", "Test Admin")
-    monkeypatch.setenv("APP_NAME", "Bug Hunter")
-    monkeypatch.setenv("APP_VERSION", TEST_APP_VERSION)
-    # No real HaveIBeenPwned calls; breach tests monkeypatch app.password_breach.
-    monkeypatch.setenv("PASSWORD_BREACH_CHECK_ENABLED", "false")
-    # Push off by default so no real FCM calls; push tests opt in via monkeypatch.
-    monkeypatch.setenv("WEB_PUSH_ENABLED", "false")
-    # Off by default regardless of the real .env — most tests assume normal
-    # login-gating; auto-login tests opt in via monkeypatch.
-    monkeypatch.setenv("AUTO_LOGIN_ENABLED", "false")
-    # Sign-up is off by default in the product; the suite's helpers create orgs through it.
-    # Verification has its own tests (tests/test_identity.py) that switch it on.
-    monkeypatch.setenv("ALLOW_PUBLIC_SIGNUP", "true")
-    monkeypatch.setenv("EMAIL_VERIFICATION_REQUIRED", "false")
+def _fresh_db(_isolate, monkeypatch):
+    """Empty every table (schema kept) so the test sees a freshly installed database."""
+    from app.database import Base, engine
 
-    # Dispose the previous engine before re-importing app modules so pooled
-    # SQLite connections are closed when each isolated test database changes.
-    old_database = sys.modules.get("app.database")
-    if old_database is not None:
-        old_database.engine.dispose()
+    for key, value in _FIXTURE_ENV.items():
+        monkeypatch.setenv(key, value)
 
-    # Re-import so the SQLAlchemy engine picks up the overridden DATABASE_URL.
-    for mod in list(sys.modules):
-        if mod == "app" or mod.startswith("app."):
-            del sys.modules[mod]
+    engine.dispose()  # drop pooled connections a previous test may have left mid-transaction
+    _drop_foreign_tables(engine, Base)  # e.g. legacy tables a migration test created
+    Base.metadata.create_all(bind=engine)  # recreate anything a test dropped
+    _truncate_all_tables(engine)
+    yield
 
-    from app.config import get_settings
-    get_settings.cache_clear()  # type: ignore[attr-defined]
 
+@pytest.fixture
+def client(_fresh_db):
     from fastapi.testclient import TestClient
 
     from app.main import app
@@ -447,43 +498,11 @@ def user_client(client):
 
 
 @pytest.fixture
-def db_session(tmp_path, monkeypatch):
+def db_session(_fresh_db):
     """Direct database session for testing model/helper functions (no API layer)."""
-    db_file = tmp_path / "test_db_session.db"
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_file}")
-    monkeypatch.setenv("EMAIL_BACKEND", "disabled")
-    monkeypatch.setenv("SESSION_SECRET", "test_secret_for_tests_only")
-    monkeypatch.setenv("BOOTSTRAP_ADMIN_EMAIL", BOOTSTRAP_EMAIL)
-    monkeypatch.setenv("BOOTSTRAP_ADMIN_PASSWORD", BOOTSTRAP_PASSWORD)
-    monkeypatch.setenv("BOOTSTRAP_ADMIN_NAME", "Test Admin")
-    monkeypatch.setenv("APP_NAME", "Bug Hunter")
-    monkeypatch.setenv("APP_VERSION", TEST_APP_VERSION)
-    monkeypatch.setenv("PASSWORD_BREACH_CHECK_ENABLED", "false")
-    monkeypatch.setenv("WEB_PUSH_ENABLED", "false")
-    monkeypatch.setenv("AUTO_LOGIN_ENABLED", "false")
-    # Sign-up is off by default in the product; the suite's helpers create orgs through it.
-    # Verification has its own tests (tests/test_identity.py) that switch it on.
-    monkeypatch.setenv("ALLOW_PUBLIC_SIGNUP", "true")
-    monkeypatch.setenv("EMAIL_VERIFICATION_REQUIRED", "false")
-
-    # Dispose the previous engine before replacing app modules and database URL.
-    old_database = sys.modules.get("app.database")
-    if old_database is not None:
-        old_database.engine.dispose()
-
-    # Re-import to pick up overridden env vars
-    for mod in list(sys.modules):
-        if mod == "app" or mod.startswith("app."):
-            del sys.modules[mod]
-
-    from app.config import get_settings
-    get_settings.cache_clear()
-
     from app.database import SessionLocal, init_db
-    
-    # Initialize database schema
+
     init_db()
-    
     db = SessionLocal()
     yield db
     db.close()

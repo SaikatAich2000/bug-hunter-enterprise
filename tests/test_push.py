@@ -3,7 +3,7 @@ Config endpoint, subscribe/unsubscribe, push_to_users, dead-token pruning, reque
 """
 from __future__ import annotations
 
-BOOTSTRAP_EMAIL = "admin@test.local"
+from tests.conftest import BOOTSTRAP_EMAIL
 
 
 # -- helpers -----------------------------------------------------------------
@@ -253,3 +253,20 @@ def test_bulk_delete_fires_push_immediately(admin_client, monkeypatch):
     pushed = [c for c in calls if "yolanda-token" in c["tokens"]]
     assert pushed, calls
     assert "deleted" in pushed[0]["title"].lower()
+
+
+# app/routes/push.py — token already bound to another account
+def test_push_subscribe_rebinds_to_the_new_account(admin_client):
+    # A token bound to one account moves to a second user who presents it.
+    admin_client.post("/api/push/subscribe", json={"token": "shared-token", "platform": "web"})
+    # Create and log in as a second user; reuse the same token.
+    admin_client.post("/api/users", json={
+        "name": "Second", "email": "second@test.local", "role": "user",
+        "password": "User12345",
+    })
+    admin_client.post("/api/auth/logout")
+    admin_client.post("/api/auth/login", json={
+        "email": "second@test.local", "password": "User12345",
+    })
+    r = admin_client.post("/api/push/subscribe", json={"token": "shared-token"})
+    assert r.status_code == 200  # a device switching accounts re-binds its token

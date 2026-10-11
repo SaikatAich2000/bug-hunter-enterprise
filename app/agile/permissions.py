@@ -79,7 +79,7 @@ def require_item_edit(user: User, item) -> None:
     from app.auth import can_edit_bug
 
     item_type = getattr(item, "item_type", None) or "Bug"
-    if not can_edit_bug(user, getattr(item, "reporter_id", None), [], item_type=item_type):
+    if not can_edit_bug(user, item_type=item_type):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"You don't have permission to edit this {item_type.lower()}.",

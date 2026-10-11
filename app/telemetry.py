@@ -47,13 +47,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import threading
 import weakref
 from datetime import datetime, timezone
 from typing import Any
 
-from app.config import _env_bool, _env_float, _env_int
+from app.config import env_bool, env_float, env_int, env_str
 
 _logger = logging.getLogger("bug_hunter.telemetry")
 
@@ -115,34 +114,34 @@ _app_instrumented = False
 
 
 def _endpoint() -> str:
-    return os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip()
+    return env_str("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip()
 
 
 def _insecure() -> bool:
     """Cleartext gRPC unless the endpoint says https:// (or the flag overrides)."""
-    if os.getenv("OTEL_EXPORTER_OTLP_INSECURE", "").strip():
-        return _env_bool("OTEL_EXPORTER_OTLP_INSECURE", True)
+    if env_str("OTEL_EXPORTER_OTLP_INSECURE", "").strip():
+        return env_bool("OTEL_EXPORTER_OTLP_INSECURE", True)
     return not _endpoint().startswith("https://")
 
 
 def _service_name() -> str:
-    return os.getenv("OTEL_SERVICE_NAME", "").strip() or DEFAULT_SERVICE_NAME
+    return env_str("OTEL_SERVICE_NAME", "").strip() or DEFAULT_SERVICE_NAME
 
 
 def _traces_enabled() -> bool:
-    return _env_bool("OTEL_TRACES_ENABLED", True)
+    return env_bool("OTEL_TRACES_ENABLED", True)
 
 
 def _metrics_enabled() -> bool:
-    return _env_bool("OTEL_METRICS_ENABLED", True)
+    return env_bool("OTEL_METRICS_ENABLED", True)
 
 
 def _logs_enabled() -> bool:
-    return _env_bool("OTEL_LOGS_ENABLED", True)
+    return env_bool("OTEL_LOGS_ENABLED", True)
 
 
 def _log_min_level() -> int:
-    name = os.getenv("OTEL_LOG_MIN_LEVEL", "").strip().upper() or DEFAULT_LOG_MIN_LEVEL
+    name = env_str("OTEL_LOG_MIN_LEVEL", "").strip().upper() or DEFAULT_LOG_MIN_LEVEL
     level = logging.getLevelName(name)
     if not isinstance(level, int):
         _logger.warning("Unknown OTEL_LOG_MIN_LEVEL=%r; using %s", name, DEFAULT_LOG_MIN_LEVEL)
@@ -151,14 +150,14 @@ def _log_min_level() -> int:
 
 
 def _excluded_loggers() -> tuple[str, ...]:
-    raw = os.getenv("OTEL_LOG_EXCLUDE_LOGGERS")
+    raw = env_str("OTEL_LOG_EXCLUDE_LOGGERS", None)
     if raw is None:
         return DEFAULT_EXCLUDED_LOGGERS
     return tuple(part.strip() for part in raw.split(",") if part.strip())
 
 
 def _excluded_urls() -> str:
-    raw = os.getenv("OTEL_TRACES_EXCLUDED_URLS")
+    raw = env_str("OTEL_TRACES_EXCLUDED_URLS", None)
     return DEFAULT_EXCLUDED_URLS if raw is None else raw.strip()
 
 
@@ -269,7 +268,7 @@ def configure_console_logging() -> str:
     ``logging.basicConfig`` installed, so the default console output is
     byte-identical to a build without telemetry.
     """
-    fmt = os.getenv("LOG_FORMAT", "text").strip().lower() or "text"
+    fmt = env_str("LOG_FORMAT", "text").strip().lower() or "text"
     if fmt not in ("text", "json"):
         _logger.warning("Unknown LOG_FORMAT=%r; using text", fmt)
         fmt = "text"
@@ -295,7 +294,7 @@ def _exporter_kwargs() -> dict[str, Any]:
         "endpoint": endpoint.split("://", 1)[-1],
         "insecure": _insecure(),
     }
-    headers = os.getenv("OTEL_EXPORTER_OTLP_HEADERS", "").strip()
+    headers = env_str("OTEL_EXPORTER_OTLP_HEADERS", "").strip()
     if headers:
         parsed = [
             (key.strip(), value.strip())
@@ -341,13 +340,13 @@ def _resource():
     from opentelemetry.sdk.resources import Resource
 
     attributes: dict[str, str] = {"service.name": _service_name()}
-    version = os.getenv("OTEL_SERVICE_VERSION", "").strip() or _app_setting("APP_VERSION")
-    environment = os.getenv("OTEL_DEPLOYMENT_ENVIRONMENT", "").strip() or _app_setting("APP_ENV")
+    version = env_str("OTEL_SERVICE_VERSION", "").strip() or _app_setting("APP_VERSION")
+    environment = env_str("OTEL_DEPLOYMENT_ENVIRONMENT", "").strip() or _app_setting("APP_ENV")
     if version:
         attributes["service.version"] = version
     if environment:
         attributes["deployment.environment"] = environment
-    attributes.update(_parse_resource_attributes(os.getenv("OTEL_RESOURCE_ATTRIBUTES", "")))
+    attributes.update(_parse_resource_attributes(env_str("OTEL_RESOURCE_ATTRIBUTES", "")))
     return Resource.create(attributes)
 
 
@@ -359,7 +358,7 @@ def _build_sampler():
         TraceIdRatioBased,
     )
 
-    ratio = min(_env_float("OTEL_TRACES_SAMPLER_ARG", 1.0, minimum=0.0), 1.0)
+    ratio = min(env_float("OTEL_TRACES_SAMPLER_ARG", 1.0, minimum=0.0), 1.0)
     factories = {
         "always_on": lambda: ALWAYS_ON,
         "always_off": lambda: ALWAYS_OFF,
@@ -368,7 +367,7 @@ def _build_sampler():
         "parentbased_always_off": lambda: ParentBased(ALWAYS_OFF),
         "parentbased_traceidratio": lambda: ParentBased(TraceIdRatioBased(ratio)),
     }
-    name = os.getenv("OTEL_TRACES_SAMPLER", "").strip().lower() or "parentbased_always_on"
+    name = env_str("OTEL_TRACES_SAMPLER", "").strip().lower() or "parentbased_always_on"
     if name not in factories:
         _logger.warning(
             "Unknown OTEL_TRACES_SAMPLER=%r; expected one of %s. Using parentbased_always_on.",
@@ -395,7 +394,7 @@ def _setup_metrics(resource):
     from opentelemetry.sdk.metrics import MeterProvider
     from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 
-    interval_ms = _env_int("OTEL_METRICS_EXPORT_INTERVAL_MS", 60000, minimum=1000)
+    interval_ms = env_int("OTEL_METRICS_EXPORT_INTERVAL_MS", 60000, minimum=1000)
     reader = PeriodicExportingMetricReader(_make_metric_exporter(), export_interval_millis=interval_ms)
     provider = MeterProvider(resource=resource, metric_readers=[reader])
     metrics.set_meter_provider(provider)
@@ -452,9 +451,9 @@ def _instrument_libraries() -> None:
     """
     if _logger_provider is not None:
         _instrument_logging_bridge()
-    if _env_bool("OTEL_INSTRUMENT_SQLALCHEMY", True):
+    if env_bool("OTEL_INSTRUMENT_SQLALCHEMY", True):
         _instrument_sqlalchemy()
-    if _env_bool("OTEL_INSTRUMENT_HTTPX", True):
+    if env_bool("OTEL_INSTRUMENT_HTTPX", True):
         _instrument_httpx()
 
 
@@ -484,7 +483,7 @@ def _instrument_logging_bridge() -> None:
     excluded = _excluded_loggers()
     if excluded:
         handler.addFilter(ExcludeLoggersFilter(excluded))
-    if _env_bool("OTEL_LOG_REDACT_SENSITIVE", True):
+    if env_bool("OTEL_LOG_REDACT_SENSITIVE", True):
         handler.addFilter(SensitiveAttributeFilter())
 
 

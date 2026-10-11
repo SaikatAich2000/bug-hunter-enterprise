@@ -303,7 +303,7 @@ def test_judge_text_fails_open(monkeypatch):
 
 def test_judge_text_counts_passed_when_unchanged(monkeypatch):
     from app.chatbot import evals
-    cloud_llm._reset_metrics_for_test()
+    cloud_llm._metrics.clear()
     monkeypatch.setattr(evals, "judge", lambda m, c, t, call_model: {"score": 0.9})
     monkeypatch.setattr(evals, "apply_verdict", lambda t, v, min_score: t)  # no caveat
     assert cloud_llm._judge_text("m", "c", "answer", _settings()) == "answer"
@@ -312,7 +312,7 @@ def test_judge_text_counts_passed_when_unchanged(monkeypatch):
 
 def test_judge_text_counts_unavailable_on_none_verdict(monkeypatch):
     from app.chatbot import evals
-    cloud_llm._reset_metrics_for_test()
+    cloud_llm._metrics.clear()
     monkeypatch.setattr(evals, "judge", lambda m, c, t, call_model: None)
     assert cloud_llm._judge_text("m", "c", "answer", _settings()) == "answer"
     assert cloud_llm.metrics_snapshot().get("judge:unavailable") == 1

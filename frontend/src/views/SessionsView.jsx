@@ -5,6 +5,7 @@
  * are both admin-only. The current session is flagged and its Revoke button
  * is disabled.
  */
+import EmptyGuide from "../onboarding/EmptyGuide";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { toast, toastError } from "../lib/toast";
@@ -102,7 +103,10 @@ export default function SessionsView() {
       </div>
       <div className="sessions-list" id="sessionsList">
         {loaded && sessions.length === 0 ? (
-          <div className="sessions-empty">No active sessions</div>
+          <div className="sessions-empty">
+            No active sessions
+            <EmptyGuide guide="admin" />
+          </div>
         ) : null}
         {sessions.map((s) => (
           <div

@@ -3,7 +3,10 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "Bug Hunter — React 18 + JSX single-page app, built with Vite into app/static. The product version is NOT here: it comes from APP_VERSION in .env (see .env.example).",
+  "engines": {
+    "node": ">=22"
+  },
+  "description": "Bug Hunter — React 19 + JSX single-page app, built with Vite into app/static. The product version is NOT here: it comes from APP_VERSION in .env (see .env.example).",
   "scripts": {
     "dev": "vite",
     "vendor": "node scripts/vendor-firebase.mjs",
@@ -18,29 +21,37 @@
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
     "dompurify": "^3.4.16",
-    "firebase": "^12.14.0",
+    "firebase": "^13.0.0",
     "qrcode-generator": "^1.4.4",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.5",
-    "@testing-library/jest-dom": "^6.4.5",
-    "@testing-library/react": "^14.2.1",
+    "@eslint/js": "^10.0.1",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
     "@testing-library/user-event": "^14.5.2",
-    "@vitejs/plugin-react": "^4.3.4",
-    "@vitest/coverage-v8": "^4.1.11",
+    "@vitejs/plugin-react": "^6.1.2",
+    "@vitest/coverage-v8": "^5.0.3",
     "axe-core": "^4.13.0",
-    "eslint": "^9.39.5",
+    "eslint": "^10.12.0",
     "eslint-plugin-jsx-a11y": "^6.10.2",
     "eslint-plugin-react": "^7.37.5",
     "eslint-plugin-react-hooks": "^7.1.1",
-    "globals": "^17.12.0",
-    "jsdom": "^24.1.0",
-    "vite": "^6.4.3",
-    "vitest": "^4.1.11"
+    "globals": "^17.13.0",
+    "jsdom": "^29.1.1",
+    "vite": "^8.3.4",
+    "vitest": "^5.0.3"
   },
   "overrides": {
-    "@grpc/grpc-js": "^1.14.5"
+    "@grpc/grpc-js": "^1.14.5",
+    "source-map-js": "^1.2.2",
+    "eslint-plugin-react": {
+      "eslint": "$eslint"
+    },
+    "eslint-plugin-jsx-a11y": {
+      "eslint": "$eslint"
+    }
   }
 }

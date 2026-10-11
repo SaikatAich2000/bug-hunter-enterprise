@@ -5,51 +5,22 @@ the filter); the layer never writes; Groq failure falls back to OpenRouter; outb
 """
 from __future__ import annotations
 
-import os
-import sys
-import tempfile
+import pytest
 
+from app import models
+from app.auth import hash_password
+from app.chatbot import cloud_llm, executor
+from app.chatbot.memory import store as memstore
+from app.config import get_settings
+from app.database import Base, SessionLocal, engine
 from tests.conftest import default_org_id
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-_tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-_tmp.close()
-os.environ["DATABASE_URL"] = f"sqlite:///{_tmp.name}"
-os.environ["SESSION_SECRET"] = "test-cloud"
-
-import pytest  # noqa: E402
-
-from app import models  # noqa: E402
-from app.auth import hash_password  # noqa: E402
-from app.chatbot import cloud_llm, executor  # noqa: E402
-from app.chatbot.memory import store as memstore  # noqa: E402
-from app.config import get_settings  # noqa: E402
-from app.database import Base, SessionLocal, engine  # noqa: E402
-
-
-@pytest.fixture(autouse=True)
-def _rebind_app_modules():
-    """Re-bind this file's app.* references to the live generation (conftest purges app.* between tests)."""
-    import importlib
-    g = globals()
-    db_mod = importlib.import_module("app.database")
-    g["Base"], g["engine"], g["SessionLocal"] = (
-        db_mod.Base, db_mod.engine, db_mod.SessionLocal,
-    )
-    g["models"] = importlib.import_module("app.models")
-    g["executor"] = importlib.import_module("app.chatbot.executor")
-    g["cloud_llm"] = importlib.import_module("app.chatbot.cloud_llm")
-    g["memstore"] = importlib.import_module("app.chatbot.memory").store
-    g["hash_password"] = importlib.import_module("app.auth").hash_password
-    g["get_settings"] = importlib.import_module("app.config").get_settings
 
 
 @pytest.fixture
 def db():
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
-    memstore._clear_all_for_test()
+    memstore._sessions.clear()
     s = SessionLocal()
     try:
         admin = models.User(org_id=default_org_id(), name="Admin", email="admin@example.com", role="admin",

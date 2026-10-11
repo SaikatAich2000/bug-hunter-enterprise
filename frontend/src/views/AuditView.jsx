@@ -2,6 +2,7 @@
  * Audit Trail view. Paginates GET /api/audit; filter changes replace the list,
  * "Load older entries" appends, a short page signals end-of-history.
  */
+import EmptyGuide from "../onboarding/EmptyGuide";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { api, apiBlob } from "../lib/api";
 import { saveBlob } from "../lib/download";
@@ -199,7 +200,10 @@ export default function AuditView() {
       </div>
       <div className="audit-list" id="auditList">
         {loaded && rows.length === 0 ? (
-          <p className="no-content">No audit events match</p>
+          <>
+            <p className="no-content">No audit events match</p>
+            <EmptyGuide guide="admin" hint="Creates, updates, deletes and logins appear here as people use the app." />
+          </>
         ) : null}
         {rows.map((r) => <AuditRowView key={r.id} r={r} />)}
         {!drained && rows.length > 0 ? (

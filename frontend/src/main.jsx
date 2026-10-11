@@ -7,6 +7,8 @@ import { AppProvider } from "./state/AppContext";
 import "./styles/styles.css";
 import "./styles/chatbot.css";
 import "./styles/enterprise.css";
+import "./styles/onboarding.css";
+import "./styles/motion.css";
 
 // Theme + collapsed-sidebar state read before first render (CSP blocks inline
 // scripts) — no wrong-theme flash / collapse animation on reload. Guarded:

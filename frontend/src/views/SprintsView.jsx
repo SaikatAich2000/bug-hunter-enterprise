@@ -1,4 +1,6 @@
 /** Sprints: the Scrum workspace of a project. */
+import EmptyGuide from "../onboarding/EmptyGuide";
+import Skeleton from "../components/Skeleton";
 import { useEffect, useState } from "react";
 import { useApp } from "../state/AppContext";
 import BhSelect from "../components/BhSelect";
@@ -53,7 +55,7 @@ function EnableAgile({ projectName, canManage, onEnabled }) {
 }
 
 export default function SprintsView() {
-  const { projects, currentUser, sprintsDeepLinkTab, setSprintsDeepLinkTab } = useApp();
+  const { projects, currentUser, sprintsDeepLinkTab, setSprintsDeepLinkTab, openProjectForm } = useApp();
   const canManage = currentUser.role === "admin" || currentUser.role === "manager";
   const [projectId, setProjectId] = useState(null);
   const [tab, setTab] = useState(() => sprintsDeepLinkTab || "board");
@@ -75,7 +77,10 @@ export default function SprintsView() {
   if (!projects.length) {
     return (
       <section className="view" id="viewSprints">
-        <div className="empty-state">Create a project first to use Sprints.</div>
+        <div className="empty-state">
+          Create a project first to use Sprints.
+          <EmptyGuide guide="sprints" action={canManage ? { label: "New project", onClick: () => openProjectForm() } : null} />
+        </div>
       </section>
     );
   }
@@ -126,12 +131,12 @@ export default function SprintsView() {
         )}
       </div>
 
-      {agile.loading && !agile.settings && <div className="sprints-loading">Loading…</div>}
+      {agile.loading && !agile.settings && <Skeleton lines={4} className="sprints-loading" />}
       {!agile.loading && agile.settings && !enabled && (
         <EnableAgile projectName={project?.name ?? "this project"} canManage={canManage} onEnabled={enable} />
       )}
       {enabled && (
-        <div role="tabpanel" aria-labelledby={`sprints-tab-${tab}`}>
+        <div role="tabpanel" className="agile-tab-panel" key={tab} aria-labelledby={`sprints-tab-${tab}`}>
           {tab === "backlog" && <BacklogPanel {...panelProps} />}
           {tab === "board" && <BoardPanel {...panelProps} />}
           {tab === "hierarchy" && <HierarchyPanel {...panelProps} />}

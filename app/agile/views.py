@@ -104,7 +104,7 @@ def issue_payloads(
             "due_date": item.due_date,
             "updated_at": item.updated_at,
             "version": item.version,
-            "can_edit": can_edit_bug(viewer, item.reporter_id, [], item_type=item.item_type or "Bug"),
+            "can_edit": can_edit_bug(viewer, item_type=item.item_type or "Bug"),
             "column_id": column_of.get(item.status) if column_of is not None else None,
         })
     return out

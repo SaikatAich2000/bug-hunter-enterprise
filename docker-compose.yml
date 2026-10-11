@@ -1,16 +1,4 @@
-# Bug Hunter — fully isolated stack.
-#
-# Designed for a host that already runs other services (including a
-# Postgres on the default port 5432). Everything here lives on its own
-# bridge network and uses a named volume that is unlikely to clash:
-#
-#   • App is exposed on host port 8765 (container 8000)
-#   • Postgres is exposed on host port 55432 (container 5432)
-#   • Network:  bugtracker_net
-#   • Volume:   bugtracker_pgdata
-#
-# Nothing here uses the host's Postgres — the app talks to the
-# `db` service over the internal Docker network only.
+# Isolated stack: own network and volume, app on host port 8765, Postgres on 127.0.0.1:55432.
 
 services:
   db:
@@ -19,20 +7,13 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-bugtracker}
-      # Fail-closed: no known password default. A deployment without
-      # POSTGRES_PASSWORD set must not boot with a guessable credential.
+      # No default: a deployment must never boot with a guessable password.
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required - set it in .env or the platform secret store}
       POSTGRES_DB: ${POSTGRES_DB:-bugtracker}
     volumes:
       - bugtracker_pgdata:/var/lib/postgresql/data
     ports:
-      # Bound to 127.0.0.1 ONLY: the app reaches Postgres over the internal
-      # bugtracker_net network (see DATABASE_URL below), so this mapping exists
-      # purely for local admin/debugging on the host. Binding to localhost keeps
-      # the DB off the LAN/internet regardless of which password is configured.
-      # The host-side port is non-default to avoid colliding with any Postgres
-      # already listening on 5432, and POSTGRES_PASSWORD is fail-closed above
-      # (there is no fallback default).
+      # Loopback only, for local admin; the app reaches the DB over bugtracker_net.
       - "127.0.0.1:55432:5432"
     networks:
       - bugtracker_net
@@ -52,21 +33,14 @@ services:
           cpus: 0.10
           memory: 64M
 
-  # Run a SINGLE app worker (the image's default CMD does). The login/lockout
-  # rate limiters and the in-app email-digest scheduler keep per-process state,
-  # so scaling to multiple workers/replicas weakens the limits and can duplicate
-  # the digest. To scale out, front with a shared limiter (e.g. nginx limit_req)
-  # and run the digest from one place (host cron, or a single scheduler worker).
+  # Keep ONE worker: the rate limiters and the digest scheduler hold per-process state.
   app:
     build:
       context: .
       args:
-        # Lets sites behind a proxy / air-gapped network override the
-        # FROM image without editing the Dockerfile. Default mirrors
-        # the Dockerfile's hard-coded fallback.
+        # Override for proxy or air-gapped registries.
         BASE_IMAGE: ${BASE_IMAGE:-python:3.12-slim}
-    # APP_VERSION is required and comes from .env only — no inline fallback, so
-    # a missing entry fails loudly here instead of silently tagging a wrong image.
+    # Required from .env so a missing version fails loudly instead of tagging a wrong image.
     image: bugtracker_app:${APP_VERSION:?APP_VERSION is required - set it in .env}
     container_name: bugtracker_app
     restart: unless-stopped
@@ -74,28 +48,21 @@ services:
       db:
         condition: service_healthy
     environment:
-      # The app talks to Postgres via the internal Docker DNS name `db`,
-      # not via the host port mapping above.
+      # Via the internal DNS name `db`, not the host port mapping.
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-bugtracker}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required - set it in .env or the platform secret store}@db:5432/${POSTGRES_DB:-bugtracker}
-      # Postgres pool sizing — lower on a very small VM (see .env.example).
       DB_POOL_SIZE: ${DB_POOL_SIZE:-2}
       DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-2}
-      # Hard ceiling on request body size (bytes); rejected with 413 before the
-      # body is read. Raise it for larger file uploads.
+      # Rejected with 413 before the body is read.
       MAX_REQUEST_BODY_BYTES: ${MAX_REQUEST_BODY_BYTES:-62914560}
       APP_NAME: ${APP_NAME:-Bug Hunter}
       APP_VERSION: ${APP_VERSION:?APP_VERSION is required - set it in .env}
-      # Blank = production is signalled by COOKIE_SECURE=true (lighter checks);
-      # APP_ENV=production/staging turns on the full fail-closed gate (https
-      # APP_BASE_URL, secure cookies, real email backend).
+      # production/staging enables the full fail-closed startup checks.
       APP_ENV: ${APP_ENV:-}
-      # /docs, /redoc, /openapi.json in production (always on in development).
       ENABLE_API_DOCS: ${ENABLE_API_DOCS:-false}
-      # Local .env targets direct Python (port 8000); inside Compose the
-      # externally reachable URL is port 8765 unless explicitly overridden.
+      # Compose publishes the app on 8765 (a direct run uses 8000).
       APP_BASE_URL: ${APP_BASE_URL:-http://localhost:8765}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      # SigNoz observability — OTLP/gRPC collector endpoint (blank disables export).
+      # A blank endpoint disables OpenTelemetry export.
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-}
       OTEL_DEPLOYMENT_ENVIRONMENT: ${OTEL_DEPLOYMENT_ENVIRONMENT:-}
@@ -107,55 +74,41 @@ services:
       OTEL_LOG_MIN_LEVEL: ${OTEL_LOG_MIN_LEVEL:-INFO}
       OTEL_LOG_EXCLUDE_LOGGERS: ${OTEL_LOG_EXCLUDE_LOGGERS:-uvicorn.access,watchfiles}
       LOG_FORMAT: ${LOG_FORMAT:-text}
-      # Empty default = same-origin only (the app's secure default). Set to your
-      # concrete origin(s), e.g. https://bugs.example.com, for cross-origin use.
+      # Empty = same-origin only.
       CORS_ORIGINS: ${CORS_ORIGINS:-}
 
-      # Sleuth cloud AI assistant (optional). OFF unless SLEUTH_CLOUD_ENABLED=1
-      # and a key are set in the server's .env. Read from .env via ${...} so
-      # the secret value never lives in this committed file.
+      # Sleuth cloud assistant: off unless enabled with a key in .env.
       SLEUTH_CLOUD_ENABLED: ${SLEUTH_CLOUD_ENABLED:-0}
-      # Primary provider — Groq (OpenAI-compatible). Fallback — OpenRouter.
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       SLEUTH_RAG_ENABLED: ${SLEUTH_RAG_ENABLED:-0}
-      # Read-only grounding / agent / evaluation enhancements (all OFF by
-      # default, each independent). Passed through so enabling them in .env
-      # actually reaches the container.
+      # Independent read-only add-ons, all off by default.
       SLEUTH_RETRIEVAL_ENABLED: ${SLEUTH_RETRIEVAL_ENABLED:-0}
       SLEUTH_VERIFY_ANSWERS: ${SLEUTH_VERIFY_ANSWERS:-0}
       SLEUTH_AGENT_ENABLED: ${SLEUTH_AGENT_ENABLED:-0}
       SLEUTH_AGENT_MAX_STEPS: ${SLEUTH_AGENT_MAX_STEPS:-4}
       SLEUTH_EVAL_ENABLED: ${SLEUTH_EVAL_ENABLED:-0}
       SLEUTH_EVAL_MIN_SCORE: ${SLEUTH_EVAL_MIN_SCORE:-0.5}
-      # Cloud-layer tuning (only relevant when the cloud layer is on).
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-qwen/qwen-2.5-7b-instruct:free}
-      # Optional RAG embeddings only (Groq has no embeddings endpoint); the chat
-      # assistant never calls Gemini. Used only when SLEUTH_RAG_ENABLED=1.
+      # Embeddings for RAG only; Groq has no embeddings endpoint.
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GEMINI_EMBED_MODEL: ${GEMINI_EMBED_MODEL:-text-embedding-004}
       SLEUTH_CLOUD_TIMEOUT_S: ${SLEUTH_CLOUD_TIMEOUT_S:-20}
       SLEUTH_CLOUD_MAX_TOKENS: ${SLEUTH_CLOUD_MAX_TOKENS:-600}
-      # Sampling: a little temperature + mild penalties on the conversational
-      # path for natural, non-repetitive replies; tool/judge/agent calls stay at
-      # 0 for deterministic routing and scoring. SLEUTH_ANSWER_MAX_CHARS is a
-      # hard app-side ceiling on a free-text answer.
+      # Tool, judge and agent calls stay at temperature 0 for deterministic routing.
       SLEUTH_CLOUD_TEMPERATURE: ${SLEUTH_CLOUD_TEMPERATURE:-0.6}
       SLEUTH_CLOUD_TEMPERATURE_TOOLS: ${SLEUTH_CLOUD_TEMPERATURE_TOOLS:-0.0}
       SLEUTH_CLOUD_FREQUENCY_PENALTY: ${SLEUTH_CLOUD_FREQUENCY_PENALTY:-0.3}
       SLEUTH_CLOUD_PRESENCE_PENALTY: ${SLEUTH_CLOUD_PRESENCE_PENALTY:-0.2}
       SLEUTH_ANSWER_MAX_CHARS: ${SLEUTH_ANSWER_MAX_CHARS:-4000}
       SLEUTH_RAG_TOP_K: ${SLEUTH_RAG_TOP_K:-5}
-      # Persist Sleuth conversations to the additive chat_* tables (safe on).
       SLEUTH_CHAT_MEMORY_ENABLED: ${SLEUTH_CHAT_MEMORY_ENABLED:-true}
 
-      # Authentication.
       SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET is required - set it in .env or the platform secret store}
       SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-86400}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
-      # Trust X-Forwarded-For only behind a real reverse proxy, so the rate
-      # limiter buckets per client IP. Leave false on a direct/edge deploy.
+      # Only behind a real reverse proxy; otherwise clients could spoof their IP.
       TRUST_PROXY_FORWARDED_FOR: ${TRUST_PROXY_FORWARDED_FOR:-false}
       BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@bughunter.local}
       BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?BOOTSTRAP_ADMIN_PASSWORD is required - set it in .env or the platform secret store}
@@ -176,20 +129,14 @@ services:
       WEBHOOK_ALLOW_PRIVATE_NETWORKS: ${WEBHOOK_ALLOW_PRIVATE_NETWORKS:-false}
       METRICS_ENABLED: ${METRICS_ENABLED:-false}
       METRICS_TOKEN: ${METRICS_TOKEN:-}
-      # Convenience switch for trusted local/dev deployments: skips the login
-      # screen and signs every visitor in as BOOTSTRAP_ADMIN_EMAIL. Off by
-      # default; see .env.example.
+      # Dev only: signs every visitor in as the bootstrap admin.
       AUTO_LOGIN_ENABLED: ${AUTO_LOGIN_ENABLED:-false}
 
-      # Password policy. Forgot-password is enumeration-safe by default.
       PASSWORD_MIN_LENGTH: ${PASSWORD_MIN_LENGTH:-8}
       PASSWORD_REQUIRE_COMPLEXITY: ${PASSWORD_REQUIRE_COMPLEXITY:-true}
       FORGOT_PASSWORD_ENUMERATION_SAFE: ${FORGOT_PASSWORD_ENUMERATION_SAFE:-true}
 
-      # Public URL the email links should point to (defaulted at line 84).
-
-      # Email — defaults to "console" so emails get logged to stdout.
-      # Set EMAIL_BACKEND=smtp and the SMTP_* vars when you want real delivery.
+      # console logs emails to stdout; use smtp plus SMTP_* for real delivery.
       EMAIL_BACKEND: ${EMAIL_BACKEND:-console}
       EMAIL_FROM: ${EMAIL_FROM:-bugtracker@localhost}
       SMTP_HOST: ${SMTP_HOST:-}
@@ -200,26 +147,19 @@ services:
       SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
       SMTP_TIMEOUT: ${SMTP_TIMEOUT:-10}
 
-      # Email digest + optional in-app scheduler (no host cron needed when
-      # EMAIL_DIGEST_CRON is a cron expression). All pulled from the host .env.
+      # A cron expression in EMAIL_DIGEST_CRON runs the digest in-app, no host cron needed.
       EMAIL_DIGEST_ENABLED: ${EMAIL_DIGEST_ENABLED:-false}
       EMAIL_DIGEST_LOOKBACK_HOURS: ${EMAIL_DIGEST_LOOKBACK_HOURS:-50}
       EMAIL_DIGEST_CRON: ${EMAIL_DIGEST_CRON:-}
       EMAIL_DIGEST_TIMEZONE: ${EMAIL_DIGEST_TIMEZONE:-}
 
-      # Reports — cap rows a single XLSX export may materialize before 413.
       MAX_REPORT_ROWS: ${MAX_REPORT_ROWS:-50000}
 
-      # Web push (Firebase Cloud Messaging). Pulled from the host .env via ${...}.
-      # Relative paths resolve from /app, where the service-account JSON is mounted read-only below. Set
-      # FCM_CREDENTIALS_JSON in .env instead (raw or base64 JSON) to skip the
-      # mount entirely — useful on platforms without file-secret support; it
-      # takes priority over FCM_CREDENTIALS_FILE when both are set.
+      # FCM_CREDENTIALS_JSON (raw or base64) skips the file mount and wins over FCM_CREDENTIALS_FILE.
       WEB_PUSH_ENABLED: ${WEB_PUSH_ENABLED:-false}
       FCM_CREDENTIALS_FILE: ${FCM_CREDENTIALS_FILE:-secrets/firebase-admin.json}
       FCM_CREDENTIALS_JSON: ${FCM_CREDENTIALS_JSON:-}
-      # Public web-app config served to the browser via GET /api/push/config.
-      # All five are required for the client SDK to register for push.
+      # Served to the browser by GET /api/push/config; the client SDK needs all of them.
       FIREBASE_API_KEY: ${FIREBASE_API_KEY:-}
       FIREBASE_AUTH_DOMAIN: ${FIREBASE_AUTH_DOMAIN:-}
       FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
@@ -227,53 +167,27 @@ services:
       FIREBASE_APP_ID: ${FIREBASE_APP_ID:-}
       FIREBASE_VAPID_KEY: ${FIREBASE_VAPID_KEY:-}
 
-      # Git branch creation (GitHub / GitHub Enterprise). Every value is pulled
-      # from the host .env or the platform's secret store at runtime — nothing
-      # secret is ever baked into an image layer by this file.
-      #
-      # Where the secrets come from per platform:
-      #   * local / docker compose : .env next to this file (git-ignored), or
-      #     `docker compose --env-file <file>`.
-      #   * Azure Container Apps       : a Container App secret, referenced as
-      #     `secretref:<name>` in the container's env array (see README.md).
-      #   * Azure App Service (Linux)  : an Application Setting sourced from Key
-      #     Vault via a @Microsoft.KeyVault(...) reference.
-      #   * Kubernetes                 : a Secret in an `envFrom`/`valueFrom`
-      #     secretKeyRef, never a literal in the manifest.
-      #
-      # GIT_BRANCH_CREATION_ENABLED is the deployment-wide kill switch; each
-      # project is additionally disabled until a Project Admin saves its config.
+      # Deployment-wide kill switch; each project stays off until a Project Admin saves its config.
       GIT_BRANCH_CREATION_ENABLED: ${GIT_BRANCH_CREATION_ENABLED:-false}
-      # Deployment-wide kill switch for exact tracked-branch removal. Off by
-      # default; enabling it still requires project-manager permission and an
-      # exact tracked Story feature branch.
+      # Still needs project-manager permission and an exact tracked Story branch.
       GIT_BRANCH_DELETION_ENABLED: ${GIT_BRANCH_DELETION_ENABLED:-false}
-      # Deployment defaults only: a saved non-empty project value always wins.
+      # Defaults only; a saved project value wins.
       GITHUB_API_URL: ${GITHUB_API_URL:-https://api.github.com}
       GITHUB_ORGANIZATION: ${GITHUB_ORGANIZATION:-}
       GITHUB_DEFAULT_BASE_BRANCH: ${GITHUB_DEFAULT_BASE_BRANCH:-dev}
-      # Optional legacy fallback token, still supported for projects that have
-      # no project-level credential of their own. Leave empty to require a
-      # per-project credential for every project.
+      # Legacy fallback for projects without their own credential; leave empty to require one.
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
-      # Server-only Fernet key (urlsafe-base64, 32 bytes) encrypting project Git
-      # credentials at rest. Generate once with:
-      #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-      # Losing or rotating it makes existing project credentials unreadable, so
-      # it belongs in the platform secret store, never in the image or the repo.
+      # Fernet key encrypting project Git credentials; losing it makes them unreadable.
+      # Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
       GIT_CREDENTIAL_ENCRYPTION_KEY: ${GIT_CREDENTIAL_ENCRYPTION_KEY:-}
       GITHUB_CONNECT_TIMEOUT_SECONDS: ${GITHUB_CONNECT_TIMEOUT_SECONDS:-5}
       GITHUB_READ_TIMEOUT_SECONDS: ${GITHUB_READ_TIMEOUT_SECONDS:-15}
       GITHUB_MAX_RETRIES: ${GITHUB_MAX_RETRIES:-2}
       GITHUB_BRANCH_NAME_MAX_LENGTH: ${GITHUB_BRANCH_NAME_MAX_LENGTH:-120}
-      # Optional approved PEM bundle for containers behind TLS interception.
-      # Blank default = OS trust store via truststore. To use a bundle, mount
-      # it read-only, e.g. `- ./ca/corporate-ca.pem:/app/ca/corporate-ca.pem:ro`
-      # and set `GIT_CA_BUNDLE_FILE=/app/ca/corporate-ca.pem` in .env.
+      # PEM bundle for TLS interception; mount it read-only and point this at it.
       GIT_CA_BUNDLE_FILE: ${GIT_CA_BUNDLE_FILE:-}
     volumes:
-      # Mount the Firebase service-account JSON into the container (read-only)
-      # so fcm_transport can initialise the Admin SDK.
+      # Firebase service-account JSON for fcm_transport.
       - ./secrets:/app/secrets:ro
     ports:
       - "8765:8000"
@@ -282,8 +196,7 @@ services:
     deploy:
       resources:
         limits:
-          # Resource-constrained deployment target (0.5 vCPU / 512 MB RAM,
-          # HDD-class storage). scripts/load_test.py verifies this envelope.
+          # Sized for a 0.5 vCPU / 512 MB host; scripts/load_test.py verifies it.
           cpus: 0.30
           memory: 320M
         reservations:

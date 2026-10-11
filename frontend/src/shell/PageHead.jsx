@@ -13,6 +13,7 @@ const VIEW_TITLES = {
   sessions: "Active Sessions",
   reports: "Reports",
   organization: "Organization",
+  help: "Help center",
 };
 
 // "list" builds its own live summary below.
@@ -29,6 +30,7 @@ const VIEW_SUBTITLES = {
     "Build a report from any combination of filters, preview it inline, then download the full data as Excel",
   organization:
     "Your organization’s details and branding, the people you invite, and the webhooks that receive its events",
+  help: "Guides for tracking work, running sprints, reports, notifications and administration",
 };
 
 export default function PageHead() {

@@ -29,17 +29,14 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, deferred, mapped_column, relationship
 
 from app.database import Base
-
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc).replace(microsecond=0)
+from app.util import utcnow, utcnow_precise
 
 
 class UTCDateTime(TypeDecorator):
     """A timezone-aware DateTime that always reads back as UTC.
 
     PostgreSQL returns timestamptz values aware; SQLite stores no offset and
-    returns them naive. Every value is written in UTC (_utcnow), so a naive
+    returns them naive. Every value is written in UTC (utcnow), so a naive
     result is tagged UTC here. Otherwise the API emits offset-less timestamps
     that browsers parse as local time, shifting every displayed time.
     """
@@ -146,9 +143,9 @@ class Organization(Base):
     logo_data_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     accent_color: Mapped[str | None] = mapped_column(String(16), nullable=True)
     email_from_override: Mapped[str | None] = mapped_column(String(254), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
+        UTCDateTime(), default=utcnow, onupdate=utcnow, nullable=False
     )
 
     __table_args__ = (Index("idx_orgs_slug", "slug"),)
@@ -187,10 +184,10 @@ class User(Base):
     email_verified_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(), default=_utcnow, nullable=False
+        UTCDateTime(), default=utcnow, nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
+        UTCDateTime(), default=utcnow, onupdate=utcnow, nullable=False
     )
 
     organization: Mapped[Organization] = relationship("Organization")
@@ -217,7 +214,7 @@ class PasswordResetToken(Base):
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     used_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
 
     __table_args__ = (
         Index("idx_prt_token_hash", "token_hash"),
@@ -237,7 +234,7 @@ class EmailVerificationToken(Base):
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     used_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
 
     __table_args__ = (Index("idx_evt_user_id_used_at", "user_id", "used_at"),)
 
@@ -261,9 +258,9 @@ class Project(Base):
     # Allow-listed boolean flags only (validated in schemas.AgileFeatureFlagsIn);
     # empty object default, never a string or null (JSON portability contract).
     agile_feature_flags: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
+        UTCDateTime(), default=utcnow, onupdate=utcnow, nullable=False
     )
 
     organization: Mapped[Organization] = relationship("Organization")
@@ -321,9 +318,9 @@ class Event(Base):
     created_by_user_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey(_FK_USERS_ID, ondelete=_ONDELETE_SET_NULL), nullable=True
     )
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
+        UTCDateTime(), default=utcnow, onupdate=utcnow, nullable=False
     )
 
     items: Mapped[list["Bug"]] = relationship(
@@ -378,9 +375,9 @@ class Bug(Base):
     due_date: Mapped[str | None] = mapped_column(String(10), nullable=True)
     # Story/Task start date; due_date doubles as the hierarchy "end date".
     start_date: Mapped[str | None] = mapped_column(String(10), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
+        UTCDateTime(), default=utcnow, onupdate=utcnow, nullable=False
     )
     # Optimistic-concurrency counter, bumped on every update; catches same-second
     # collisions that updated_at's whole-second resolution misses.
@@ -498,7 +495,7 @@ class Comment(Base):
     )
     author_name: Mapped[str] = mapped_column(String(120), nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
 
     bug: Mapped[Bug] = relationship("Bug", back_populates="comments")
 
@@ -528,7 +525,7 @@ class Attachment(Base):
     # Deferred so listing doesn't load the BLOB; the download endpoint reads
     # .data lazily. Loading strategy only; schema unchanged.
     data: Mapped[bytes] = deferred(mapped_column(LargeBinary, nullable=False))
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
 
     bug: Mapped[Bug] = relationship("Bug", back_populates="attachments", foreign_keys=[bug_id])
 
@@ -583,7 +580,7 @@ class Activity(Base):
     actor_name: Mapped[str] = mapped_column(String(120), nullable=False, default="system")
     action: Mapped[str] = mapped_column(String(60), nullable=False)
     detail: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
 
     bug: Mapped[Bug | None] = relationship("Bug", back_populates="activities")
 
@@ -619,9 +616,9 @@ class Session(Base):
     # Display metadata for the admin session list; not used for auth.
     user_agent: Mapped[str] = mapped_column(String(400), nullable=False, default="")
     ip_address: Mapped[str] = mapped_column(String(64), nullable=False, default="")
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
+        UTCDateTime(), default=utcnow, onupdate=utcnow, nullable=False
     )
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
@@ -664,7 +661,7 @@ class Notification(Base):
         UTCDateTime(), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(), default=_utcnow, nullable=False
+        UTCDateTime(), default=utcnow, nullable=False
     )
 
     __table_args__ = (
@@ -698,11 +695,11 @@ class PushSubscription(Base):
     # Coarse device hint for the device list and debugging.
     user_agent: Mapped[str] = mapped_column(String(400), nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(), default=_utcnow, nullable=False
+        UTCDateTime(), default=utcnow, nullable=False
     )
     # Refreshed on re-subscribe (tokens rotate); a cleanup job can drop stale ones.
     last_seen_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
+        UTCDateTime(), default=utcnow, onupdate=utcnow, nullable=False
     )
 
     __table_args__ = (
@@ -722,7 +719,7 @@ class NotificationPreference(Base):
     assignments: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     activity: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     updated_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
+        UTCDateTime(), default=utcnow, onupdate=utcnow, nullable=False
     )
 
 
@@ -741,7 +738,7 @@ class EmailChangeRequest(Base):
     used_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     # Failed tries; the request is voided after a handful so the code cannot be guessed.
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
 
     __table_args__ = (Index("idx_ecr_user", "user_id"),)
 
@@ -767,7 +764,7 @@ class Invitation(Base):
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     accepted_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
 
     organization: Mapped[Organization] = relationship("Organization")
 
@@ -790,7 +787,7 @@ class TotpRecoveryCode(Base):
     # Per-code salt of the HMAC in code_hash; NULL marks a legacy unsalted SHA-256 hash.
     salt: Mapped[str | None] = mapped_column(String(32), nullable=True)
     used_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
 
     __table_args__ = (
         Index("idx_trc_user", "user_id"),
@@ -814,9 +811,9 @@ class SavedView(Base):
     # JSON object mirroring the list view's filter state.
     filters_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     shared_with_org: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
+        UTCDateTime(), default=utcnow, onupdate=utcnow, nullable=False
     )
 
     __table_args__ = (
@@ -847,9 +844,9 @@ class Webhook(Base):
     created_by_user_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey(_FK_USERS_ID, ondelete=_ONDELETE_SET_NULL), nullable=True
     )
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
+        UTCDateTime(), default=utcnow, onupdate=utcnow, nullable=False
     )
 
     __table_args__ = (
@@ -874,7 +871,7 @@ class CustomField(Base):
     options: Mapped[str] = mapped_column(String(500), nullable=False, default="")
     is_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
 
     __table_args__ = (
         UniqueConstraint("project_id", "name", name="uq_cf_project_name"),
@@ -893,9 +890,9 @@ class BugCustomValue(Base):
         Integer, ForeignKey(_FK_CUSTOM_FIELDS_ID, ondelete="CASCADE"), nullable=False
     )
     value: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
+        UTCDateTime(), default=utcnow, onupdate=utcnow, nullable=False
     )
 
     __table_args__ = (
@@ -914,15 +911,15 @@ class ChatConversation(Base):
     user_id: Mapped[int] = mapped_column(
         Integer, ForeignKey(_FK_USERS_ID, ondelete="CASCADE"), nullable=False
     )
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
+        UTCDateTime(), default=utcnow, onupdate=utcnow, nullable=False
     )
 
     messages: Mapped[list["ChatMessage"]] = relationship(
         "ChatMessage", back_populates="conversation",
         cascade=_CASCADE_ALL_DELETE_ORPHAN,
-        # id tiebreaker: _utcnow() truncates to whole seconds, so a same-second
+        # id tiebreaker: utcnow() truncates to whole seconds, so a same-second
         # turn would otherwise replay in an unstable order.
         order_by="ChatMessage.created_at, ChatMessage.id",
     )
@@ -947,7 +944,7 @@ class ChatMessage(Base):
     # Engine that produced the response: "rules" | "classifier" | "llm" | "cloud" | "".
     # Observability only; never used for auth.
     engine: Mapped[str] = mapped_column(String(20), nullable=False, default="")
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
 
     conversation: Mapped[ChatConversation] = relationship(
         "ChatConversation", back_populates="messages"
@@ -975,7 +972,7 @@ class BugLink(Base):
         Integer, ForeignKey(_FK_USERS_ID, ondelete=_ONDELETE_SET_NULL), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(), default=_utcnow, nullable=False
+        UTCDateTime(), default=utcnow, nullable=False
     )
 
     source: Mapped["Bug"] = relationship("Bug", foreign_keys=[source_bug_id])
@@ -1051,9 +1048,9 @@ class Board(Base):
         Integer, ForeignKey(_FK_USERS_ID, ondelete=_ONDELETE_SET_NULL), nullable=True
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
+        UTCDateTime(), default=utcnow, onupdate=utcnow, nullable=False
     )
     # selectin: a board is always read with its columns, their statuses and those statuses'
     # workflow rows; batching keeps that at three queries instead of one per mapping.
@@ -1157,9 +1154,9 @@ class Sprint(Base):
         Integer, ForeignKey(_FK_USERS_ID, ondelete=_ONDELETE_SET_NULL), nullable=True
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
+        UTCDateTime(), default=utcnow, onupdate=utcnow, nullable=False
     )
     assignees: Mapped[list["User"]] = relationship(
         "User", secondary=sprint_assignees, lazy="selectin"
@@ -1206,7 +1203,7 @@ class SprintItemHistory(Base):
     )
     old_estimate: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)
     new_estimate: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)
-    occurred_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
     actor_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey(_FK_USERS_ID, ondelete=_ONDELETE_SET_NULL), nullable=True
     )
@@ -1218,10 +1215,6 @@ class SprintItemHistory(Base):
         Index("idx_sprint_item_history_sprint_item", "sprint_id", "work_item_id"),
         Index("idx_sprint_item_history_occurred_at", "occurred_at"),
     )
-
-
-def _utcnow_precise() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 # Append-only change log of the work-item fields that agile reports replay
@@ -1244,7 +1237,7 @@ class WorkItemChange(Base):
     field: Mapped[str] = mapped_column(String(32), nullable=False)
     old_value: Mapped[str | None] = mapped_column(String(64), nullable=True)
     new_value: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    changed_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow_precise, nullable=False)
+    changed_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow_precise, nullable=False)
     actor_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey(_FK_USERS_ID, ondelete=_ONDELETE_SET_NULL), nullable=True
     )
@@ -1275,7 +1268,7 @@ class IdempotencyKey(Base):
     request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     response_status: Mapped[int] = mapped_column(Integer, nullable=False)
     response_body: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
     __table_args__ = (
@@ -1352,9 +1345,9 @@ class SprintCapacity(Base):
     days_off: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     notes: Mapped[str] = mapped_column(Text, nullable=False, default="")
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
+        UTCDateTime(), default=utcnow, onupdate=utcnow, nullable=False
     )
 
     __table_args__ = (
@@ -1400,7 +1393,7 @@ class AcceptanceCriterion(Base):
         Integer, ForeignKey(_FK_USERS_ID, ondelete=_ONDELETE_SET_NULL), nullable=True
     )
     updated_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
+        UTCDateTime(), default=utcnow, onupdate=utcnow, nullable=False
     )
 
     __table_args__ = (Index("idx_acceptance_criteria_items_bug_id", "bug_id"),)
@@ -1425,9 +1418,9 @@ class Version(Base):
     )
     archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
+        UTCDateTime(), default=utcnow, onupdate=utcnow, nullable=False
     )
 
     __table_args__ = (
@@ -1470,9 +1463,9 @@ class Component(Base):
     )
     archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
+        UTCDateTime(), default=utcnow, onupdate=utcnow, nullable=False
     )
 
     __table_args__ = (
@@ -1505,9 +1498,9 @@ class Label(Base):
     color: Mapped[str] = mapped_column(String(20), nullable=False, default="")
     usage_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
+        UTCDateTime(), default=utcnow, onupdate=utcnow, nullable=False
     )
 
     __table_args__ = (
@@ -1570,10 +1563,10 @@ class ProjectGitConfig(Base):
     last_error: Mapped[str] = mapped_column(String(500), nullable=False, default="")
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     created_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(), default=_utcnow, nullable=False
+        UTCDateTime(), default=utcnow, nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
+        UTCDateTime(), default=utcnow, onupdate=utcnow, nullable=False
     )
 
     project: Mapped[Project] = relationship("Project", back_populates="git_config")
@@ -1614,10 +1607,10 @@ class ProjectRepository(Base):
     )
     last_error: Mapped[str] = mapped_column(String(500), nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(), default=_utcnow, nullable=False
+        UTCDateTime(), default=utcnow, nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(), default=_utcnow, onupdate=_utcnow, nullable=False
+        UTCDateTime(), default=utcnow, onupdate=utcnow, nullable=False
     )
 
     project: Mapped[Project] = relationship("Project", back_populates="repositories")
@@ -1684,7 +1677,7 @@ class WorkItemBranch(Base):
     )
     created_by_name: Mapped[str] = mapped_column(String(120), nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(), default=_utcnow, nullable=False
+        UTCDateTime(), default=utcnow, nullable=False
     )
     last_checked_at: Mapped[datetime | None] = mapped_column(
         UTCDateTime(), nullable=True
@@ -1730,4 +1723,28 @@ class AppMigration(Base):
     on every boot; a data rewrite must run exactly once, and its name lands here when it does."""
     __tablename__ = "app_migrations"
     name: Mapped[str] = mapped_column(String(100), primary_key=True)
-    applied_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, nullable=False)
+    applied_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, nullable=False)
+
+
+TOUR_STATUSES = ("none", "running", "dismissed", "done")
+
+
+class UserPreference(Base):
+    """Per-user onboarding state (welcome screen, product tour) so it follows the person across
+    browsers instead of living in one browser's localStorage. One row per user, created lazily."""
+    __tablename__ = "user_preferences"
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey(_FK_USERS_ID, ondelete="CASCADE"), primary_key=True
+    )
+    welcome_seen: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    welcome_hidden: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    tour_status: Mapped[str] = mapped_column(String(20), nullable=False, default="none")
+    tour_step: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint(_one_of("tour_status", TOUR_STATUSES), name="ck_user_preferences_tour_status"),
+        CheckConstraint("tour_step >= 0", name="ck_user_preferences_tour_step"),
+    )

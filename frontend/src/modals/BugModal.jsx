@@ -2,6 +2,7 @@
  * Unified create/edit/view modal for work items (bug == null → create).
  * Test contracts: #bugSubmitBtn inside #formBug, reporter_id select disabled, #bugCommentsSection visible in edit/view, #commentPostBtn type="button", no nested <form> in #formBug (composer is a <div>).
  */
+import HelpHint from "../onboarding/HelpHint";
 import {
   useEffect,
   useRef,
@@ -836,6 +837,7 @@ export default function BugModal() {
     return (
       <div className="field" aria-labelledby="bugEpicLabel">
         <span id="bugEpicLabel">Epic</span>
+        <HelpHint label="Epic" guide="sprints">An Epic groups related stories and tasks into one large piece of work. Epics are never put into a sprint; their issues are.</HelpHint>
         <BhSelect
           ariaLabel="Epic"
           value={epicPick}
@@ -867,6 +869,7 @@ export default function BugModal() {
     return (
       <div className="field bug-sprint-field">
         <span>Sprint</span>
+        <HelpHint label="Sprint" guide="sprints">A sprint is a short, fixed period of planned work. Move the issue here to commit it to the sprint, or leave it in the backlog.</HelpHint>
         {renderEditSprintField()}
       </div>
     );
@@ -1675,6 +1678,7 @@ export default function BugModal() {
               </div>
               <div className="field" aria-labelledby="bugEnvLabel">
                 <span id="bugEnvLabel">Environment</span>
+                <HelpHint label="Environment" guide="items">Where the problem was seen: DEV, UAT or PROD. It is used by bugs and filters the list.</HelpHint>
                 <BhSelect
                   name="environment"
                   ariaLabel="Environment"

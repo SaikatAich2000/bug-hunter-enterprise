@@ -230,10 +230,10 @@ def test_cov_login_inactive_user_blocked(client, admin_client):
 def test_cov_login_lockout_returns_429(client):
     """A full lockout bucket returns 429 before bcrypt verify (bucket pre-filled for determinism)."""
     from app import account_lockout
-    account_lockout._reset_for_tests()
+    account_lockout._buckets.clear()
     try:
         for _ in range(account_lockout._LOGIN_FAIL_LIMIT):
-            account_lockout.record_failure(BOOTSTRAP_EMAIL)
+            account_lockout.record_failure(BOOTSTRAP_EMAIL, "testclient")  # TestClient's peer address
         # Even the correct password must be rejected once the bucket is locked.
         res = client.post("/api/auth/login", json={
             "email": BOOTSTRAP_EMAIL, "password": BOOTSTRAP_PASSWORD,
@@ -241,7 +241,7 @@ def test_cov_login_lockout_returns_429(client):
         assert res.status_code == 429
         assert res.headers.get("Retry-After")
     finally:
-        account_lockout._reset_for_tests()
+        account_lockout._buckets.clear()
 
 
 # logout branches
@@ -681,3 +681,90 @@ def test_cov_require_manager_or_admin_forbids_user():
     assert require_manager_or_admin(mgr) is mgr
     adm = SimpleNamespace(role="admin")
     assert require_manager_or_admin(adm) is adm
+
+
+# app/auth.py — a cookie without a session id can't be revoked, so it is refused
+def test_auth_jtiless_session_cookie_is_rejected(client):
+    from sqlalchemy import select
+
+    from app.auth import COOKIE_NAME, _signer
+    from app.database import SessionLocal
+    from app.models import User
+
+    db = SessionLocal()
+    try:
+        admin = db.scalar(select(User).where(User.email == BOOTSTRAP_EMAIL))
+        legacy = _signer().sign(f"{admin.id}:{admin.session_version or 0}".encode()).decode()
+    finally:
+        db.close()
+    client.cookies.set(COOKIE_NAME, legacy)
+    assert client.get("/api/auth/me").status_code == 401
+
+
+# app/routes/auth.py - change-password same-pw reject + tz-aware reset expiry.
+def test_change_password_rejects_same_password(admin_client):
+    r = admin_client.post("/api/auth/change-password", json={
+        "current_password": BOOTSTRAP_PASSWORD,
+        "new_password": BOOTSTRAP_PASSWORD,
+    })
+    assert r.status_code == 400
+    assert "different" in r.json()["detail"].lower()
+
+
+def test_reset_password_tzaware_expiry_branch(client):
+    # SQLite reads tz columns naive; a one-shot load listener coerces expires_at aware to mimic Postgres.
+    from sqlalchemy import event, select
+
+    from app.auth import generate_token
+    from app.database import SessionLocal
+    from app.models import PasswordResetToken, User
+
+    db = SessionLocal()
+    try:
+        admin = db.scalar(select(User).where(User.email == BOOTSTRAP_EMAIL))
+        raw, token_hash = generate_token()
+        prt = PasswordResetToken(
+            user_id=admin.id,
+            token_hash=token_hash,
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=2),
+            used_at=None,
+        )
+        db.add(prt)
+        db.commit()
+    finally:
+        db.close()
+
+    def _make_aware(target, _context):
+        if target.expires_at is not None and target.expires_at.tzinfo is None:
+            target.expires_at = target.expires_at.replace(tzinfo=timezone.utc)
+
+    event.listen(PasswordResetToken, "load", _make_aware)
+    try:
+        res = client.post("/api/auth/reset-password", json={
+            "token": raw, "new_password": "BrandNewPass987",
+        })
+    finally:
+        event.remove(PasswordResetToken, "load", _make_aware)
+    assert res.status_code in (200, 204)
+
+
+# app/routes/sessions.py — empty list skips the user prefetch
+def test_sessions_list_empty_skips_user_prefetch(client):
+    from types import SimpleNamespace
+
+    from sqlalchemy import select
+
+    from app.database import SessionLocal
+    from app.models import Session as SessionRow
+    from app.models import User
+    from app.routes.sessions import list_sessions
+
+    db = SessionLocal()
+    try:
+        admin = db.scalar(select(User).where(User.email == BOOTSTRAP_EMAIL))
+        db.query(SessionRow).delete()
+        db.commit()
+        request = SimpleNamespace(cookies={}, headers={})
+        assert list_sessions(request, db=db, actor=admin) == []
+    finally:
+        db.close()

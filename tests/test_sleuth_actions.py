@@ -1,70 +1,16 @@
 """Assistant write side: action plans, confirmation flow, permission denial, audit, pronouns, atomicity (temp-SQLite)."""
 from __future__ import annotations
 
-import os as _os
-import sys as _sys
-
-from tests.conftest import default_org_id
-
-# Ensure the repo root is on the path when running this file directly.
-_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
-
-import os
-import sys
-import tempfile
-import traceback
-
-_tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-_tmp.close()
-os.environ["DATABASE_URL"] = f"sqlite:///{_tmp.name}"
-os.environ["SESSION_SECRET"] = "test-secret-actions-only"
-os.environ["BOOTSTRAP_ADMIN_EMAIL"] = "admin@example.com"
-os.environ["BOOTSTRAP_ADMIN_PASSWORD"] = "AdminPass123!"
-os.environ["BOOTSTRAP_ADMIN_NAME"] = "Admin Person"
-
-# Force a fresh import of app.* bound to this file's DB; a stale engine would fail create_all.
-import sys as _sys_purge
-
-for _m in list(_sys_purge.modules):
-    if _m == "app" or _m.startswith("app."):
-        del _sys_purge.modules[_m]
-
-import pytest  # noqa: E402  (after the deliberate sys.modules purge above)
-
 from app import models
 from app.auth import hash_password
 from app.chatbot import executor
 from app.chatbot.memory import store as memstore
 from app.database import Base, SessionLocal, engine
-
-
-@pytest.fixture(autouse=True)
-def _rebind_app_modules():
-    """Re-bind module-level app.* refs to the current import generation (conftest purges app.* between tests)."""
-    import importlib
-    g = globals()
-    db_mod = importlib.import_module("app.database")
-    g["Base"], g["engine"], g["SessionLocal"] = (
-        db_mod.Base, db_mod.engine, db_mod.SessionLocal,
-    )
-    g["models"] = importlib.import_module("app.models")
-    g["hash_password"] = importlib.import_module("app.auth").hash_password
-    g["executor"] = importlib.import_module("app.chatbot.executor")
-    g["nlu"] = importlib.import_module("app.chatbot.nlu")
-    g["memstore"] = importlib.import_module("app.chatbot.memory").store
-
-
-PASSED: list[str] = []
-FAILED: list[tuple[str, str]] = []
+from tests.conftest import default_org_id
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
-    if cond:
-        PASSED.append(name)
-        print(f"  PASS  {name}")
-    else:
-        FAILED.append((name, detail))
-        raise AssertionError(f"{name}: {detail}")
+    assert cond, f"{name}: {detail}"
 
 
 def section(title: str) -> None:
@@ -75,7 +21,7 @@ def seed_fresh() -> tuple[int, int, int, int]:
     """Re-seed and return (admin_id, alice_id, bob_id, bug1_id)."""
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
-    memstore._clear_all_for_test()
+    memstore._sessions.clear()
     db = SessionLocal()
     try:
         admin = models.User(org_id=default_org_id(), name="Admin Person", email="admin@example.com",
@@ -460,33 +406,3 @@ def test_action_via_http() -> None:
         check("http: confirm yes — action_done",
               body.get("intent") == "action_done",
               str(body.get("intent")))
-
-
-if __name__ == "__main__":
-    try:
-        test_assign_flow()
-        test_cancel_flow()
-        test_status_change()
-        test_priority_change()
-        test_add_comment()
-        test_create_bug()
-        test_create_project_perm()
-        test_pronoun_resolution()
-        test_unassign()
-        test_action_no_target()
-        test_confirm_idle()
-        test_audit_atomicity()
-        test_action_via_http()
-    except Exception:
-        traceback.print_exc()
-        FAILED.append(("HARNESS", "uncaught crash"))
-
-    print("\n=== RESULTS ===")
-    print(f"Passed: {len(PASSED)}")
-    print(f"Failed: {len(FAILED)}")
-    if FAILED:
-        for n, d in FAILED:
-            print(f"  FAIL  {n}  {d}")
-        sys.exit(1)
-    print("All checks passed")
-    sys.exit(0)

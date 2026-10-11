@@ -21,6 +21,16 @@ def _doc(*codes: int) -> dict[str, dict[str, str]]:
 
 #: Wrong credentials / not signed in.
 AUTH_401: Final = _doc(401)
+#: Sign-in refused: wrong credentials (401) or an unverified address (403).
+AUTH_401_403: Final = _doc(401, 403)
+#: Second sign-in step: wrong or expired code (400) or no session (401).
+AUTH_400_401: Final = _doc(400, 401)
+#: Public sign-up: invalid input (400), sign-up closed (403), address already registered (409).
+SIGNUP_400_403_409: Final = _doc(400, 403, 409)
+#: Email change: wrong password or code (400) and an address that is already taken (409).
+PASSWORD_CHANGE_400_409: Final = _doc(400, 409)
+#: Invitations: bad input, role/scope refusals, duplicates and the per-organization send limits.
+INVITE_ERRORS_400_403_404_409_429: Final = _doc(400, 403, 404, 409, 429)
 #: Current-password mismatch or same-password change.
 PASSWORD_CHANGE_400: Final = _doc(400)
 #: Enumeration-safe 404 for unknown reset accounts (non-safe deployments only).
@@ -94,3 +104,11 @@ FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_503: Final = _doc(403, 404, 409, 422, 50
 FORBIDDEN_NOT_FOUND_429: Final = _doc(403, 404, 429)
 #: Codes an endpoint family raises: 404, 500.
 NOT_FOUND_500: Final = _doc(404, 500)
+#: The caller's role or project membership does not allow the action.
+FORBIDDEN_403: Final = _doc(403)
+#: Codes an endpoint family raises: 403, 404, 422.
+FORBIDDEN_NOT_FOUND_VALIDATION_422: Final = _doc(403, 404, 422)
+#: Codes an endpoint family raises: 403, 404, 409, 422.
+FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422: Final = _doc(403, 404, 409, 422)
+#: Codes an endpoint family raises: 400, 403, 404, 409, 422.
+BAD_REQUEST_FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422: Final = _doc(400, 403, 404, 409, 422)

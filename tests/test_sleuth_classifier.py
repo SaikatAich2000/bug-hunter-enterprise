@@ -2,71 +2,17 @@
 degradation without a model file, so CI never downloads a GGUF."""
 from __future__ import annotations
 
-import os as _os
-import sys as _sys
-
-from tests.conftest import default_org_id
-
-# Make the project root importable when run directly.
-_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
-
 import os
-import sys
-import tempfile
-import traceback
-
-_tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-_tmp.close()
-os.environ["DATABASE_URL"] = f"sqlite:///{_tmp.name}"
-os.environ["SESSION_SECRET"] = "test-classifier-and-llm"
-os.environ["BOOTSTRAP_ADMIN_EMAIL"] = "admin@example.com"
-os.environ["BOOTSTRAP_ADMIN_PASSWORD"] = "AdminPass123!"
-os.environ["BOOTSTRAP_ADMIN_NAME"] = "Admin Person"
-# Non-existent model path keeps the LLM layer unavailable throughout.
-os.environ["SLEUTH_LLM_MODEL_PATH"] = "/tmp/__sleuth_no_model__.gguf"
-
-# Purge cached app.* so imports bind to this file's DB, not a torn-down engine.
-import sys as _sys_purge
-
-for _m in list(_sys_purge.modules):
-    if _m == "app" or _m.startswith("app."):
-        del _sys_purge.modules[_m]
-
-import pytest  # noqa: E402  (after the deliberate sys.modules purge above)
 
 from app import models
 from app.auth import hash_password
 from app.chatbot import classifier, executor, llm
 from app.database import Base, SessionLocal, engine
-
-
-@pytest.fixture(autouse=True)
-def _rebind_app_modules():
-    """Re-bind module-level app.* refs each test; conftest purges app.* per test."""
-    import importlib
-    g = globals()
-    db_mod = importlib.import_module("app.database")
-    g["Base"], g["engine"], g["SessionLocal"] = (
-        db_mod.Base, db_mod.engine, db_mod.SessionLocal,
-    )
-    g["models"] = importlib.import_module("app.models")
-    g["hash_password"] = importlib.import_module("app.auth").hash_password
-    g["classifier"] = importlib.import_module("app.chatbot.classifier")
-    g["executor"] = importlib.import_module("app.chatbot.executor")
-    g["llm"] = importlib.import_module("app.chatbot.llm")
-
-
-PASSED: list[str] = []
-FAILED: list[tuple[str, str]] = []
+from tests.conftest import default_org_id
 
 
 def check(name, cond, detail=""):
-    if cond:
-        PASSED.append(name)
-        print(f"  PASS  {name}")
-    else:
-        FAILED.append((name, detail))
-        raise AssertionError(f"{name}: {detail}")
+    assert cond, f"{name}: {detail}"
 
 
 def section(t):
@@ -321,27 +267,3 @@ def test_unknown_still_returns_helpful_text():
         check("unknown query — does not crash", True)
     finally:
         db.close()
-
-
-if __name__ == "__main__":
-    try:
-        test_classifier_basic()
-        test_classifier_via_executor()
-        test_llm_unavailable_path()
-        test_llm_memory_budget_calculation()
-        test_llm_memory_budget_sufficient()
-        test_executor_falls_through_simply()
-        test_unknown_still_returns_helpful_text()
-    except Exception:
-        traceback.print_exc()
-        FAILED.append(("HARNESS", "uncaught"))
-
-    print("\n=== RESULTS ===")
-    print(f"Passed: {len(PASSED)}")
-    print(f"Failed: {len(FAILED)}")
-    if FAILED:
-        for n, d in FAILED:
-            print(f"  FAIL  {n}  {d}")
-        sys.exit(1)
-    print("All checks passed")
-    sys.exit(0)

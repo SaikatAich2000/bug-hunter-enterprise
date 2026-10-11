@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 
+from tests.conftest import default_org_id
+
 NOW = datetime(2026, 10, 1, tzinfo=timezone.utc)
 
 
@@ -33,7 +35,7 @@ def test_retention_removes_only_what_has_expired(admin_client, monkeypatch):
     old, recent = NOW - timedelta(days=200), NOW - timedelta(days=10)
     with SessionLocal() as db:
         uid = db.scalar(select(User.id))
-        pid = db.scalar(select(Project.id)) or db.merge(Project(name="Retention")).id
+        pid = db.scalar(select(Project.id)) or db.merge(Project(org_id=default_org_id(), name="Retention")).id
         db.flush()
         for i, when in enumerate([old] * 5 + [recent] * 2):
             db.add(Notification(user_id=uid, kind="updated", title=f"n{i}", body="", created_at=when))

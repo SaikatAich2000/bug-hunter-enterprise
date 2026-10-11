@@ -19,14 +19,14 @@ from app.agile.permissions import (
     require_permission,
 )
 from app.api_docs import (
+    BAD_REQUEST_FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422,
+    FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422,
+    FORBIDDEN_NOT_FOUND_VALIDATION_422,
     NOT_FOUND_404,
-    NOT_FOUND_CONFLICT_409,
-    NOT_FOUND_CONFLICT_VALIDATION_422,
 )
 from app.auth import get_current_user
 from app.database import get_db
 from app.models import (
-    Activity,
     Bug,
     Component,
     EpicDetail,
@@ -53,6 +53,7 @@ from app.schemas import (
     VersionUpdateIn,
     display_id_for,
 )
+from app.services.audit import audit as _audit
 
 router = APIRouter(prefix="/api/agile", tags=["agile-taxonomy"])
 
@@ -62,13 +63,6 @@ _DETAIL_PROJECT_NOT_FOUND = "Project not found"
 _DETAIL_AGILE_NOT_ENABLED = "Agile is not enabled for this project"
 _DETAIL_NOT_FOUND = "Not found"
 _DETAIL_VERSION_CONFLICT = "This was modified by someone else; reload and retry"
-
-
-def _audit(db: Session, actor: User, entity_type: str, entity_id: int, action: str, detail: str) -> None:
-    db.add(Activity(
-        bug_id=None, entity_type=entity_type, entity_id=entity_id,
-        actor_user_id=actor.id, actor_name=actor.name, action=action, detail=detail,
-    ))
 
 
 # Nullable epic fields a PUT may clear with an explicit null (a removed date or
@@ -166,7 +160,7 @@ def get_epic(
     return _epics_out(db, [_get_epic_or_404(db, epic_id, user)])[0]
 
 
-@router.put("/epics/{epic_id}", response_model=EpicOut, responses=NOT_FOUND_CONFLICT_VALIDATION_422)
+@router.put("/epics/{epic_id}", response_model=EpicOut, responses=BAD_REQUEST_FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422)
 def update_epic(
     epic_id: int, payload: EpicUpdateIn,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
@@ -196,7 +190,7 @@ def update_epic(
     return _epics_out(db, [epic])[0]
 
 
-@router.post("/epics/{epic_id}/archive", response_model=EpicOut, responses=NOT_FOUND_404)
+@router.post("/epics/{epic_id}/archive", response_model=EpicOut, responses=FORBIDDEN_NOT_FOUND_VALIDATION_422)
 def archive_epic(
     epic_id: int, db: Session = Depends(get_db), actor: User = Depends(get_current_user),
 ) -> dict:
@@ -220,7 +214,7 @@ def list_versions(
     return list(db.scalars(select(Version).where(Version.project_id == project_id)).all())
 
 
-@router.post("/releases", response_model=VersionOut, status_code=status.HTTP_201_CREATED, responses=NOT_FOUND_CONFLICT_409)
+@router.post("/releases", response_model=VersionOut, status_code=status.HTTP_201_CREATED, responses=BAD_REQUEST_FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422)
 def create_version(
     payload: VersionCreateIn, db: Session = Depends(get_db), actor: User = Depends(get_current_user),
 ) -> Version:
@@ -249,7 +243,7 @@ def get_version(
     return v
 
 
-@router.put("/releases/{version_id}", response_model=VersionOut, responses=NOT_FOUND_CONFLICT_409)
+@router.put("/releases/{version_id}", response_model=VersionOut, responses=BAD_REQUEST_FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422)
 def update_version(
     version_id: int, payload: VersionUpdateIn,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
@@ -282,7 +276,7 @@ def update_version(
     return v
 
 
-@router.post("/releases/{version_id}/archive", response_model=VersionOut, responses=NOT_FOUND_404)
+@router.post("/releases/{version_id}/archive", response_model=VersionOut, responses=FORBIDDEN_NOT_FOUND_VALIDATION_422)
 def archive_version(
     version_id: int, db: Session = Depends(get_db), actor: User = Depends(get_current_user),
 ) -> Version:
@@ -309,7 +303,7 @@ def get_release_360(
     return releases_svc.release_360(db, v)
 
 
-@router.post("/releases/{version_id}/release", response_model=Release360Out, responses=NOT_FOUND_CONFLICT_409)
+@router.post("/releases/{version_id}/release", response_model=Release360Out, responses=FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422)
 def release_version(
     version_id: int, payload: ReleaseActionIn,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
@@ -347,7 +341,7 @@ def list_components(
     return list(db.scalars(select(Component).where(Component.project_id == project_id)).all())
 
 
-@router.post("/components", response_model=ComponentOut, status_code=status.HTTP_201_CREATED, responses=NOT_FOUND_CONFLICT_409)
+@router.post("/components", response_model=ComponentOut, status_code=status.HTTP_201_CREATED, responses=BAD_REQUEST_FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422)
 def create_component(
     payload: ComponentCreateIn, db: Session = Depends(get_db), actor: User = Depends(get_current_user),
 ) -> Component:
@@ -376,7 +370,7 @@ def get_component(
     return c
 
 
-@router.put("/components/{component_id}", response_model=ComponentOut, responses=NOT_FOUND_CONFLICT_409)
+@router.put("/components/{component_id}", response_model=ComponentOut, responses=BAD_REQUEST_FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422)
 def update_component(
     component_id: int, payload: ComponentUpdateIn,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
@@ -405,7 +399,7 @@ def update_component(
     return c
 
 
-@router.post("/components/{component_id}/archive", response_model=ComponentOut, responses=NOT_FOUND_404)
+@router.post("/components/{component_id}/archive", response_model=ComponentOut, responses=FORBIDDEN_NOT_FOUND_VALIDATION_422)
 def archive_component(
     component_id: int, db: Session = Depends(get_db), actor: User = Depends(get_current_user),
 ) -> Component:
@@ -431,7 +425,7 @@ def list_labels(
     return list(db.scalars(select(Label).where(Label.project_id == project_id)).all())
 
 
-@router.post("/labels", response_model=LabelOut, status_code=status.HTTP_201_CREATED, responses=NOT_FOUND_404)
+@router.post("/labels", response_model=LabelOut, status_code=status.HTTP_201_CREATED, responses=FORBIDDEN_NOT_FOUND_VALIDATION_422)
 def create_label(
     payload: LabelCreateIn, db: Session = Depends(get_db), actor: User = Depends(get_current_user),
 ) -> Label:
@@ -454,7 +448,7 @@ def get_label(
     return label
 
 
-@router.put("/labels/{label_id}", response_model=LabelOut, responses=NOT_FOUND_CONFLICT_409)
+@router.put("/labels/{label_id}", response_model=LabelOut, responses=FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422)
 def update_label(
     label_id: int, payload: LabelUpdateIn,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
@@ -481,7 +475,7 @@ def update_label(
     return label
 
 
-@router.delete("/labels/{label_id}", responses=NOT_FOUND_CONFLICT_409)
+@router.delete("/labels/{label_id}", responses=FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422)
 def delete_label(
     label_id: int, db: Session = Depends(get_db), actor: User = Depends(get_current_user),
 ) -> dict:

@@ -19,12 +19,14 @@ const AuditView = lazy(() => import("../views/AuditView"));
 const SessionsView = lazy(() => import("../views/SessionsView"));
 const ReportsView = lazy(() => import("../views/ReportsView"));
 const OrganizationView = lazy(() => import("../views/OrganizationView"));
+const HelpCenter = lazy(() => import("../onboarding/HelpCenter"));
 import BugModal from "../modals/BugModal";
 import ProjectModal from "../modals/ProjectModal";
 import UserModal from "../modals/UserModal";
 import ChangePasswordModal from "../modals/ChangePasswordModal";
 import AccountModal from "../account/AccountModal";
 import BulkImportModal from "../modals/BulkImportModal";
+import OnboardingHost from "../onboarding/OnboardingHost";
 
 export default function Shell() {
   const { view, setView, refreshAll, refreshStats, roleRank, currentUser } = useApp();
@@ -88,6 +90,7 @@ export default function Shell() {
               {view === "reports" && !denied && <ReportsView />}
               {view === "sessions" && !denied && <SessionsView />}
               {view === "organization" && !denied && <OrganizationView />}
+              {view === "help" && <HelpCenter />}
             </Suspense>
           </div>
         </main>
@@ -100,6 +103,7 @@ export default function Shell() {
       <ChangePasswordModal />
       <AccountModal />
       <BulkImportModal />
+      <OnboardingHost />
     </>
   );
 }

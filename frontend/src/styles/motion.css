@@ -1,0 +1,97 @@
+/* Motion system. Loaded after the other stylesheets so it sets the one timing every transition uses:
+   150-250 ms, ease-out, transform and opacity only. Under prefers-reduced-motion nothing moves at
+   all (see the final block); JS reads the same preference through lib/motion.js. */
+
+:root {
+  --motion-fast: 150ms;
+  --motion: 200ms;
+  --motion-slow: 250ms;
+  --motion-ease: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.sr-only {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+
+/* Modal: fade the backdrop, fade and scale the card. data-closing plays the same thing backwards. */
+.modal { animation: bh-fade-in var(--motion) var(--motion-ease) both; }
+.modal-card { animation: bh-pop-in var(--motion) var(--motion-ease) both; }
+.modal[data-closing] { animation: bh-fade-out var(--motion-fast) var(--motion-ease) both; pointer-events: none; }
+.modal[data-closing] .modal-card { animation: bh-pop-out var(--motion-fast) var(--motion-ease) both; }
+@keyframes bh-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes bh-fade-out { from { opacity: 1; } to { opacity: 0; } }
+@keyframes bh-pop-in { from { opacity: 0; transform: scale(0.96); } to { opacity: 1; transform: none; } }
+@keyframes bh-pop-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: scale(0.97); } }
+
+/* Toast: slide up and fade in, slide down and fade out. */
+.toast { animation: bh-toast-in var(--motion) var(--motion-ease) both; }
+.toast.leaving { animation: bh-toast-out var(--motion-fast) var(--motion-ease) both; }
+@keyframes bh-toast-in { from { opacity: 0; transform: translate(-50%, 14px); } to { opacity: 1; transform: translate(-50%, 0); } }
+@keyframes bh-toast-out { from { opacity: 1; transform: translate(-50%, 0); } to { opacity: 0; transform: translate(-50%, 10px); } }
+@media (max-width: 600px) {
+  .toast { animation-name: bh-toast-in-m; }
+  .toast.leaving { animation-name: bh-toast-out-m; }
+}
+@keyframes bh-toast-in-m { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+@keyframes bh-toast-out-m { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(10px); } }
+
+/* Dropdowns, popovers and menus. */
+.profile-menu, .notif-panel, .ms-panel, .bh-date-pop, .ag-menu {
+  animation: bh-menu-in var(--motion-fast) var(--motion-ease) both;
+  transform-origin: top center;
+}
+@keyframes bh-menu-in { from { opacity: 0; transform: translateY(-6px) scale(0.98); } to { opacity: 1; transform: none; } }
+
+/* Tab and view switches. */
+.view { animation-duration: var(--motion-slow); animation-timing-function: var(--motion-ease); }
+@keyframes bh-view-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.agile-tab-panel, .help-article { animation: bh-view-in var(--motion) var(--motion-ease) both; }
+
+/* Sidebar: the rail width eases in step with the rest; its sections fade in when it expands. */
+.frame { transition-duration: var(--motion-slow); }
+.sidebar > .side-section, .sidebar > .sidebar-nav { animation: bh-fade-in var(--motion) var(--motion-ease) both; }
+
+/* New list rows, cards and board items ease in. Rows that were already there do not replay it. */
+.bug-table tbody tr, .event-card, .ag-row, .ag-card {
+  animation: bh-row-in var(--motion) var(--motion-ease) both;
+}
+@keyframes bh-row-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.ag-row.dragging, .ag-card.dragging { animation: none; }
+
+/* Rows being removed fade and slide out (exitRows in lib/motion.js sets the attribute, waits one --motion, then the
+   row unmounts). Sidebar collapse keeps the grid-column transition: a transform-only version would leave the
+   main column un-resized, so that one layout cost is accepted. */
+[data-leaving] { animation: bh-row-out var(--motion) var(--motion-ease) both !important; pointer-events: none; }
+@keyframes bh-row-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateX(-12px); } }
+
+/* Cards settle back into place after a drop (dnd-kit supplies the transform; this smooths the rest). */
+.ag-row, .ag-card { transition: opacity var(--motion-fast) var(--motion-ease); }
+
+/* Hover, press and focus feedback: transform only, so nothing reflows. */
+.btn, .icon-btn, .nav-btn, .profile-menu-item, .chrome-sleuth-btn, .type-tab {
+  transition-property: background-color, border-color, color, box-shadow, transform, opacity;
+  transition-duration: var(--motion-fast);
+  transition-timing-function: var(--motion-ease);
+}
+.btn:active, .icon-btn:active, .nav-btn:active, .chrome-sleuth-btn:active { transform: scale(0.97); }
+.btn:hover:not(:disabled):not(:active), .icon-btn:hover:not(:disabled):not(:active) { transform: translateY(-1px); }
+
+/* Skeletons. */
+.skeleton-block { display: flex; flex-direction: column; gap: 10px; padding: 16px 4px; }
+.skeleton {
+  display: block; height: 14px; border-radius: 6px; background: var(--bg-elev-3);
+  animation: bh-skeleton var(--skeleton-ms, 1400ms) ease-in-out infinite;
+}
+@keyframes bh-skeleton { 0%, 100% { opacity: 0.45; } 50% { opacity: 0.9; } }
+
+/* Reduced motion: no animation and no transition anywhere; state changes are instant. Skeletons
+   stay visible as static bars so loading is still communicated. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+  .skeleton { opacity: 0.7; }
+}

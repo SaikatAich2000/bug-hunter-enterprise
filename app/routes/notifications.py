@@ -5,8 +5,6 @@ to another user's notifications.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
@@ -16,14 +14,11 @@ from app.auth import get_current_user
 from app.database import get_db
 from app.models import Notification, User
 from app.schemas import NotificationOut, UnreadCountOut
+from app.util import utcnow
 
 router = APIRouter(prefix="/api/notifications", tags=["notifications"])
 
 _DETAIL_NOT_FOUND = "Notification not found"
-
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc).replace(microsecond=0)
 
 
 @router.get("", response_model=list[NotificationOut])
@@ -71,7 +66,7 @@ def mark_read(
 ) -> dict[str, bool]:
     notif = _owned_or_404(db, notif_id, user)
     if notif.read_at is None:
-        notif.read_at = _utcnow()
+        notif.read_at = utcnow()
         db.commit()
     return {"ok": True}
 
@@ -84,7 +79,7 @@ def mark_all_read(
     db.execute(
         update(Notification)
         .where(Notification.user_id == user.id, Notification.read_at.is_(None))
-        .values(read_at=_utcnow())
+        .values(read_at=utcnow())
     )
     db.commit()
     return {"ok": True}

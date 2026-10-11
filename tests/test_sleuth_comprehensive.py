@@ -2,36 +2,7 @@
 synonyms, time windows, verbs, permissions, HTTP edges, robustness."""
 from __future__ import annotations
 
-import os as _os
-import sys as _sys
-
-from tests.conftest import any_user, default_org_id
-
-_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
-
-import os
-import sys
-import tempfile
-import traceback
 from datetime import datetime, timedelta, timezone
-
-_tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-_tmp.close()
-os.environ["DATABASE_URL"] = f"sqlite:///{_tmp.name}"
-os.environ["SESSION_SECRET"] = "test-comprehensive"
-os.environ["BOOTSTRAP_ADMIN_EMAIL"] = "admin@example.com"
-os.environ["BOOTSTRAP_ADMIN_PASSWORD"] = "AdminPass123!"
-os.environ["BOOTSTRAP_ADMIN_NAME"] = "Admin Person"
-os.environ["SLEUTH_LLM_MODEL_PATH"] = "/tmp/__no_model__.gguf"
-
-# Purge cached app.* so imports bind to this file's private DB, not a torn-down one.
-import sys as _sys_purge
-
-for _m in list(_sys_purge.modules):
-    if _m == "app" or _m.startswith("app."):
-        del _sys_purge.modules[_m]
-
-import pytest  # noqa: E402  (after the deliberate sys.modules purge above)
 
 from app import models
 from app.auth import hash_password
@@ -39,36 +10,11 @@ from app.chatbot import executor, nlu
 from app.chatbot.executor import build_context
 from app.chatbot.memory import store as memstore
 from app.database import Base, SessionLocal, engine
-
-
-@pytest.fixture(autouse=True)
-def _rebind_app_modules():
-    """Re-bind module-level app.* refs each test (conftest purges app.* per test)."""
-    import importlib
-    g = globals()
-    db_mod = importlib.import_module("app.database")
-    g["Base"], g["engine"], g["SessionLocal"] = (
-        db_mod.Base, db_mod.engine, db_mod.SessionLocal,
-    )
-    g["models"] = importlib.import_module("app.models")
-    g["hash_password"] = importlib.import_module("app.auth").hash_password
-    g["nlu"] = importlib.import_module("app.chatbot.nlu")
-    g["executor"] = importlib.import_module("app.chatbot.executor")
-    g["build_context"] = g["executor"].build_context
-    g["memstore"] = importlib.import_module("app.chatbot.memory").store
-
-
-PASSED: list[str] = []
-FAILED: list[tuple[str, str]] = []
+from tests.conftest import any_user, default_org_id
 
 
 def check(name, cond, detail=""):
-    if cond:
-        PASSED.append(name)
-        print(f"  PASS  {name}")
-    else:
-        FAILED.append((name, detail))
-        raise AssertionError(f"{name}: {detail}")
+    assert cond, f"{name}: {detail}"
 
 
 def section(t):
@@ -78,7 +24,7 @@ def section(t):
 def seed():
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
-    memstore._clear_all_for_test()
+    memstore._sessions.clear()
     db = SessionLocal()
     try:
         admin = models.User(org_id=default_org_id(), name="Admin", email="admin@example.com",
@@ -621,33 +567,3 @@ def test_full_conversation() -> None:
               len(acts) >= 3, f"got {len(acts)} entries")
     finally:
         db.close()
-
-
-if __name__ == "__main__":
-    try:
-        test_status_synonyms()
-        test_priority_synonyms()
-        test_environment_synonyms()
-        test_compound_filters()
-        test_time_windows()
-        test_robustness()
-        test_action_verb_variants()
-        test_assign_verb_variants()
-        test_create_bug_phrasings()
-        test_pronoun_edges()
-        test_confirm_flow_edges()
-        test_http_edges()
-        test_full_conversation()
-    except Exception:
-        traceback.print_exc()
-        FAILED.append(("HARNESS", "uncaught"))
-
-    print("\n=== RESULTS ===")
-    print(f"Passed: {len(PASSED)}")
-    print(f"Failed: {len(FAILED)}")
-    if FAILED:
-        for n, d in FAILED:
-            print(f"  FAIL  {n}  {d}")
-        sys.exit(1)
-    print("All checks passed")
-    sys.exit(0)

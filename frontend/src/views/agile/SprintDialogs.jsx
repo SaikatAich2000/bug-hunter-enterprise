@@ -201,6 +201,23 @@ export function StartSprintDialog({ open, sprint, issues, mode, onClose }) {
   );
 }
 
+/** Confirmation text for deleting a sprint; a running one is called out because it ends mid-flight. */
+export function deleteSprintPrompt(sprint, issueCount) {
+  const running = sprint.state === "active";
+  return `Delete ${running ? "the running sprint " : ""}${sprint.name}?`
+    + (running ? " It has already started, so this ends it without completing it." : "")
+    + (issueCount ? ` Its ${issueCount} issue${issueCount === 1 ? "" : "s"} move to the top of the backlog.` : "");
+}
+
+/** Maps a destination picker value to the API's destination fields. */
+export function destinationFields(value) {
+  if (value.startsWith("sprint:")) {
+    return { default_destination: "sprint", default_target_sprint_id: Number(value.slice(7)) };
+  }
+  if (value === "new") return { default_destination: "new_sprint" };
+  return { default_destination: "backlog" };
+}
+
 /** The completion rule, as far as the client can see it: the issue and all
  * its Sub-tasks are done. The server applies the exact rule. */
 function isCompleteIssue(issue) {
@@ -210,12 +227,16 @@ function isCompleteIssue(issue) {
 export function CompleteSprintDialog({ open, sprint, issues, futureSprints, onClose }) {
   const [destination, setDestination] = useState("backlog");
   const [newName, setNewName] = useState("");
+  // Per-issue overrides: issue id -> destination value ("backlog", "sprint:<id>", "new").
+  // An issue without an entry follows the dialog-wide default above.
+  const [overrides, setOverrides] = useState({});
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     if (open) {
       setDestination("backlog");
       setNewName("");
+      setOverrides({});
     }
   }, [open]);
 
@@ -229,20 +250,23 @@ export function CompleteSprintDialog({ open, sprint, issues, futureSprints, onCl
     { value: "new", label: "New sprint" },
   ];
 
+  const needsNewName = destination === "new" || openIssues.some((i) => overrides[i.id] === "new");
+  const issueOptions = [{ value: "default", label: "Same as above" }, ...options];
+
   const submit = async (e) => {
     e.preventDefault();
     setBusy(true);
     try {
       const body = { version: sprint.version, closing_note: "Sprint completed" };
-      if (destination.startsWith("sprint:")) {
-        body.default_destination = "sprint";
-        body.default_target_sprint_id = Number(destination.slice(7));
-      } else if (destination === "new") {
-        body.default_destination = "new_sprint";
-        if (newName.trim()) body.new_sprint_name = newName.trim();
-      } else {
-        body.default_destination = "backlog";
-      }
+      Object.assign(body, destinationFields(destination));
+      if (needsNewName && newName.trim()) body.new_sprint_name = newName.trim();
+      const dispositions = openIssues
+        .filter((i) => overrides[i.id] && overrides[i.id] !== "default")
+        .map((i) => {
+          const f = destinationFields(overrides[i.id]);
+          return { item_id: i.id, destination: f.default_destination, target_sprint_id: f.default_target_sprint_id ?? null };
+        });
+      if (dispositions.length) body.dispositions = dispositions;
       await agileApi.completeSprint(sprint.id, body);
       toast(`${sprint.name} completed`, "success");
       notifyAgileChanged();
@@ -273,13 +297,23 @@ export function CompleteSprintDialog({ open, sprint, issues, futureSprints, onCl
               <span>Move open issues to</span>
               <BhSelect ariaLabel="Move open issues to" value={destination} onChange={setDestination} options={options} />
             </div>
-            {destination === "new" && (
+            {needsNewName && (
               <label className="field">
                 <span>New sprint name (optional)</span>
                 <input value={newName} onChange={(e) => setNewName(e.target.value)} maxLength={120}
                   placeholder="Next default sprint name" />
               </label>
             )}
+            <ul className="ag-complete-issues" aria-label="Open issues">
+              {openIssues.map((issue) => (
+                <li key={issue.id} className="ag-complete-issue">
+                  <span className="ag-complete-issue-name">{issue.display_id ? `${issue.display_id} ` : ""}{issue.title}</span>
+                  <BhSelect ariaLabel={`Destination for ${issue.title}`} value={overrides[issue.id] || "default"}
+                    options={issueOptions}
+                    onChange={(v) => setOverrides((o) => ({ ...o, [issue.id]: v }))} />
+                </li>
+              ))}
+            </ul>
           </>
         )}
         <div className="ag-dialog-actions">

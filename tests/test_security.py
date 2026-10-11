@@ -18,7 +18,7 @@ def reset_security_state():
     yield
     try:
         from app import account_lockout
-        account_lockout._reset_for_tests()
+        account_lockout._buckets.clear()
     except ImportError:
         pass
 
@@ -195,12 +195,12 @@ class TestBodySizeMiddleware:
 class TestAccountLockoutEdgeCases:
 
     def test_env_int_falls_back_on_garbage(self, monkeypatch):
-        from app.account_lockout import _env_int
+        from app.config import env_int as _env_int
         monkeypatch.setenv("BH_BOGUS_INT_VAR", "not-a-number")
         assert _env_int("BH_BOGUS_INT_VAR", 42) == 42
 
     def test_env_int_uses_value(self, monkeypatch):
-        from app.account_lockout import _env_int
+        from app.config import env_int as _env_int
         monkeypatch.setenv("BH_GOOD_INT_VAR", "99")
         assert _env_int("BH_GOOD_INT_VAR", 0) == 99
 
@@ -211,7 +211,7 @@ class TestAccountLockoutEdgeCases:
         from app import account_lockout
         monkeypatch.setattr(account_lockout, "_LOGIN_FAIL_WINDOW_SECONDS", 0.05)
         monkeypatch.setattr(account_lockout, "_LOGIN_FAIL_LIMIT", 3)
-        account_lockout._reset_for_tests()
+        account_lockout._buckets.clear()
         for _ in range(2):
             account_lockout.record_failure("evictee@x.com")
         time.sleep(0.07)
@@ -225,7 +225,7 @@ class TestAccountLockoutEdgeCases:
         from app import account_lockout
         monkeypatch.setattr(account_lockout, "_LOCKOUT_BUCKETS_MAX", 5)
         monkeypatch.setattr(account_lockout, "_LOGIN_FAIL_LIMIT", 10)
-        account_lockout._reset_for_tests()
+        account_lockout._buckets.clear()
         # Fill past the cap; eviction must keep the dict at the cap.
         for i in range(7):
             account_lockout.record_failure(f"user{i}@x.com")
@@ -234,7 +234,7 @@ class TestAccountLockoutEdgeCases:
     def test_clear_unknown_email_is_noop(self):
         """clear() on an email with no bucket must not blow up."""
         from app import account_lockout
-        account_lockout._reset_for_tests()
+        account_lockout._buckets.clear()
         account_lockout.clear("never-recorded@x.com")  # must not raise
         assert "never-recorded@x.com" not in account_lockout._buckets
 
@@ -709,7 +709,7 @@ class TestFailedSignInTrail:
         from app import account_lockout
 
         monkeypatch.setattr(account_lockout, "_LOGIN_FAIL_LIMIT", 3)
-        account_lockout._reset_for_tests()
+        account_lockout._buckets.clear()
         admin_client.post("/api/users", json={
             "name": "Target User", "email": "target@test.local", "role": "user", "password": "Target2026x",
         })
@@ -723,7 +723,7 @@ class TestFailedSignInTrail:
         assert "target@test.local" not in logs and "t***@test.local" in logs
         assert "Sign-in locked after repeated failures" in logs
         admin_client.post("/api/auth/login", json={"email": "admin@test.local", "password": "x"})
-        account_lockout._reset_for_tests()
+        account_lockout._buckets.clear()
         from tests.conftest import BOOTSTRAP_EMAIL, BOOTSTRAP_PASSWORD
         assert admin_client.post("/api/auth/login", json={
             "email": BOOTSTRAP_EMAIL, "password": BOOTSTRAP_PASSWORD}).status_code == 200

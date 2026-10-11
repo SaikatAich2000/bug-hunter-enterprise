@@ -26,6 +26,7 @@ from app.agile.integrity import change_reason
 from app.agile.itemtypes import STANDARD_TYPES, SUBTASK, is_epic, is_standard, is_subtask
 from app.agile.ranking import RankExhausted, ranks_between, spaced_ranks
 from app.models import Board, Bug, Sprint, SprintItemHistory, User
+from app.util import utcnow, utcnow_precise
 
 DEFAULT_SPRINT_DAYS = 14
 CLOSED_STATES = ("closed", "cancelled")
@@ -33,14 +34,6 @@ CLOSED_STATES = ("closed", "cancelled")
 
 class SprintLifecycleError(ValueError):
     """Raised for any sprint-lifecycle rule violation; routes map to 409/422."""
-
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc).replace(microsecond=0)
-
-
-def _now_precise() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def board_today(board: Board | None) -> date:
@@ -392,7 +385,7 @@ def start_sprint(
     sprint.start_date, sprint.end_date = start, end
     sprint.state = "active"
     sprint.started_by_id = actor.id
-    sprint.started_at = _now_precise()
+    sprint.started_at = utcnow_precise()
     for item in items:
         db.add(SprintItemHistory(
             sprint_id=sprint.id, work_item_id=item.id, event_type="committed",
@@ -474,7 +467,7 @@ def complete_sprint(
     # leaves the sprint untouched.
     plan = [(item, resolve(item)) for item in incomplete]
 
-    sprint.completed_at = _now_precise()
+    sprint.completed_at = utcnow_precise()
     for item in complete:
         db.add(SprintItemHistory(
             sprint_id=sprint.id, work_item_id=item.id, event_type="completed",
@@ -540,7 +533,7 @@ def cancel_sprint(
             scope = sprint_scope(target_id) if target_id else backlog_scope(sprint.project_id)
             _place(db, items, scope, sprint.project_id, None, None, "top")
     sprint.state = "cancelled"
-    sprint.cancelled_at = _utcnow()
+    sprint.cancelled_at = utcnow()
     db.flush()
     return sprint
 

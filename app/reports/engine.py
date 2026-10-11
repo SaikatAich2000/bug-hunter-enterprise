@@ -13,7 +13,7 @@ from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Optional
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, literal_column, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import get_settings
@@ -938,7 +938,9 @@ def _utc_date(db: Session, col):
     except Exception:  # pragma: no cover - defensive; bind is always present in practice
         dialect = ""
     if dialect == "postgresql":
-        return func.date(func.timezone("UTC", col))
+        # A literal, not a bind: the SELECT and GROUP BY copies must render
+        # identically or PostgreSQL rejects the grouping.
+        return func.date(func.timezone(literal_column("'UTC'"), col))
     return func.date(col)
 
 

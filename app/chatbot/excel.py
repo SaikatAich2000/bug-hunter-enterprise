@@ -11,6 +11,7 @@ import time
 from typing import Any, Optional
 
 from app.config import get_settings
+from app.util import defang_formula
 
 try:
     from openpyxl import Workbook
@@ -51,21 +52,6 @@ def _evict_oldest_locked() -> None:
 
 _HEADER_STYLE_FILL = "1F2A44"   # Bug Hunter dark accent
 _HEADER_STYLE_FG = "FFFFFF"
-
-
-# Formula-injection defense: leading trigger chars get a quote prefix,
-# same as routes/bugs.py CSV export and reports/xlsx.py.
-_FORMULA_TRIGGERS = ("=", "+", "-", "@", "\t", "\r", "\n")
-
-
-def _defang_formula_text(s: str) -> str:
-    # check raw AND lstripped first char — apps trim leading spaces, " =cmd" still fires
-    if not s:
-        return s
-    stripped = s.lstrip()
-    if s[0] in _FORMULA_TRIGGERS or (stripped and stripped[0] in _FORMULA_TRIGGERS):
-        return "'" + s
-    return s
 
 
 # Column order matches executor._bug_row.
@@ -114,7 +100,7 @@ def _build_workbook(rows: list[dict[str, Any]], description: str) -> bytes:
         for c, (key, _h, _w) in enumerate(_COLUMNS, start=1):
             val = row.get(key, "")
             if isinstance(val, str):
-                val = _defang_formula_text(val)
+                val = defang_formula(val)
             # openpyxl chokes on None for some types; coerce to ""
             ws.cell(row=r, column=c, value="" if val is None else val)
 
@@ -166,12 +152,6 @@ def fetch_staged(token: str, owner_id: int) -> Optional[tuple[bytes, str]]:
         if entry_owner != owner_id:
             return None
         return payload, filename
-
-
-def clear_all_for_test() -> None:
-    """Hook for tests; never called from production code paths."""
-    with _cache_lock:
-        _cache.clear()
 
 
 __all__ = [

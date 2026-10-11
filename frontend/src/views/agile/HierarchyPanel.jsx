@@ -1,5 +1,6 @@
 /** Epics: the project's hierarchy, Epic → Story/Task/Bug/Requirement → Sub-task,
  * with each Epic's progress. */
+import Skeleton from "../../components/Skeleton";
 import { useEffect, useMemo, useState } from "react";
 import { useApp } from "../../state/AppContext";
 import Modal from "../../components/Modal";
@@ -229,7 +230,7 @@ export default function HierarchyPanel({ projectId, canManage, board }) {
     );
   };
 
-  if (!data) return tree.loading ? <div className="sprints-loading">Loading…</div> : null;
+  if (!data) return tree.loading ? <Skeleton lines={4} className="sprints-loading" /> : null;
   const unit = statisticUnit(mode);
   const loose = issuesByEpic.get("none") || [];
 

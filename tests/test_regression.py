@@ -525,7 +525,7 @@ class TestCommentsAttachments:
     def test_download_attachment_works(self, admin_client):
         p = _create_project(admin_client, name="C5")
         bug = _create_bug(admin_client, p["id"])
-        files = {"file": ("data.bin", io.BytesIO(b"Hello World"), "application/octet-stream")}
+        files = {"file": ("data.txt", io.BytesIO(b"Hello World"), "text/plain")}
         r = admin_client.post(f"/api/bugs/{bug['id']}/attachments", files=files)
         att_id = r.json()["id"]
         d = admin_client.get(f"/api/bugs/{bug['id']}/attachments/{att_id}/download")
@@ -911,7 +911,7 @@ class TestV321Performance:
         payload = b"deferred-loading-canary-" + b"x" * 4096
         r = admin_client.post(
             f"/api/bugs/{bug['id']}/attachments",
-            files={"file": ("blob.bin", io.BytesIO(payload), "application/octet-stream")},
+            files={"file": ("blob.txt", io.BytesIO(payload), "text/plain")},
         )
         assert r.status_code == 201, r.text
         att_id = r.json()["id"]

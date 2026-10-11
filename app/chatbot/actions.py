@@ -21,7 +21,7 @@ from app.auth import (
     can_manage_projects,
 )
 from app.chatbot.executor import Block, Response
-from app.models import PROJECT_ROLE_LEAD, Activity, Bug, Comment, Project, User
+from app.models import PROJECT_ROLE_LEAD, Bug, Comment, Project, User
 from app.people import non_members
 from app.schemas import (
     ALLOWED_ENVIRONMENTS,
@@ -31,6 +31,7 @@ from app.schemas import (
     sanitize_html,
     statuses_for_type,
 )
+from app.services.audit import audit
 
 # Fallback label when an assign/unassign plan carries ids but no display names.
 _UNKNOWN_USERS = "user(s)"
@@ -115,10 +116,7 @@ def _check_can_edit_bug(actor: User, bug: Bug) -> Optional[str]:
     """Return None if the actor may edit this item, otherwise an error string.
     Passes the item's real type so per-type rules match PUT /api/bugs/{id}."""
     itype = getattr(bug, "item_type", None) or "Bug"
-    if not can_edit_bug(actor,
-                        bug.reporter_id,
-                        [a.id for a in bug.assignees],
-                        item_type=itype):
+    if not can_edit_bug(actor, item_type=itype):
         return f"You don't have permission to edit that {itype.lower()}"
     return None
 
@@ -141,16 +139,8 @@ def _check_can_create_bug(actor: User) -> Optional[str]:
 def _audit(db: Session, bug_id: Optional[int], actor: User,
            action: str, detail: str,
            entity_type: str = "bug", entity_id: Optional[int] = None) -> None:
-    db.add(Activity(
-        org_id=actor.org_id,
-        bug_id=bug_id,
-        entity_type=entity_type,
-        entity_id=entity_id if entity_id is not None else bug_id,
-        actor_user_id=actor.id,
-        actor_name=actor.name,
-        action=action,
-        detail=detail,
-    ))
+    audit(db, actor, entity_type, entity_id if entity_id is not None else bug_id,
+          action, detail, bug_id=bug_id)
 
 
 # --- Block helpers ---

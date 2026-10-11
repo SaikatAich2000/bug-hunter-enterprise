@@ -4,17 +4,19 @@
 #     pip install -r requirements.txt -r requirements-dev.txt
 
 # Tests
-pytest>=8.0,<10
+pytest>=9.1.1,<10
+pytest-xdist>=3.5  # -n auto in CI
+httpx2  # starlette's TestClient backend; plain httpx there is deprecated
 
 # Browser end-to-end suites (tests/test_ui_smoke.py, tests/test_playwright_*.py,
 # marker `ui`). One-time browser download: python -m playwright install chromium
-playwright>=1.47,<2
+playwright>=1.63.0,<2
 
 # Coverage
-pytest-cov>=5.0
-coverage>=7.4
+pytest-cov>=7.1.0
+coverage>=7.16.2
 
 # Static analysis / security scanning (CI lint + security jobs)
-ruff>=0.6
+ruff>=0.17.0
 bandit[toml]>=1.7
 pip-audit>=2.7

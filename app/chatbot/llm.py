@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import threading
 import time
 from dataclasses import dataclass
@@ -20,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Optional
 from sqlalchemy.orm import Session
 
 from app.chatbot.executor import Response
+from app.config import env_float, env_int, env_str
 from app.models import User
 
 if TYPE_CHECKING:
@@ -31,28 +31,28 @@ logger = logging.getLogger("bug_hunter.sleuth.llm")
 
 # Env-overridable; default matches the README path.
 _MODEL_PATH = Path(
-    os.getenv("SLEUTH_LLM_MODEL_PATH",
+    env_str("SLEUTH_LLM_MODEL_PATH",
               str(Path(__file__).resolve().parent.parent.parent / "models" / "sleuth.gguf"))
 )
 
 # Time out and fall back rather than block indefinitely on a slow model.
-_INFERENCE_TIMEOUT_S = float(os.getenv("SLEUTH_LLM_TIMEOUT_S", "12"))
+_INFERENCE_TIMEOUT_S = env_float("SLEUTH_LLM_TIMEOUT_S", 12)
 
 # Unload after idle so RAM returns to Postgres/web workers.
-_IDLE_UNLOAD_S = float(os.getenv("SLEUTH_LLM_IDLE_UNLOAD_S", "600"))
+_IDLE_UNLOAD_S = env_float("SLEUTH_LLM_IDLE_UNLOAD_S", 600)
 
 # Enough for the JSON we ask for, small enough to bound latency on a slow CPU.
-_MAX_NEW_TOKENS = int(os.getenv("SLEUTH_LLM_MAX_TOKENS", "120"))
+_MAX_NEW_TOKENS = env_int("SLEUTH_LLM_MAX_TOKENS", 120)
 
 # Smaller context = less RAM; our prompts are short.
-_CTX_LEN = int(os.getenv("SLEUTH_LLM_CTX_LEN", "1024"))
+_CTX_LEN = env_int("SLEUTH_LLM_CTX_LEN", 1024)
 
 # 1 thread is the documented target; more than physical cores causes contention.
-_THREADS = int(os.getenv("SLEUTH_LLM_THREADS", "1"))
+_THREADS = env_int("SLEUTH_LLM_THREADS", 1)
 
 # 1.4x headroom over file size covers KV cache, load buffer, and llama.cpp
 # overhead for Q4_K_M at 1024-token context.
-_RAM_HEADROOM_MULT = float(os.getenv("SLEUTH_LLM_RAM_HEADROOM", "1.4"))
+_RAM_HEADROOM_MULT = env_float("SLEUTH_LLM_RAM_HEADROOM", 1.4)
 # Even a tiny GGUF needs ~200 MB with Python + llama.cpp state + context.
 _RAM_MIN_FLOOR_MB = 200
 
@@ -308,12 +308,6 @@ def _cached_budget() -> Optional["_MemoryBudget"]:
     budget = memory_budget()
     _budget_cache = (now, budget)
     return budget
-
-
-def _reset_caches_for_test() -> None:
-    """Clear the memoized budget. Test hook only."""
-    global _budget_cache
-    _budget_cache = None
 
 
 # --- Prompt (kept short to minimise prefill cost on CPU) ---

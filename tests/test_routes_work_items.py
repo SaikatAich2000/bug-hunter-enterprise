@@ -294,7 +294,7 @@ def test_cov_bugs_upload_too_large_413(admin_client, monkeypatch):
 
     p = _make_project(admin_client, name="BigFileProj")
     bug = _make_item(admin_client, p["id"], item_type="Bug")
-    files = {"file": ("big.bin", io.BytesIO(b"way too many bytes"), "application/octet-stream")}
+    files = {"file": ("big.txt", io.BytesIO(b"way too many bytes"), "text/plain")}
     r = admin_client.post(f"/api/bugs/{bug['id']}/attachments", files=files)
     assert r.status_code == 413, r.text
     assert "too large" in r.json()["detail"].lower()

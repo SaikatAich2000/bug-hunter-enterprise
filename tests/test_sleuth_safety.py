@@ -3,75 +3,20 @@ pending actions are isolated per user, memory edge cases don't crash, and the sc
 """
 from __future__ import annotations
 
-import os as _os
-import sys as _sys
-
-from tests.conftest import default_org_id
-
-# Make the repo root importable when this file is run directly.
-_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
-
-import os
-import sys
-import tempfile
 import threading
-import traceback
-
-_tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-_tmp.close()
-os.environ["DATABASE_URL"] = f"sqlite:///{_tmp.name}"
-os.environ["SESSION_SECRET"] = "test-db-safety"
-os.environ["BOOTSTRAP_ADMIN_EMAIL"] = "admin@example.com"
-os.environ["BOOTSTRAP_ADMIN_PASSWORD"] = "AdminPass123!"
-os.environ["BOOTSTRAP_ADMIN_NAME"] = "Admin"
-os.environ["SLEUTH_LLM_MODEL_PATH"] = "/tmp/__no_model__.gguf"
-os.environ["SLEUTH_CLOUD_ENABLED"] = "0"   # never call the cloud in tests
-
-# Force a fresh app import bound to this file's DB (a stale shared engine causes "no such table").
-import sys as _sys_purge
 
 from sqlalchemy import inspect
-
-for _m in list(_sys_purge.modules):
-    if _m == "app" or _m.startswith("app."):
-        del _sys_purge.modules[_m]
-
-import pytest  # noqa: E402  (after the deliberate sys.modules purge above)
 
 from app import models
 from app.auth import hash_password
 from app.chatbot import actions, executor
 from app.chatbot.memory import store as memstore
 from app.database import Base, SessionLocal, engine
-
-
-@pytest.fixture(autouse=True)
-def _rebind_app_modules():
-    """Re-bind module-level app.* refs each test (conftest purges app.* to rebind the engine)."""
-    import importlib
-    g = globals()
-    db_mod = importlib.import_module("app.database")
-    g["Base"], g["engine"], g["SessionLocal"] = (
-        db_mod.Base, db_mod.engine, db_mod.SessionLocal,
-    )
-    g["models"] = importlib.import_module("app.models")
-    g["hash_password"] = importlib.import_module("app.auth").hash_password
-    g["executor"] = importlib.import_module("app.chatbot.executor")
-    g["actions"] = importlib.import_module("app.chatbot.actions")
-    g["memstore"] = importlib.import_module("app.chatbot.memory").store
-
-
-PASSED: list[str] = []
-FAILED: list[tuple[str, str]] = []
+from tests.conftest import default_org_id
 
 
 def check(name, cond, detail=""):
-    if cond:
-        PASSED.append(name)
-        print(f"  PASS  {name}")
-    else:
-        FAILED.append((name, detail))
-        raise AssertionError(f"{name}: {detail}")
+    assert cond, f"{name}: {detail}"
 
 
 def section(t):
@@ -81,7 +26,7 @@ def section(t):
 def seed():
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
-    memstore._clear_all_for_test()
+    memstore._sessions.clear()
     db = SessionLocal()
     try:
         admin = models.User(org_id=default_org_id(), name="Admin", email="admin@example.com",
@@ -334,12 +279,12 @@ def test_concurrent_users_isolated() -> None:
 
 def test_memory_edge_cases() -> None:
     section("Memory: TTL eviction, max sessions, reset")
-    memstore._clear_all_for_test()
+    memstore._sessions.clear()
 
     # Fill past the cap via direct API calls and verify it holds.
     for i in range(1, 250):
         memstore.remember_bug(i, i * 10)
-    sessions = memstore._all_sessions_for_test()
+    sessions = memstore._sessions
     check("memory: capped at 200 sessions",
           len(sessions) <= 200, f"got {len(sessions)}")
 
@@ -434,10 +379,7 @@ def test_sql_injection_safety() -> None:
             "1; UPDATE bugs SET status='Closed'; --",
         ]
         for q in nasty:
-            try:
-                executor.execute(q, db, admin)
-            except Exception as e:
-                FAILED.append((f"injection: {q[:30]}", f"crashed: {e}"))
+            executor.execute(q, db, admin)  # a crash on hostile input fails the test
         after_count = db.query(models.Bug).count()
         check("injection: bug count unchanged",
               after_count == before_count,
@@ -475,30 +417,3 @@ def test_excel_in_memory_only() -> None:
               not leaked, f"leaked={leaked}")
     finally:
         db.close()
-
-
-if __name__ == "__main__":
-    try:
-        test_reads_are_pure()
-        test_schema_unchanged()
-        test_atomic_rollback()
-        test_permission_denial_no_writes()
-        test_concurrent_users_isolated()
-        test_memory_edge_cases()
-        test_new_action_overrides_pending()
-        test_concurrent_executes()
-        test_sql_injection_safety()
-        test_excel_in_memory_only()
-    except Exception:
-        traceback.print_exc()
-        FAILED.append(("HARNESS", "uncaught"))
-
-    print("\n=== RESULTS ===")
-    print(f"Passed: {len(PASSED)}")
-    print(f"Failed: {len(FAILED)}")
-    if FAILED:
-        for n, d in FAILED:
-            print(f"  FAIL  {n}  {d}")
-        sys.exit(1)
-    print("All checks passed")
-    sys.exit(0)

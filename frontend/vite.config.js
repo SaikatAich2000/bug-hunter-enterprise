@@ -14,7 +14,7 @@ export default defineConfig({
     outDir: resolve(__dirname, "..", "app", "static"),
     emptyOutDir: false,
     sourcemap: false,   // never ship source maps (would expose the source)
-    rollupOptions: {
+    rolldownOptions: {
       input: {
         index: resolve(__dirname, "index.html"),
         login: resolve(__dirname, "login.html"),
@@ -26,9 +26,13 @@ export default defineConfig({
         "delete-account": resolve(__dirname, "delete-account.html"),
       },
       output: {
-        // Split RichEditor into its own chunk (still a static import, not React.lazy).
-        manualChunks(id) {
-          if (id.includes("RichEditor")) return "rich-editor";
+        // Vendor libraries and the rich editor get their own chunks so the
+        // login/reset pages never download the editor or the app shell.
+        codeSplitting: {
+          groups: [
+            { name: "vendor", test: /node_modules[\/](react|react-dom|scheduler|@dnd-kit)[\/]/ },
+            { name: "rich-editor", test: /RichEditor/ },
+          ],
         },
       },
     },

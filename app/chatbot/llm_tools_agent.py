@@ -30,6 +30,7 @@ from app.chatbot.redaction import redact
 from app.chatbot.tools import ALL_TOOL_NAMES, READ_TOOL_NAMES, TOOL_REGISTRY, TOOL_SPECS, ToolError
 from app.config import get_settings
 from app.models import User
+from app.services.audit import audit
 
 logger = logging.getLogger("bug_hunter.sleuth.llm_tools")
 
@@ -281,7 +282,6 @@ _TOOL_AUDIT = {
 
 
 def _audit_tool_call(db: Session, actor: User, name: str, result: dict) -> None:
-    from app.models import Activity
 
     if isinstance(result, dict) and result.get("unchanged"):
         return
@@ -292,12 +292,8 @@ def _audit_tool_call(db: Session, actor: User, name: str, result: dict) -> None:
                   f"'{result.get('status', '')}' (via Sleuth)")
     else:
         detail = f"{name.replace('_', ' ')} via Sleuth: {json.dumps(result, default=str)[:300]}"
-    db.add(Activity(
-        org_id=actor.org_id,
-        bug_id=entity_id if entity_type == "bug" else None,
-        entity_type=entity_type, entity_id=entity_id,
-        actor_user_id=actor.id, actor_name=actor.name, action=action, detail=detail,
-    ))
+    audit(db, actor, entity_type, entity_id, action, detail,
+          bug_id=entity_id if entity_type == "bug" else None)
 
 
 def confirm_pending_tool_call(db: Session, actor: User, pending: dict) -> Response:

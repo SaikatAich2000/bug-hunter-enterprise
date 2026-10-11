@@ -434,7 +434,7 @@ class TestHardening:
         """app/main.py's __main__ block must not hard-bind 0.0.0.0."""
         from pathlib import Path
         src = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
-        assert 'os.getenv("UVICORN_HOST"' in src, (
+        assert 'env_str("UVICORN_HOST"' in src, (
             "Bind host must come from UVICORN_HOST env var, not be hard-coded"
         )
         assert '"127.0.0.1"' in src, (

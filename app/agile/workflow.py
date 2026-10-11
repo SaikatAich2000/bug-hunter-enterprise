@@ -106,15 +106,16 @@ def allowed_transition_targets(db: Session, work_item_type: str, from_status_id:
     return list(db.scalars(select(WorkflowStatus).where(WorkflowStatus.id.in_(ids))).all())
 
 
-def seed_default_transitions(db: Session, work_item_type: str) -> None:
+def seed_default_transitions(db: Session, work_item_type: str) -> bool:
     """Idempotent: allow every status -> every other status for `work_item_type`
     (the default — a permissive baseline; project-specific restricted
-    workflows are a later slice). Skipped if any transition already exists."""
+    workflows are a later slice). Skipped if any transition already exists.
+    Returns True when it wrote rows."""
     existing = db.scalar(
         select(WorkflowTransition.id).where(WorkflowTransition.work_item_type == work_item_type).limit(1)
     )
     if existing is not None:
-        return
+        return False
     statuses = list(db.scalars(
         select(WorkflowStatus).where(
             WorkflowStatus.scope_key == "global",
@@ -131,6 +132,7 @@ def seed_default_transitions(db: Session, work_item_type: str) -> None:
                 name=f"{src.name} -> {dst.name}",
             ))
     db.flush()
+    return True
 
 
 def reconcile_transitions(db: Session, work_item_type: str) -> bool:

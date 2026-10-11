@@ -1,22 +1,23 @@
 """Authentication primitives: bcrypt hashing, signed session cookies
 (HttpOnly + SameSite=Lax), reset and invitation tokens, and role-check dependencies.
 
-Token payload is `user_id:session_version:jti` — bumping session_version
-logs out every device; revoking a jti row logs out one device. The session's
-user carries the organization (``user.org_id``) that scopes every other query;
-see app/access.py for the tenant rules.
+Token payload is `user_id:session_version:jti`, encrypted so the client cannot read the
+user id — bumping session_version logs out every device; revoking a jti row logs out one.
+The session's user carries the organization (``user.org_id``) that scopes every other
+query; see app/access.py for the tenant rules.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import ipaddress
 import logging
-import os
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import bcrypt
+from cryptography.fernet import Fernet, InvalidToken
 from fastapi import Depends, HTTPException, Request, Response, status
 from itsdangerous import BadSignature, TimestampSigner
 from sqlalchemy import select
@@ -24,7 +25,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.agile.integrity import set_actor
-from app.config import get_settings
+from app.config import env_str, get_settings
 from app.database import get_db
 from app.models import (
     ROLE_ADMIN,
@@ -39,6 +40,7 @@ from app.models import (
 logger = logging.getLogger("bug_hunter.auth")
 
 COOKIE_NAME = "bh_session"
+HOST_COOKIE_NAME = "__Host-bh_session"
 
 
 def trusted_forwarded_ip(xff: str, hops: int) -> Optional[str]:
@@ -72,7 +74,7 @@ def _bcrypt_rounds() -> int:
     if get_settings().is_production:
         return configured
     try:
-        return max(1, min(int(os.getenv("BCRYPT_TEST_ROUNDS", "") or configured), configured))
+        return max(4, min(int(env_str("BCRYPT_TEST_ROUNDS", "") or configured), configured))
     except ValueError:
         return configured
 
@@ -106,9 +108,31 @@ def _signer() -> TimestampSigner:
     return TimestampSigner(session_secret(), salt="bh-session-v2")
 
 
+def _sealer() -> Fernet:
+    """Encrypts the cookie payload so the user id is not readable by the client."""
+    secret = get_settings().SESSION_SECRET or _FALLBACK_SECRET
+    key = hashlib.sha256(b"bh-session-v3:" + secret.encode("utf-8")).digest()
+    return Fernet(base64.urlsafe_b64encode(key))
+
+
 def make_session_token(user_id: int, session_version: int, jti: str) -> str:
-    """Signed token of user id, session version and the per-session id (jti)."""
-    return _signer().sign(f"{user_id}:{session_version}:{jti}".encode("utf-8")).decode("utf-8")
+    """Encrypted, authenticated token of user id, session version and session id (jti)."""
+    return _sealer().encrypt(f"{user_id}:{session_version}:{jti}".encode("utf-8")).decode("utf-8")
+
+
+def _open_session_token(token: str) -> Optional[bytes]:
+    ttl = get_settings().SESSION_TTL_SECONDS
+    try:
+        data = token if isinstance(token, bytes) else token.encode("utf-8")
+        return _sealer().decrypt(data, ttl=ttl)
+    except (InvalidToken, UnicodeEncodeError):
+        pass
+    # Cookies issued before the payload was encrypted (signed, readable) stay valid
+    # until they expire, so an upgrade does not log everyone out. Drop after one release.
+    try:
+        return _signer().unsign(token, max_age=ttl)
+    except BadSignature:
+        return None
 
 
 def parse_session_token(token: str) -> Optional[tuple[int, int, str]]:
@@ -116,9 +140,8 @@ def parse_session_token(token: str) -> Optional[tuple[int, int, str]]:
     without a session id (from before per-device sessions) can't be revoked, so it is refused."""
     if not token:
         return None
-    try:
-        raw = _signer().unsign(token, max_age=get_settings().SESSION_TTL_SECONDS)
-    except BadSignature:
+    raw = _open_session_token(token)
+    if raw is None:
         return None
     try:
         text = raw.decode("utf-8")
@@ -143,10 +166,22 @@ def _cookie_secure(settings) -> bool:
     return bool(settings.COOKIE_SECURE) or settings.APP_BASE_URL.lower().startswith("https://")
 
 
+def session_cookie_name(settings=None) -> str:
+    """``__Host-`` pins the cookie to this exact host over HTTPS (no Domain, Path=/); browsers
+    reject the prefix without Secure, so plain-HTTP dev keeps the unprefixed name."""
+    return HOST_COOKIE_NAME if _cookie_secure(settings or get_settings()) else COOKIE_NAME
+
+
+def session_cookie_value(request: Request) -> str:
+    """The session token from the request: the current name first, then the pre-prefix
+    name that cookies issued before the upgrade still use."""
+    return request.cookies.get(HOST_COOKIE_NAME) or request.cookies.get(COOKIE_NAME) or ""
+
+
 def set_session_cookie(response: Response, user: User, jti: str) -> None:
     settings = get_settings()
     response.set_cookie(
-        key=COOKIE_NAME,
+        key=session_cookie_name(settings),
         value=make_session_token(user.id, user.session_version or 0, jti=jti),
         max_age=settings.SESSION_TTL_SECONDS,
         httponly=True,
@@ -154,18 +189,18 @@ def set_session_cookie(response: Response, user: User, jti: str) -> None:
         samesite="lax",
         path="/",
     )
+    if _cookie_secure(settings):
+        # A pre-upgrade cookie must not shadow or outlive the new one.
+        response.delete_cookie(key=COOKIE_NAME, path="/", httponly=True, secure=True, samesite="lax")
 
 
 def clear_session_cookie(response: Response) -> None:
     # Mirror the set attributes; some browsers key the delete on samesite/secure.
     settings = get_settings()
-    response.delete_cookie(
-        key=COOKIE_NAME,
-        path="/",
-        httponly=True,
-        secure=_cookie_secure(settings),
-        samesite="lax",
-    )
+    secure = _cookie_secure(settings)
+    names = (COOKIE_NAME, HOST_COOKIE_NAME) if secure else (COOKIE_NAME,)
+    for name in names:
+        response.delete_cookie(key=name, path="/", httponly=True, secure=secure, samesite="lax")
 
 
 PASSWORD_RESET_TTL = timedelta(hours=2)
@@ -256,8 +291,7 @@ def _validate_session_row(db: Session, jti: str, user: User) -> bool:
 
 
 def _user_from_request(request: Request, db: Session) -> Optional[User]:
-    token = request.cookies.get(COOKIE_NAME, "")
-    parsed = parse_session_token(token)
+    parsed = parse_session_token(session_cookie_value(request))
     if parsed is None:
         return None
     user_id, session_version, jti = parsed
@@ -301,22 +335,15 @@ def require_manager_or_admin(user: User = Depends(get_current_user)) -> User:
     return user
 
 
-def can_edit_bug(
-    user: User,
-    bug_reporter_id: Optional[int],
-    assignee_ids: list[int],
-    item_type: str = "Bug",
-) -> bool:
+def can_edit_bug(user: User, item_type: str = "Bug") -> bool:
     """Anyone may edit Bugs; Tasks/Requirements are admin/manager only."""
-    del bug_reporter_id, assignee_ids
     if item_type in ("Task", "Requirement"):
         return user.role in (ROLE_ADMIN, ROLE_MANAGER)
     return True
 
 
-def can_delete_bug(user: User, item_type: str = "Bug") -> bool:
+def can_delete_bug(user: User) -> bool:
     """Work-item deletion is admin-only for every type."""
-    del item_type
     return user.role == ROLE_ADMIN
 
 

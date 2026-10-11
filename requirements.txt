@@ -11,15 +11,15 @@
 # ), consumed via `pip install -r requirements-lock.txt`. Keep this file
 # the human-maintained source of truth; regenerate the lock after any
 # dependency change and after a successful `pip-audit`.
-fastapi>=0.115.6
-uvicorn[standard]>=0.32.1
-sqlalchemy>=2.0.36
-pydantic>=2.10.4
-psycopg[binary]>=3.2.3
-python-dotenv>=1.2.2
+fastapi>=0.143.0
+uvicorn[standard]>=0.54.0
+sqlalchemy>=2.1.4
+pydantic>=2.14.0
+psycopg[binary]>=3.3.6
+python-dotenv>=1.2.4
 httpx>=0.28.1
-python-multipart>=0.0.31
-bcrypt>=4.2.1
+python-multipart>=0.0.32
+bcrypt>=5.0.0
 itsdangerous>=2.2.0
 
 # IANA time-zone database for the email-digest scheduler (app/scheduler.py).
@@ -27,7 +27,7 @@ itsdangerous>=2.2.0
 # ZoneInfo(EMAIL_DIGEST_TIMEZONE) — e.g. "Asia/Kolkata" — cannot resolve and the
 # scheduler silently falls back to UTC, firing the digest at the cron time in UTC
 # instead of local time (08:00 IST would run at 13:30 IST). Data-only package.
-tzdata>=2026.3
+tzdata>=2026.5
 
 # T6: EXIF / metadata stripper for uploaded images. Pillow is lazily
 # imported by app/image_strip.py so deploys that skip it (or fail to
@@ -39,13 +39,13 @@ Pillow>=12.3.0
 # interception CA, so httpx fails with CERTIFICATE_VERIFY_FAILED even though the
 # OS trusts it. truststore delegates verification to the platform trust store
 # instead (app/git/tls.py). Verification is never disabled. Data-only package.
-truststore>=0.10.0
+truststore>=0.10.4
 
 # Fernet (AES-128-CBC + HMAC-SHA256) for project-level Git credentials at rest
 # (app/git/credentials.py). The key is server-only (GIT_CREDENTIAL_ENCRYPTION_KEY)
 # and is never derived from SESSION_SECRET. Already a transitive dependency of
 # other packages; declared directly because app code imports it.
-cryptography>=42.0.0
+cryptography>=50.0.2
 
 # --- Sleuth: Excel export ---
 # openpyxl is pure-Python and lightweight (~3 MB), suitable for the
@@ -57,7 +57,7 @@ openpyxl>=3.1.5
 # app/fcm_transport.py, and only used when WEB_PUSH_ENABLED=true AND a Firebase
 # service-account JSON is configured — so a deploy that doesn't use push runs
 # fine even if this import is unavailable (the transport just disables itself).
-firebase-admin>=6.6.0
+firebase-admin>=7.7.0
 
 # --- Sleuth: optional local LLM layer ---
 # Uncomment to enable Layer 3 (local llama.cpp inference). Requires a
@@ -67,12 +67,12 @@ firebase-admin>=6.6.0
 
 # --- SigNoz observability: OTLP/gRPC traces + metrics + logs (app/telemetry.py) ---
 # gRPC receiver confirmed at OTEL_EXPORTER_OTLP_ENDPOINT (http:// scheme = cleartext h2c).
-opentelemetry-sdk>=1.44.0
-opentelemetry-exporter-otlp-proto-grpc>=1.44.0
+opentelemetry-sdk>=1.45.1
+opentelemetry-exporter-otlp-proto-grpc>=1.45.1
 # Auto-instrumentation: FastAPI server spans/HTTP metrics, SQLAlchemy DB spans,
 # httpx outbound spans, and the stdlib-logging bridge (trace correlation).
-opentelemetry-instrumentation-fastapi>=0.66b0
-opentelemetry-instrumentation-sqlalchemy>=0.66b0
-opentelemetry-instrumentation-httpx>=0.66b0
-opentelemetry-instrumentation-logging>=0.66b0
+opentelemetry-instrumentation-fastapi>=0.66b1
+opentelemetry-instrumentation-sqlalchemy>=0.66b1
+opentelemetry-instrumentation-httpx>=0.66b1
+opentelemetry-instrumentation-logging>=0.66b1
 pyotp>=2.9.0

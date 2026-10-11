@@ -31,6 +31,7 @@ whatever `APP_VERSION` in `.env` says, and `/api/health` reports it.
 - [Quick start](#quick-start)
 - [Configuration](#configuration)
 - [Local development](#local-development)
+- [Operations, security, testing and performance docs](#more-documentation)
 - [Live-data safety](#live-data-safety)
 - [Upgrading from earlier editions](#upgrading-from-earlier-editions)
 - [Deployment](#deployment)
@@ -48,12 +49,12 @@ whatever `APP_VERSION` in `.env` says, and `/api/health` reports it.
 | Sprints & Agile | Opt-in per project, Scrum-style: ranked backlog and sprint planning, the active sprint board, Epic → issue → Sub-task hierarchy, board settings, and burndown/sprint/velocity/flow reports. See [Sprints & Agile](#sprints--agile). |
 | Projects & events | Projects group your work. Events group items for a standup or review and have one or more managers. |
 | Item links | Link items together: relates, blocks, or duplicate. |
-| Comments & attachments | Rich-text comments (bold, italic, lists, code, quotes) and plain-text descriptions that keep line breaks. PDF, image and video files are stored in PostgreSQL. Pasted images become real attachments, and image metadata (EXIF) is stripped. |
+| Comments & attachments | Rich-text comments (bold, italic, lists, code, quotes) and plain-text descriptions that keep line breaks. Images, PDF, video, Office documents and txt/csv/log/zip files, up to 50 MB each, are stored in the database. Only listed extensions are accepted and each file's leading bytes must match its extension (`app/upload_policy.py`; SVG and HTML are refused). Pasted images become real attachments, and image metadata is stripped. |
 | Bulk actions | Change status, priority or environment, or delete, across many items at once. |
 | Bulk import | Download an Excel template, fill it in (or use CSV), and import. Every row is validated on its own and errors are reported per row. |
 | Reports | A report builder (manager/admin) that exports a multi-sheet Excel file, plus agile reports (burndown, burnup, velocity, cumulative flow, control chart, workload, scope change, epic progress). |
 | Notifications | In-app bell, email (per event or one daily digest), and optional browser/FCM push. Every notification links straight to its item or event, through the login page if needed. |
-| Audit log | Every create, update, delete and login is recorded for admins and managers, who can filter it and export it as CSV. Entries stay even after an item is deleted (until `AUDIT_RETENTION_DAYS`). |
+| Audit log | Item, project, user, sprint and board changes, sign-ins (including failures and lockouts) and password events are recorded for admins and managers. Entries stay even after an item is deleted. |
 | Sessions | Admins see every active session (user, role, IP, browser, time) and can log out a single device. |
 | Organizations | Public sign-up (switchable) creates an organization and its first admin; the bootstrap admin creates the first one. Every record belongs to one organization, and another organization's data answers 404. |
 | Invitations | Admins and managers invite people by email with a role and optional projects (as member or lead). Links are single-use, expire after 7 days and are stored hashed. |
@@ -69,7 +70,8 @@ whatever `APP_VERSION` in `.env` says, and `/api/health` reports it.
 | Observability | Optional OpenTelemetry export (traces, metrics, logs) to SigNoz or any OTLP/gRPC collector. |
 | API docs | Self-hosted Swagger UI (`/docs`) and ReDoc (`/redoc`) in development. Production hides them unless `ENABLE_API_DOCS=true`. |
 | Sleuth assistant | Answers plain-English questions and runs actions (with confirmation). Runs locally by default; see [Sleuth](#sleuth). |
-| UI | A dark theme and a light theme, responsive layout, auto-refresh. |
+| Onboarding & help | A welcome screen, a resumable product tour and a help center with bundled guides. Progress is stored per user on the server (`GET`/`PUT /api/me/preferences`), so it follows you across browsers. |
+| UI | A dark theme and a light theme, responsive layout, auto-refresh, motion that respects `prefers-reduced-motion`. |
 
 ### Roles
 
@@ -193,8 +195,8 @@ the list it sits in. The conversion runs once and is safe to repeat.
 ## Architecture
 
 - **Backend:** FastAPI, SQLAlchemy 2.x and Pydantic 2. PostgreSQL 16 in production; SQLite for tests and quick local runs.
-- **Frontend:** React 18 in plain JavaScript (JSX), built with Vite into `app/static`, which FastAPI serves directly. Tested with Vitest and linted with ESLint.
-- **Packaging:** Docker Compose runs the app and its own PostgreSQL. The image is built on `python:3.12-slim`, and the frontend is compiled in a throwaway `node:20-slim` stage.
+- **Frontend:** React 19 in plain JavaScript (JSX), built with Vite into `app/static`, which FastAPI serves directly. Tested with Vitest and linted with ESLint.
+- **Packaging:** Docker Compose runs the app and its own PostgreSQL. The image is built on `python:3.12-slim`, and the frontend is compiled in a throwaway `node:22-slim` stage.
 - **Sleuth:** pure-Python rules and a TF-IDF classifier, plus an optional local LLM and an optional cloud LLM with tool calling.
 
 ```
@@ -216,11 +218,12 @@ app/
 ├── chatbot/     # Sleuth: nlu · classifier · llm · cloud_llm · redaction
 │                # rag · retrieval · verify · agent · evals · tools
 │                # llm_tools_agent · executor · actions · memory · excel · router
-├── jobs/        # email_digest · audit_retention
+├── jobs/        # email_digest · retention (daily cleanup)
 └── static/      # built React bundle + icon.png / favicon.png
 frontend/        # React + Vite SPA source → builds into app/static
-tests/           # SQLite-backed pytest suite (+ Playwright browser suites, marker `ui`)
-scripts/         # load test, release packaging, SonarQube, RAG index builder
+tests/           # SQLite-backed pytest suite (+ optional Playwright UI smoke)
+scripts/         # backup/restore, load tests, release packaging, SonarQube, RAG index builder
+docs/            # operations, security model, testing, performance
 models/          # GGUF files for Sleuth's optional local LLM (gitignored)
 ```
 
@@ -248,7 +251,7 @@ doesn't clash with a local PostgreSQL install. Data lives in the named volume
 
 For a clean rebuild, run `BUILD_CLEAN=1 ./deploy.sh`. Behind a corporate proxy or
 air gap, set `BASE_IMAGE` in `.env` to an internal mirror, or pre-load
-`python:3.12-slim` and `node:20-slim` with `docker save | docker load`.
+`python:3.12-slim` and `node:22-slim` with `docker save | docker load`.
 
 ### First login
 
@@ -443,10 +446,18 @@ Commit the rebuilt `app/static` together with frontend changes so a plain
 ### Tests and checks
 
 ```bash
-pytest -m "not ui"                           # backend suite (coverage gate: 80%)
-python -m playwright install chromium firefox webkit   # one-time browser download
+pytest -m "not ui" -n auto --cov=app         # backend suite, parallel (coverage gate: 80%)
+python -m playwright install chromium        # one-time browser download (add firefox webkit if wanted)
 pytest -m ui                                 # browser suites (Chromium)
 PW_BROWSERS=chromium,firefox,webkit pytest tests/test_e2e_browser.py -m ui
+```
+
+Browser env vars: `PW_BROWSERS` (comma list, default `chromium`), `PW_EXECUTABLE_PATH`
+(use an installed browser binary), `PW_HEADED=1` (show the window). Add
+`BH_TEST_DB=postgres BH_TEST_POSTGRES_URL=...` to run the backend suite on PostgreSQL.
+See [docs/testing.md](docs/testing.md).
+
+```bash
 
 python -m compileall -q app tests scripts
 ruff check app tests scripts
@@ -465,8 +476,10 @@ axe-core WCAG 2.1 AA checks in the dark and light themes, which needs
 `npm ci` in `frontend/` first. Any uncaught page error, browser console error
 or HTTP 5xx fails a test.
 
-Load test a running instance (read-only and bounded; credentials come from
-`--email/--password` or `BH_LOAD_EMAIL`/`BH_LOAD_PASSWORD`):
+Load test a running instance. `scripts/load_test.py` is read-only and bounded
+(credentials from `--email/--password` or `BH_LOAD_EMAIL`/`BH_LOAD_PASSWORD`);
+`scripts/loadtest.py` ramps 10 to 200 users with reads and writes and needs a test
+instance (see [docs/performance.md](docs/performance.md)):
 
 ```bash
 python scripts/load_test.py --base-url http://localhost:8765 --users 15 --duration 90 --docker-container bugtracker_app
@@ -477,18 +490,20 @@ SonarQube: `scripts/sonar-server-up.ps1` starts a local server,
 `python scripts/sonar_gate.py apply` installs the `bug-hunter-gate` quality gate
 (80% coverage overall and on new code, security rating A, zero vulnerabilities).
 
-The GitHub Actions pipeline (`.github/workflows/build-and-push.yml`) runs on
-pushes and pull requests to `main`: compile, ruff, bandit, the backend suite
-with the 80% coverage gate, ESLint, the frontend tests and build, `npm audit`
-and `pip-audit`. All actions are pinned to commit SHAs. Three repository
-variables control the rest (SonarQube is a local tool only; the pipeline does not run it):
+GitHub Actions runs on pushes and pull requests to `main`. `build-and-push.yml`
+(CI): lint (compile, ruff, ESLint), backend tests with coverage on SQLite and on
+PostgreSQL 16, Playwright browser tests, the frontend tests and build, then the
+optional SonarQube and image-push jobs. `security.yml`: conflict markers, gitleaks,
+Trivy (filesystem), bandit, hadolint, ShellCheck. `docker.yml` (pull requests):
+image build plus a Trivy image scan. Dependabot proposes weekly updates. All
+actions are pinned to commit SHAs. Three repository variables control the rest:
 
 | Variable | Effect |
 | --- | --- |
 | `IMAGE_PUSH_ENABLED=true` | Build and push the image on `main` after every check passes (needs the `ACR_*` secrets). |
 | `RUN_TESTS=false` | Skip the backend and frontend test jobs for an image-only run. Lint, build and dependency audits still gate the push. |
 
-Browser suites are not run in CI.
+Details per job: [docs/testing.md](docs/testing.md).
 
 ## Live-data safety
 
@@ -498,17 +513,18 @@ Browser suites are not run in CI.
 - `init_db()` only creates missing tables, columns and indexes. Existing rows are never deleted, and the only in-place writes are one-time backfills of new columns (for example display IDs and default workflow statuses).
 - Because the schema is additive, an older release still runs against a newer database. Rolling back is still a manual step, so take a backup before upgrading.
 
-**Backup & restore:**
+**Backup & restore:** `./deploy.sh` takes a dump first (`SKIP_BACKUP=1` skips it).
+Manually:
 
 ```bash
-docker exec -t bugtracker_db pg_dump -U bugtracker bugtracker > backup.sql
-cat backup.sql | docker exec -i bugtracker_db psql -U bugtracker bugtracker
+./scripts/backup.sh                       # backups/bughunter-<UTC time>.dump, keeps the newest 14
+./scripts/restore.sh backups/<file>.dump  # asks to confirm, takes a safety dump, stops the app, restores
 ```
 
-If you changed `POSTGRES_USER`/`POSTGRES_DB`, substitute those values.
+Copy dumps off the host. Details in [docs/operations.md](docs/operations.md).
 
 **Rollback:** `./down.sh`, check out the previous tag (or `docker load` a saved
-image and set `APP_VERSION` to it), then `./deploy.sh`.
+image and set `APP_VERSION` to it), then `./deploy.sh`. To also revert data, use `restore.sh`.
 
 ## Upgrading from earlier editions
 
@@ -544,8 +560,8 @@ against a newer schema).
 | --- | --- |
 | Services | The app container and a PostgreSQL container |
 | Ports | App `8765 → 8000`; PostgreSQL only on `127.0.0.1:55432` |
-| Resource limits | 0.5 vCPU / 512 MB for the whole stack (app 0.30 / 320 MB, database 0.20 / 192 MB) |
-| Workers | One Uvicorn worker and a small SQLAlchemy pool (`DB_POOL_SIZE` + `DB_MAX_OVERFLOW`, 2 + 2 in Compose). Requests beyond what the pool can serve queue on the event loop instead of tying up worker threads, so bursts slow down rather than fail. The digest scheduler and rate limiters are per process, so scale out only after moving them out of the app. |
+| Resource limits | Compose caps the stack at 0.5 vCPU / 512 MB (app 0.30 / 320 MB, database 0.20 / 192 MB). Measure your own headroom with `scripts/loadtest.py`; see [docs/performance.md](docs/performance.md). |
+| Workers | One Uvicorn worker and a small SQLAlchemy pool (`DB_POOL_SIZE` + `DB_MAX_OVERFLOW`, 2 + 2 in Compose). The digest scheduler and rate limiters are per process, so scale out only after moving them out of the app. |
 | Secrets | Injected from `.env` / `secrets/` by Compose, or by the platform; never baked into the image |
 | Health | `curl -fsS http://localhost:8765/api/health` |
 
@@ -662,6 +678,13 @@ behind a TLS-intercepting proxy.
 - **"Invitation expired" or "already used":** ask the inviter to send a new one; a new invitation replaces the earlier one.
 - **Webhook shows "public host" errors or stays suspended:** the target resolves to a private network (`WEBHOOK_ALLOW_PRIVATE_NETWORKS`), or ten deliveries in a row failed; fix the endpoint and use **Resume**.
 - **Logs:** `docker compose logs -f app`.
+
+## More documentation
+
+- [docs/operations.md](docs/operations.md): deploy, backup/restore, retention, health, logs, telemetry, upgrades.
+- [docs/security-model.md](docs/security-model.md): what is enforced where, and the known limits.
+- [docs/testing.md](docs/testing.md): test layers, commands, CI jobs.
+- [docs/performance.md](docs/performance.md): how to measure; where to record results.
 
 ## Security
 

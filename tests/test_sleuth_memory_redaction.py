@@ -114,12 +114,12 @@ def test_capacity_eviction_drops_lru(monkeypatch):
     for i in range(mem._MAX_SESSIONS):
         clock["t"] += 1
         s.touch(i)
-    assert len(s._all_sessions_for_test()) == mem._MAX_SESSIONS
+    assert len(s._sessions) == mem._MAX_SESSIONS
     clock["t"] += 1
     s.touch(10_000)                            # over cap; LRU (uid 0) should be evicted
-    sessions = s._all_sessions_for_test()
+    sessions = s._sessions
     assert len(sessions) == mem._MAX_SESSIONS
     assert 0 not in sessions
     assert 10_000 in sessions
-    s._clear_all_for_test()
-    assert s._all_sessions_for_test() == {}
+    s._sessions.clear()
+    assert s._sessions == {}

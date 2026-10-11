@@ -97,7 +97,7 @@ def test_schemas_drop_label_and_watch():
     """Old per-bug watch/label fields must be gone; Agile's own LabelOut/
     WorkItemTaxonomyIn.label_ids (added later, unrelated) are not part of
     this guard."""
-    schemas = _read(APP / "schemas.py")
+    schemas = "\n".join(p.read_text(encoding="utf-8") for p in (APP / "schemas").glob("*.py"))
     for gone in ("class LabelIn", "watcher_count", "is_watching"):
         assert gone not in schemas, f"schemas.py still has {gone!r}"
 

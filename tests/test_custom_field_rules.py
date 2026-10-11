@@ -6,8 +6,8 @@ import json
 
 import pytest
 
-from tests.test_saved_views_custom_fields import _add_user, _login, _project_id
 from tests.conftest import sign_up
+from tests.test_saved_views_custom_fields import _add_user, _login, _project_id
 
 CSV_HEADER = "Title,Project,Tier\r\n"
 
@@ -15,9 +15,9 @@ CSV_HEADER = "Title,Project,Tier\r\n"
 @pytest.fixture
 def outbox(monkeypatch):
     """Capture webhook deliveries (event, payload) instead of sending them."""
+    import app.routes.agile as agile_routes
     import app.routes.bugs as bugs_routes
     import app.routes.custom_fields as cf_routes
-    import app.routes.agile as agile_routes
 
     sent: list[tuple[str, dict]] = []
 
@@ -106,7 +106,7 @@ def test_required_fields_are_enforced_on_create(client):
     fid = _field(owner, pid, is_required=True)
     body = {"project_id": pid, "title": "Needs a tier"}
     res = owner.post("/api/bugs", json=body)
-    assert res.status_code == 422 and "Tier" in res.json()["detail"]
+    assert res.status_code == 422 and "Tier" in res.json()["detail"][0]["msg"]
     assert owner.get("/api/bugs").json()["total"] == 0  # nothing half-created
     assert owner.post("/api/bugs", json={**body, "custom_values": [{"field_id": fid, "value": "Bronze"}]}).status_code == 422
     ok = owner.post("/api/bugs", json={**body, "custom_values": [{"field_id": fid, "value": "Gold"}]})
@@ -129,7 +129,7 @@ def test_required_fields_are_enforced_on_update_and_values_can_ride_along(client
     bug = owner.post("/api/bugs", json={"project_id": pid, "title": "Older item"}).json()
     fid = _field(owner, pid, is_required=True)  # added after the item exists
     res = owner.put(f"/api/bugs/{bug['id']}", json={"title": "Renamed item"})
-    assert res.status_code == 422 and "Tier" in res.json()["detail"]
+    assert res.status_code == 422 and "Tier" in res.json()["detail"][0]["msg"]
     assert owner.get(f"/api/bugs/{bug['id']}").json()["title"] == "Older item"
     outbox.clear()
     ok = owner.put(f"/api/bugs/{bug['id']}", json={"title": "Renamed item",
@@ -151,7 +151,7 @@ def test_moving_an_item_into_a_project_with_required_fields_needs_values(client)
     _field(owner, other.json()["id"], is_required=True)
     bug = owner.post("/api/bugs", json={"project_id": pid, "title": "Mover item"}).json()
     res = owner.put(f"/api/bugs/{bug['id']}", json={"project_id": other.json()["id"]})
-    assert res.status_code == 422 and "Tier" in res.json()["detail"]
+    assert res.status_code == 422 and "Tier" in res.json()["detail"][0]["msg"]
 
 
 def test_required_fields_are_enforced_on_import_and_custom_columns_are_read(admin_client):

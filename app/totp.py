@@ -11,12 +11,11 @@ import hashlib
 import hmac
 import secrets
 import time
+from datetime import datetime, timezone
 from typing import Optional
 
 import pyotp
 from itsdangerous import BadSignature, TimestampSigner
-from datetime import datetime, timezone
-
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 

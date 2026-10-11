@@ -11,7 +11,7 @@ export default function App() {
   useEffect(() => {
     const onKey = (e) => {
       if (e.key !== "Escape" || e.defaultPrevented || e.isComposing) return;
-      const open = document.querySelectorAll(".modal:not([hidden])");
+      const open = document.querySelectorAll(".modal:not([hidden]):not([data-closing])");
       const top = open[open.length - 1];
       if (!top) return;
       const t = e.target;

@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app import custom_values as cv
 from app.access import (
     accessible_project_ids,
     can_access_project,
@@ -26,7 +27,6 @@ from app.access import (
 )
 from app.api_docs import BAD_REQUEST_FORBIDDEN_CONFLICT_NOT_FOUND_404, BAD_REQUEST_NOT_FOUND_404
 from app.auth import can_edit_bug, get_current_user
-from app import custom_values as cv
 from app.database import get_db
 from app.models import Activity, Bug, BugCustomValue, CustomField, User
 from app.schemas import CustomValueIn
@@ -247,7 +247,7 @@ def set_values(
     Only someone who may edit the item may do this (a plain user cannot touch a Task); each
     change is audited, bumps the item's version and fires ``bug.updated``."""
     bug = _accessible_bug(db, bug_id, user)
-    if not can_edit_bug(user, bug.reporter_id, [a.id for a in bug.assignees], item_type=bug.item_type):
+    if not can_edit_bug(user, item_type=bug.item_type):
         raise HTTPException(status_code=403, detail=f"You don't have permission to edit this {bug.item_type.lower()}.")
     fields = cv.project_fields(db, bug.project_id)
     try:

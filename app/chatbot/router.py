@@ -17,7 +17,8 @@ from app.api_docs import XLSX_FILE_200
 from app.auth import get_current_user, require_admin
 from app.config import get_settings
 from app.database import get_db
-from app.models import ChatConversation, ChatMessage, User, _utcnow
+from app.models import ChatConversation, ChatMessage, User
+from app.util import utcnow
 
 from . import excel, executor
 
@@ -36,7 +37,7 @@ def _persist_turn(db: Session, actor: User, user_msg: str,
     if not get_settings().SLEUTH_CHAT_MEMORY_ENABLED:
         return
     try:
-        cutoff = _utcnow() - timedelta(minutes=30)
+        cutoff = utcnow() - timedelta(minutes=30)
         conv = (
             db.query(ChatConversation)
             .filter(ChatConversation.user_id == actor.id,
@@ -63,7 +64,7 @@ def _persist_turn(db: Session, actor: User, user_msg: str,
                            content=user_msg[:4000], engine=""))
         db.add(ChatMessage(conversation_id=conv.id, role="assistant",
                            content=said[:4000], engine=engine))
-        conv.updated_at = _utcnow()
+        conv.updated_at = utcnow()
         db.commit()
     except Exception:  # noqa: BLE001 — transcript is non-critical
         db.rollback()

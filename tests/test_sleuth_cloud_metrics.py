@@ -30,7 +30,7 @@ def test_reliability_live_counters(admin_client, monkeypatch):
     monkeypatch.setattr(s, "GROQ_API_KEY", "k")
     monkeypatch.setattr(cloud_llm, "_cooldown_until", 0.0, raising=False)
     monkeypatch.setattr(cloud_llm, "is_available", lambda: True)
-    cloud_llm._reset_metrics_for_test()
+    cloud_llm._metrics.clear()
     monkeypatch.setattr(
         cloud_llm, "_call_groq",
         lambda system, user, **kw: '{"mode":"data","canonical_query":"list all bugs"}',
@@ -49,7 +49,7 @@ def test_reliability_live_counters(admin_client, monkeypatch):
 def test_cooldown_no_ratchet_and_trip_counter(monkeypatch):
     from app.chatbot import cloud_llm
     monkeypatch.setattr(cloud_llm, "_cooldown_until", 0.0, raising=False)
-    cloud_llm._reset_metrics_for_test()
+    cloud_llm._metrics.clear()
     cloud_llm._trip_cooldown()
     first = cloud_llm._cooldown_until
     # A second trip while already in cooldown must not extend the window or recount.

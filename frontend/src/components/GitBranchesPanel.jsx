@@ -1,3 +1,4 @@
+import Skeleton from "./Skeleton";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { toast, toastError } from "../lib/toast";
@@ -219,7 +220,7 @@ export default function GitBranchesPanel({ targetType = "work-item", targetId, v
 
   function renderBody() {
     if (loading && !data) {
-      return <p className="muted small">Loading Git branches…</p>;
+      return <Skeleton lines={2} label="Loading Git branches" />;
     }
     return renderLoadedBody();
   }

@@ -4,6 +4,15 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+import pytest
+
+from app.auth import hash_password
+from app.models import ROLE_ADMIN, AcceptanceCriterion, Bug, Project, User
+from app.schemas import WorkItemTaskFlagsIn
+from app.services.agile_items import apply_task_flag_updates as _apply_task_flag_updates
+from app.services.agile_items import validate_story_ready_requirements as _validate_story_ready_requirements
+from tests.conftest import default_org_id
+
 # --- helpers ---------------------------------------------------------------
 
 def _project(client, name):
@@ -326,7 +335,7 @@ def test_board_columns_update_in_place_and_validate(admin_client):
     dup = [dict(c) for c in cols]
     dup[0]["statuses"] = dup[0]["statuses"] + ["Done"]
     res = admin_client.put(f"/api/agile/boards/{board_id}/columns", json={"columns": dup, "version": board["version"]})
-    assert res.status_code == 422 and "one column only" in res.json()["detail"]
+    assert res.status_code == 422 and "one column only" in res.json()["detail"][0]["msg"]
 
     not_done_last = [dict(c) for c in cols]
     not_done_last[-1]["category"] = "in_progress"
@@ -405,7 +414,7 @@ def test_hierarchy_rules(admin_client):
     res = admin_client.post("/api/agile/work-items", json={
         "project_id": project["id"], "title": "Orphan", "item_type": "Sub-task",
     })
-    assert res.status_code == 422 and "needs a parent" in res.json()["detail"]
+    assert res.status_code == 422 and "needs a parent" in res.json()["detail"][0]["msg"]
 
     second_epic = _issue(admin_client, project["id"], "Second epic", "Epic")
     assert relink(story, epic_id=second_epic["id"]).status_code == 200
@@ -453,3 +462,317 @@ def test_hierarchy_view_returns_the_epic_tree(admin_client):
     assert closed["id"] not in {i["id"] for i in open_only["issues"]}
     found = admin_client.get(f"/api/agile/projects/{project['id']}/hierarchy?q=loose").json()
     assert [i["id"] for i in found["issues"]] == [loose["id"]]
+
+
+@pytest.fixture
+def test_project_and_user(db_session):
+    """Create a project and user for tests."""
+    project = Project(org_id=default_org_id(), name="TestProj", color="#000", agile_enabled=True)
+    db_session.add(project)
+    db_session.flush()
+    
+    user = User(org_id=default_org_id(), email="test@ex.com", name="Test", role=ROLE_ADMIN, password_hash=hash_password("p"))
+    db_session.add(user)
+    db_session.flush()
+    
+    return project, user
+
+
+@pytest.fixture
+def task_project(db_session):
+    """Create the required project for standalone task flag tests."""
+    project = Project(org_id=default_org_id(), name="TaskProj", color="#111", agile_enabled=True)
+    db_session.add(project)
+    db_session.flush()
+    return project
+
+
+class TestValidateStoryReadyRequirements:
+    """Tests for _validate_story_ready_requirements helper."""
+
+    def test_returns_false_when_description_missing(self, db_session, test_project_and_user):
+        """Returns False if Story has empty description."""
+        project, user = test_project_and_user
+        
+        story = Bug(
+            item_type="Story", title="S", description="D", project_id=project.id,
+            priority="High", story_points=5, owner_id=user.id,
+            start_date=date(2026, 1, 1), due_date=date(2026, 12, 31)
+        )
+        db_session.add(story)
+        db_session.flush()
+        
+        crit = AcceptanceCriterion(bug_id=story.id, description="C")
+        db_session.add(crit)
+        db_session.flush()
+        
+        # Manually set description to empty
+        story.description = ""
+        assert not _validate_story_ready_requirements(db_session, story)
+
+    def test_returns_false_when_no_priority(self, db_session, test_project_and_user):
+        """Returns False if Story has no priority."""
+        project, user = test_project_and_user
+        
+        story = Bug(
+            item_type="Story", title="S", description="D", project_id=project.id,
+            priority="High", story_points=5, owner_id=user.id,
+            start_date=date(2026, 1, 1), due_date=date(2026, 12, 31)
+        )
+        db_session.add(story)
+        db_session.flush()
+        
+        crit = AcceptanceCriterion(bug_id=story.id, description="C")
+        db_session.add(crit)
+        db_session.flush()
+        
+        # The CHECK constraint forbids storing an empty priority, so blank it
+        # on the transient object only.
+        with db_session.no_autoflush:
+            story.priority = ""
+            assert not _validate_story_ready_requirements(db_session, story)
+
+    def test_returns_false_when_no_story_points(self, db_session, test_project_and_user):
+        """Returns False if Story has no story points."""
+        project, user = test_project_and_user
+        
+        story = Bug(
+            item_type="Story", title="S", description="D", project_id=project.id,
+            priority="High", story_points=None, owner_id=user.id,
+            start_date=date(2026, 1, 1), due_date=date(2026, 12, 31)
+        )
+        db_session.add(story)
+        db_session.flush()
+        
+        crit = AcceptanceCriterion(bug_id=story.id, description="C")
+        db_session.add(crit)
+        db_session.flush()
+        
+        assert not _validate_story_ready_requirements(db_session, story)
+
+    def test_returns_false_when_no_owner_or_assignees(self, db_session, test_project_and_user):
+        """Returns False if Story has neither owner nor assignees."""
+        project, user = test_project_and_user
+        
+        story = Bug(
+            item_type="Story", title="S", description="D", project_id=project.id,
+            priority="High", story_points=5, owner_id=None,
+            start_date=date(2026, 1, 1), due_date=date(2026, 12, 31)
+        )
+        db_session.add(story)
+        db_session.flush()
+        
+        crit = AcceptanceCriterion(bug_id=story.id, description="C")
+        db_session.add(crit)
+        db_session.flush()
+        
+        assert not _validate_story_ready_requirements(db_session, story)
+
+    def test_returns_false_when_no_start_date(self, db_session, test_project_and_user):
+        """Returns False if Story has no start date."""
+        project, user = test_project_and_user
+        
+        story = Bug(
+            item_type="Story", title="S", description="D", project_id=project.id,
+            priority="High", story_points=5, owner_id=user.id,
+            start_date=None, due_date=date(2026, 12, 31)
+        )
+        db_session.add(story)
+        db_session.flush()
+        
+        crit = AcceptanceCriterion(bug_id=story.id, description="C")
+        db_session.add(crit)
+        db_session.flush()
+        
+        assert not _validate_story_ready_requirements(db_session, story)
+
+    def test_returns_false_when_no_due_date(self, db_session, test_project_and_user):
+        """Returns False if Story has no due date."""
+        project, user = test_project_and_user
+        
+        story = Bug(
+            item_type="Story", title="S", description="D", project_id=project.id,
+            priority="High", story_points=5, owner_id=user.id,
+            start_date=date(2026, 1, 1), due_date=None
+        )
+        db_session.add(story)
+        db_session.flush()
+        
+        crit = AcceptanceCriterion(bug_id=story.id, description="C")
+        db_session.add(crit)
+        db_session.flush()
+        
+        assert not _validate_story_ready_requirements(db_session, story)
+
+    def test_returns_false_when_no_acceptance_criteria(self, db_session, test_project_and_user):
+        """Returns False if Story has no acceptance criteria."""
+        project, user = test_project_and_user
+        
+        story = Bug(
+            item_type="Story", title="S", description="D", project_id=project.id,
+            priority="High", story_points=5, owner_id=user.id,
+            start_date=date(2026, 1, 1), due_date=date(2026, 12, 31)
+        )
+        db_session.add(story)
+        db_session.flush()
+        
+        # No acceptance criterion added
+        assert not _validate_story_ready_requirements(db_session, story)
+
+    def test_returns_true_when_all_requirements_met(self, db_session, test_project_and_user):
+        """Returns True if Story has all mandatory fields."""
+        project, user = test_project_and_user
+        
+        story = Bug(
+            item_type="Story", title="S", description="D", project_id=project.id,
+            priority="High", story_points=5, owner_id=user.id,
+            start_date=date(2026, 1, 1), due_date=date(2026, 12, 31)
+        )
+        db_session.add(story)
+        db_session.flush()
+        
+        crit = AcceptanceCriterion(bug_id=story.id, description="C")
+        db_session.add(crit)
+        db_session.flush()
+        
+        assert _validate_story_ready_requirements(db_session, story)
+
+
+class TestApplyTaskFlagUpdates:
+    """Tests for _apply_task_flag_updates helper - extensive edge cases."""
+
+    def test_apply_mandatory_flag_true(self, db_session, task_project):
+        """Sets mandatory flag to True."""
+        task = Bug(item_type="Sub-task", title="T", description="D", project_id=task_project.id,
+                   mandatory=False, blocked=False)
+        db_session.add(task)
+        db_session.flush()
+        
+        payload = WorkItemTaskFlagsIn(version=1, mandatory=True)
+        blocked_changed = _apply_task_flag_updates(task, payload)
+        
+        assert task.mandatory is True
+        assert blocked_changed is False
+
+    def test_apply_mandatory_flag_false(self, db_session, task_project):
+        """Sets mandatory flag to False."""
+        task = Bug(item_type="Sub-task", title="T", description="D", project_id=task_project.id,
+                   mandatory=True, blocked=False)
+        db_session.add(task)
+        db_session.flush()
+        
+        payload = WorkItemTaskFlagsIn(version=1, mandatory=False)
+        blocked_changed = _apply_task_flag_updates(task, payload)
+        
+        assert task.mandatory is False
+        assert blocked_changed is False
+
+    def test_apply_blocked_flag_true(self, db_session, task_project):
+        """Sets blocked flag to True with reason."""
+        task = Bug(item_type="Sub-task", title="T", description="D", project_id=task_project.id,
+                   blocked=False, blocked_reason="")
+        db_session.add(task)
+        db_session.flush()
+        
+        payload = WorkItemTaskFlagsIn(version=1, blocked=True, blocked_reason="Waiting for approval")
+        blocked_changed = _apply_task_flag_updates(task, payload)
+        
+        assert task.blocked is True
+        assert task.blocked_reason == "Waiting for approval"
+        assert blocked_changed is True
+
+    def test_apply_blocked_flag_false_clears_reason(self, db_session, task_project):
+        """Sets blocked flag to False and clears reason."""
+        task = Bug(item_type="Sub-task", title="T", description="D", project_id=task_project.id,
+                   blocked=True, blocked_reason="Dependency")
+        db_session.add(task)
+        db_session.flush()
+        
+        payload = WorkItemTaskFlagsIn(version=1, blocked=False)
+        blocked_changed = _apply_task_flag_updates(task, payload)
+        
+        assert task.blocked is False
+        assert task.blocked_reason == ""
+        assert blocked_changed is True
+
+    def test_apply_blocked_reason_update(self, db_session, task_project):
+        """Updates reason without changing blocked status."""
+        task = Bug(item_type="Sub-task", title="T", description="D", project_id=task_project.id,
+                   blocked=True, blocked_reason="Old")
+        db_session.add(task)
+        db_session.flush()
+        
+        payload = WorkItemTaskFlagsIn(version=1, blocked_reason="New reason")
+        blocked_changed = _apply_task_flag_updates(task, payload)
+        
+        assert task.blocked_reason == "New reason"
+        assert task.blocked is True
+        assert blocked_changed is False  # No change to blocked flag itself
+
+    def test_no_change_when_no_fields_provided(self, db_session, task_project):
+        """Returns False when no fields are being updated."""
+        task = Bug(item_type="Sub-task", title="T", description="D", project_id=task_project.id,
+                   mandatory=True, blocked=False)
+        db_session.add(task)
+        db_session.flush()
+        original_mandatory = task.mandatory
+        
+        payload = WorkItemTaskFlagsIn(version=1)  # All fields None
+        blocked_changed = _apply_task_flag_updates(task, payload)
+        
+        assert task.mandatory is original_mandatory
+        assert task.blocked is False
+        assert blocked_changed is False
+
+    def test_multiple_flags_at_once(self, db_session, task_project):
+        """Updates multiple flags simultaneously."""
+        task = Bug(
+            item_type="Sub-task", title="T", description="D", project_id=task_project.id,
+            mandatory=False, blocked=False, blocked_reason=""
+        )
+        db_session.add(task)
+        db_session.flush()
+        
+        payload = WorkItemTaskFlagsIn(
+            version=1, mandatory=True, blocked=True, blocked_reason="Complex dep"
+        )
+        blocked_changed = _apply_task_flag_updates(task, payload)
+        
+        assert task.mandatory is True
+        assert task.blocked is True
+        assert task.blocked_reason == "Complex dep"
+        assert blocked_changed is True
+
+    def test_unblock_and_set_mandatory(self, db_session, task_project):
+        """Unblock an item and set mandatory flag in one call."""
+        task = Bug(
+            item_type="Sub-task", title="T", description="D", project_id=task_project.id,
+            mandatory=False, blocked=True, blocked_reason="Old issue"
+        )
+        db_session.add(task)
+        db_session.flush()
+        
+        payload = WorkItemTaskFlagsIn(version=1, mandatory=True, blocked=False)
+        blocked_changed = _apply_task_flag_updates(task, payload)
+        
+        assert task.mandatory is True
+        assert task.blocked is False
+        assert task.blocked_reason == ""
+        assert blocked_changed is True
+
+    def test_update_reason_only(self, db_session, task_project):
+        """Update only the blocked reason without touching flags."""
+        task = Bug(
+            item_type="Sub-task", title="T", description="D", project_id=task_project.id,
+            mandatory=True, blocked=True, blocked_reason="Initial"
+        )
+        db_session.add(task)
+        db_session.flush()
+        
+        payload = WorkItemTaskFlagsIn(version=1, blocked_reason="Updated reason")
+        blocked_changed = _apply_task_flag_updates(task, payload)
+        
+        assert task.mandatory is True  # Unchanged
+        assert task.blocked is True  # Unchanged
+        assert task.blocked_reason == "Updated reason"
+        assert blocked_changed is False

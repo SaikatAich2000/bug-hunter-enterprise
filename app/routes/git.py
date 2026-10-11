@@ -16,8 +16,6 @@ role included) and is never implied by project visibility alone.
 from __future__ import annotations
 
 import logging
-import re
-from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response, status
@@ -25,7 +23,6 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app import net_guard
 from app.access import accessible_project_ids, can_access_project
 from app.api_docs import (
     FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_503,
@@ -41,12 +38,10 @@ from app.auth import get_current_user, require_manager_or_admin
 from app.config import get_settings
 from app.database import get_db
 from app.git import branches as branch_svc
-from app.git import credentials as credential_svc
 from app.git.branches import BranchCreationError, BranchTarget
-from app.git.github import HOST_NOT_ALLOWED_MESSAGE, GitHubEnterpriseProvider, parse_base_url
+from app.git.github import GitHubEnterpriseProvider
 from app.git.naming import (
     display_id_for_branch,
-    is_valid_branch_name,
     supports_branch_creation,
 )
 from app.git.provider import (
@@ -70,10 +65,6 @@ from app.git.provider import (
     sanitize_provider_message,
 )
 from app.models import (
-    ROLE_ADMIN,
-    ROLE_MANAGER,
-    Activity,
-    Bug,
     Project,
     ProjectGitConfig,
     ProjectRepository,
@@ -91,21 +82,42 @@ from app.schemas import (
     GitProviderRepositoryOut,
     GitWorkItemBranchesOut,
 )
+from app.services import git_connection
+from app.services.audit import audit
+from app.services.git_branches import (
+    DETAIL_INTEGRATION_DISABLED,
+    STORY_ONLY_CODE,
+    STORY_ONLY_MESSAGE,
+    assert_can_create_branch,
+    assignee_briefs,
+    branch_out,
+    bug_target,
+    repo_full_name,
+    require_story,
+    work_item_branches_payload,
+)
+from app.services.git_config import (
+    apply_credential_operation,
+    check_server_change,
+    config_defaults,
+    config_out,
+    default_base_branch,
+    get_config_row,
+    integration_state,
+    resolve_provider_token,
+    validate_base_branch,
+)
+from app.util import utcnow
 
 logger = logging.getLogger("bug_hunter.routes.git")
 
 router = APIRouter(prefix="/api/git", tags=["git"])
 
 _DETAIL_PROJECT_NOT_FOUND = "Project not found"
-_DETAIL_WORK_ITEM_NOT_FOUND = "Work item not found"
 _DETAIL_VERSION_CONFLICT = "The Git integration configuration changed; reload and retry"
-_DETAIL_INTEGRATION_DISABLED = "Git integration is not enabled for this project"
 _DETAIL_REPOSITORY_UNREACHABLE = (
     "Repository is not reachable through the configured Git integration"
 )
-# Story-only branch actions (preview/create/remove) share one stable refusal.
-_STORY_ONLY_CODE = "user_story_only"
-_STORY_ONLY_MESSAGE = "Feature branches can be created only for User Stories."
 # Removal guards: a tracked feature branch may never collide with a long-lived
 # collaboration branch, and the stored record must carry an exact heads ref.
 _PROTECTED_BRANCH_NAMES = frozenset(
@@ -153,32 +165,16 @@ _BRANCH_ERROR_STATUS: dict[str, int] = {
     branch_svc.BRANCH_ALREADY_REMOVED: status.HTTP_409_CONFLICT,
 }
 
-def _now() -> datetime:
-    return datetime.now(timezone.utc).replace(microsecond=0)
-
-def _repo_full_name(repository: ProjectRepository) -> str:
-    if repository.owner:
-        return f"{repository.owner}/{repository.name}"
-    return repository.name
-
-def _is_project_admin(user: User) -> bool:
-    """The application's existing administrative roles act as Project Admin."""
-    return user.role in (ROLE_ADMIN, ROLE_MANAGER)
 
 def _audit(
     db: Session, actor: User | None, action: str, entity_id: int, detail: str,
     project_id: int | None = None,
 ) -> None:
     """One audit row; without an actor (system work) the organization comes from the project."""
-    org_id = actor.org_id if actor is not None else db.scalar(
+    org_id = None if actor is not None else db.scalar(
         select(Project.org_id).where(Project.id == project_id)
     )
-    db.add(Activity(
-        org_id=org_id, bug_id=None, entity_type="git_branch", entity_id=entity_id,
-        actor_user_id=getattr(actor, "id", None),
-        actor_name=getattr(actor, "name", "") or "system",
-        action=action, detail=detail,
-    ))
+    audit(db, actor, "git_branch", entity_id, action, detail, org_id=org_id)
 
 def _translate_provider_error(exc: GitProviderError) -> HTTPException:
     """Map a provider failure to an HTTP status; ``detail`` is already sanitized."""
@@ -198,10 +194,6 @@ def _get_project_or_404(db: Session, project_id: int, user: User) -> Project:
         raise HTTPException(status_code=404, detail=_DETAIL_PROJECT_NOT_FOUND)  # NOSONAR(S8415)
     return project
 
-def _get_config_row(db: Session, project_id: int) -> ProjectGitConfig | None:
-    return db.scalar(
-        select(ProjectGitConfig).where(ProjectGitConfig.project_id == project_id)
-    )
 
 def build_provider(
     config: ProjectGitConfig | None,
@@ -249,94 +241,14 @@ def build_provider(
     return GitHubEnterpriseProvider(
         base_url=resolved_base_url,
         organization=resolved_organization,
-        token=_resolve_provider_token(config, token, resolved_base_url),
+        token=resolve_provider_token(config, token, resolved_base_url),
     )
 
-def _resolve_provider_token(
-    config: ProjectGitConfig | None, draft_token: str | None, base_url: str
-) -> str | None:
-    """Credential precedence: draft PAT, then project PAT, then global token, each
-    saved credential only for the server it belongs to (``credentials.resolve_token``).
-
-    Raises a safe ``not_configured`` error when the project's stored credential
-    cannot be decrypted, so a broken credential is never silently downgraded to
-    the shared global token.
-    """
-    if draft_token and draft_token.strip():
-        # An explicit draft PAT wins, and is never persisted by this path.
-        return draft_token.strip()
-    return credential_svc.resolve_token(config, base_url)
-
-def _credentials_configured(config: ProjectGitConfig | None = None) -> bool:
-    """True when a credential exists for this project (own PAT or fallback)."""
-    return credential_svc.credentials_configured(config)
-
-def _integration_state(
-    db: Session, project_id: int
-) -> tuple[ProjectGitConfig | None, bool]:
-    """``(config_row, usable)`` — usable is False when disabled anywhere."""
-    config = _get_config_row(db, project_id)
-    if not get_settings().GIT_BRANCH_CREATION_ENABLED:
-        return config, False
-    return config, bool(config is not None and config.enabled)
 
 # =====================================================================
 # Serialization (secret-free by construction)
 # =====================================================================
 
-def _config_out(config: ProjectGitConfig) -> dict:
-    settings = get_settings()
-    return {
-        "configured": True,
-        "id": config.id,
-        "project_id": config.project_id,
-        "provider": config.provider,
-        "enabled": config.enabled,
-        "base_url": config.base_url,
-        "organization": config.organization,
-        "default_base_branch": config.default_base_branch,
-        "connection_status": config.connection_status,
-        "last_checked_at": config.last_checked_at,
-        "last_error": config.last_error,
-        "version": config.version,
-        "branch_creation_enabled": settings.GIT_BRANCH_CREATION_ENABLED,
-        # A boolean only. The credential itself is never serialized anywhere.
-        "credentials_configured": _credentials_configured(config),
-    }
-
-def _config_defaults(project_id: int) -> dict:
-    """Payload for a project with no Git row yet — no secrets, no surprises."""
-    settings = get_settings()
-    return {
-        "configured": False,
-        "project_id": project_id,
-        "provider": "github_enterprise",
-        "enabled": False,
-        "base_url": settings.GITHUB_API_URL,
-        "organization": settings.GITHUB_ORGANIZATION,
-        "default_base_branch": settings.GITHUB_DEFAULT_BASE_BRANCH,
-        "connection_status": "unknown",
-        "version": 1,
-        "branch_creation_enabled": settings.GIT_BRANCH_CREATION_ENABLED,
-        # No project row yet, so only the legacy global token can be present.
-        "credentials_configured": _credentials_configured(None),
-    }
-
-def _validate_base_branch(base_branch: str | None) -> str | None:
-    """Trim and validate an action-specific base branch (never a stored value)."""
-    base_branch = (base_branch or "").strip() or None
-    if base_branch is not None and not re.fullmatch(r"[\w.\-/]+", base_branch):
-        raise HTTPException(
-            status_code=422,
-            detail="Base branch contains characters that are not valid in a Git ref",
-        )
-    return base_branch
-
-def _default_base_branch(config: ProjectGitConfig | None) -> str:
-    return (
-        (config.default_base_branch if config is not None else "")
-        or get_settings().GITHUB_DEFAULT_BASE_BRANCH
-    )
 
 def _verified_provider_metadata(
     provider, provider_repo_id: str
@@ -409,7 +321,7 @@ def _repository_identity_from_provider(
             ),
             active=True,
             branch_creation_enabled=True,
-            last_checked_at=_now(),
+            last_checked_at=utcnow(),
         )
         db.add(repository)
         try:
@@ -445,7 +357,7 @@ def _repository_identity_from_provider(
         repository.owner = metadata.owner
     if metadata.url and (repository.url or "") != metadata.url:
         repository.url = metadata.url
-    repository.last_checked_at = _now()
+    repository.last_checked_at = utcnow()
     if changed:
         _audit(
             db, None, "git_repository_identity_updated", repository.id,
@@ -467,7 +379,7 @@ def _resolve_creation_repository(
     ``repository_id`` is never a client input. The default base branch for the
     action comes from the project configuration.
     """
-    base_branch = _validate_base_branch(payload.base_branch)
+    base_branch = validate_base_branch(payload.base_branch)
     if not get_settings().GIT_BRANCH_CREATION_ENABLED or config is None:
         raise HTTPException(status_code=404, detail=_DETAIL_REPOSITORY_UNREACHABLE)
     provider = build_provider(config)
@@ -482,38 +394,6 @@ def _resolve_creation_repository(
         raise _translate_provider_error(exc) from exc
     return repository, base_branch
 
-def _branch_out(row: WorkItemBranch, *, display_id: str, title: str) -> dict:
-    repository = row.repository
-    return {
-        "id": row.id,
-        "work_item_type": row.work_item_type,
-        "work_item_id": row.work_item_id,
-        "project_id": row.project_id,
-        "display_id": display_id,
-        "work_item_title": title,
-        "repository_name": repository.name if repository is not None else "",
-        "repository_full_name": (
-            _repo_full_name(repository) if repository is not None else ""
-        ),
-        "provider_repo_id": row.provider_repo_id,
-        "branch_name": row.branch_name,
-        "base_branch": row.base_branch,
-        "base_commit_sha": row.base_commit_sha,
-        "branch_url": row.branch_url,
-        "provider_branch_ref": row.provider_branch_ref,
-        "status": row.status,
-        "created_by_id": row.created_by_id,
-        "created_by_name": row.created_by_name,
-        "created_at": row.created_at,
-        "last_checked_at": row.last_checked_at,
-        "last_error": row.last_error,
-        # Removal metadata: safe, human-facing fields only. The internal
-        # repository row id is never exposed.
-        "removed_at": row.removed_at,
-        "removed_by_name": row.removed_by_name,
-        "removal_reason": row.removal_reason,
-        "version": row.version,
-    }
 
 # =====================================================================
 # 1+2. Project Git configuration (Project Admin only)
@@ -535,76 +415,8 @@ def get_git_config(
 ) -> dict:
     """Non-secret configuration only; credentials are never returned."""
     _get_project_or_404(db, project_id, actor)
-    config = _get_config_row(db, project_id)
-    return _config_out(config) if config is not None else _config_defaults(project_id)
-
-def _apply_credential_operation(
-    config: ProjectGitConfig, payload: GitIntegrationIn
-) -> str:
-    """Apply the credential part of a PUT; return the audit phrase (never a token).
-
-    Semantics:
-
-    * ``clear_credential=True`` removes the stored project credential (idempotent:
-      an already-empty credential is simply kept empty).
-    * A non-blank ``credential`` replaces the stored project credential.
-    * Both blank/False means "preserve whatever is stored" — the frontend's
-      password input is cleared after every submit, so a blank field can never
-      wipe an existing credential.
-
-    The plaintext PAT is encrypted immediately and is never logged, audited or
-    written to the database in the clear.
-    """
-    if payload.clear_credential:
-        if not (config.credential_encrypted or "").strip():
-            return ""
-        config.credential_encrypted = ""
-        return "credential cleared"
-    if not payload.credential:
-        # Empty credential field: preserve the current credential.
-        return ""
-    if not credential_svc.encryption_available():
-        # No key: legacy global-token operation continues, but a project
-        # credential cannot be stored. Fail closed, with a safe explanation.
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=credential_svc.ENCRYPTION_KEY_MISSING_MESSAGE,
-        )
-    replaced = bool((config.credential_encrypted or "").strip())
-    try:
-        config.credential_encrypted = credential_svc.encrypt_credential(
-            payload.credential
-        )
-    except credential_svc.CredentialError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail=exc.message
-        ) from None
-    return "credential replaced" if replaced else "credential configured"
-
-_REENTER_TOKEN_MESSAGE = (
-    "Re-enter the access token when changing the Git server: a saved token is only "
-    "sent to the server it was saved for."
-)
-
-
-def _check_server_change(config: ProjectGitConfig, payload: GitIntegrationIn) -> None:
-    """Refuse a server the deployment may not reach, and a server change that would carry
-    the stored project token to a new host without it being re-entered."""
-    new_base = (payload.base_url or "").strip() or get_settings().GITHUB_API_URL
-    host = parse_base_url(new_base)[2]
-    try:
-        net_guard.allowed_addresses(host, 443, get_settings().GIT_ALLOW_PRIVATE_HOSTS)
-    except net_guard.HostNotAllowed:
-        raise HTTPException(status_code=422, detail=HOST_NOT_ALLOWED_MESSAGE) from None
-    except OSError:
-        pass  # Unresolvable here: saved as-is, and the connection test reports it.
-    if (
-        credential_svc.project_credential_stored(config)
-        and not payload.credential
-        and not payload.clear_credential
-        and not credential_svc.same_server(new_base, credential_svc.saved_base_url(config))
-    ):
-        raise HTTPException(status_code=422, detail=_REENTER_TOKEN_MESSAGE)
+    config = get_config_row(db, project_id)
+    return config_out(config) if config is not None else config_defaults(project_id)
 
 
 @router.put("/projects/{project_id}/config", response_model=GitIntegrationOut,
@@ -621,7 +433,7 @@ def update_git_config(
     ``clear_credential``. The response never contains a credential field.
     """
     project = _get_project_or_404(db, project_id, actor)
-    config = _get_config_row(db, project_id)
+    config = get_config_row(db, project_id)
     if config is None:
         if payload.version is not None:
             raise HTTPException(status_code=409, detail=_DETAIL_VERSION_CONFLICT)
@@ -631,7 +443,7 @@ def update_git_config(
     elif payload.version is not None and payload.version != config.version:
         raise HTTPException(status_code=409, detail=_DETAIL_VERSION_CONFLICT)
 
-    _check_server_change(config, payload)
+    check_server_change(config, payload)
     changes: list[str] = []
     for field in _CONFIG_FIELDS:
         value = getattr(payload, field)
@@ -640,7 +452,7 @@ def update_git_config(
             changes.append(f"{field}: {previous!r} -> {value!r}")
             setattr(config, field, value)
     # Credential last: a rejected credential must not leave a half-applied edit.
-    credential_note = _apply_credential_operation(config, payload)
+    credential_note = apply_credential_operation(config, payload)
     config.version += 1
     # Any configuration edit invalidates the previously observed connection state.
     config.connection_status = "unknown"
@@ -661,41 +473,7 @@ def update_git_config(
     )
     db.commit()
     db.refresh(config)
-    return _config_out(config)
-
-def _record_connection_result(
-    db: Session, config: ProjectGitConfig | None, *, ok: bool, message: str
-) -> None:
-    if config is None:
-        return
-    config.connection_status = "ok" if ok else "error"
-    config.last_checked_at = _now()
-    config.last_error = "" if ok else sanitize_provider_message(message)
-    config.version += 1
-    db.flush()
-
-_OTHER_SERVER_MESSAGE = (
-    "Enter an access token to test a different Git server: a saved token is only "
-    "sent to the server it was saved for."
-)
-
-
-def _draft_test_failed(
-    db: Session, actor: User, project: Project, config: ProjectGitConfig | None,
-    code: str, message: str,
-) -> dict:
-    _audit(
-        db, actor, "git_connection_test_failed",
-        config.id if config is not None else project.id,
-        f"Connection test failed for project '{project.name}' ({code}): {message} "
-        "[draft values were not saved]",
-    )
-    db.commit()
-    return {
-        "ok": False, "status": "error", "message": message,
-        "target": "", "checked_at": _now(), "error_code": code,
-    }
-
+    return config_out(config)
 
 @router.post("/projects/{project_id}/config/test", response_model=GitConnectionTestOut, responses=NOT_FOUND_404)
 def test_git_connection(
@@ -718,130 +496,10 @@ def test_git_connection(
       ``connection_status`` recorded. Only this path persists.
     """
     project = _get_project_or_404(db, project_id, actor)
-    config = _get_config_row(db, project_id)
-    settings = get_settings()
+    config = get_config_row(db, project_id)
     if draft is None:
-        provider = build_provider(config)
-        checked_at = _now()
-        try:
-            target = provider.validate_connection()
-        except GitProviderError as exc:
-            _record_connection_result(db, config, ok=False, message=exc.message)
-            _audit(
-                db, actor, "git_connection_test_failed",
-                config.id if config is not None else project.id,
-                "Connection test failed for project "
-                f"'{project.name}' ({exc.code}): {exc.message}",
-            )
-            db.commit()
-            return {
-                "ok": False, "status": "error", "message": exc.message,
-                "target": "", "checked_at": checked_at, "error_code": exc.code,
-            }
-        _record_connection_result(db, config, ok=True, message="")
-        _audit(
-            db, actor, "git_connection_tested",
-            config.id if config is not None else project.id,
-            "Connection test succeeded for project "
-            f"'{project.name}' (target={target})",
-        )
-        db.commit()
-        return {
-            "ok": True, "status": "ok", "message": f"Connected to {target}",
-            "target": target, "checked_at": checked_at, "error_code": "",
-        }
-    draft_base = None if draft.base_url is None else (draft.base_url or "").strip()
-    draft_org = None if draft.organization is None else (draft.organization or "").strip()
-    if draft.default_base_branch is None:
-        if config is not None and (config.default_base_branch or "").strip():
-            draft_branch = (config.default_base_branch or "").strip()
-        else:
-            draft_branch = (settings.GITHUB_DEFAULT_BASE_BRANCH or "").strip()
-    else:
-        draft_branch = (draft.default_base_branch or "").strip()
-    if not draft_base:
-        _audit(
-            db, actor, "git_connection_test_failed",
-            config.id if config is not None else project.id,
-            "Connection test failed for project "
-            f"'{project.name}' ({INVALID_BASE_URL}): blank base URL "
-            "[draft values were not saved]",
-        )
-        db.commit()
-        return {
-            "ok": False, "status": "error", "message": "Git base URL is required",
-            "target": "", "checked_at": _now(), "error_code": INVALID_BASE_URL,
-        }
-    if not draft_branch:
-        _audit(
-            db, actor, "git_connection_test_failed",
-            config.id if config is not None else project.id,
-            "Connection test failed for project "
-            f"'{project.name}' ({INVALID_BASE_BRANCH}): blank base branch "
-            "[draft values were not saved]",
-        )
-        db.commit()
-        return {
-            "ok": False, "status": "error",
-            "message": "Default base branch is required",
-            "target": "", "checked_at": _now(), "error_code": INVALID_BASE_BRANCH,
-        }
-    if draft_branch and not is_valid_branch_name(draft_branch):
-        _audit(
-            db, actor, "git_connection_test_failed",
-            config.id if config is not None else project.id,
-            "Connection test failed for project "
-            f"'{project.name}' ({INVALID_BASE_BRANCH}): invalid base branch "
-            "[draft values were not saved]",
-        )
-        db.commit()
-        return {
-            "ok": False, "status": "error",
-            "message": "Default base branch is not a valid git branch name",
-            "target": "", "checked_at": _now(),
-            "error_code": INVALID_BASE_BRANCH,
-        }
-    if draft.credential:
-        draft_token: str | None = draft.credential
-    else:
-        try:
-            draft_token = credential_svc.resolve_token(config, draft_base)
-        except GitProviderError as exc:
-            return _draft_test_failed(db, actor, project, config, exc.code, exc.message)
-        if draft_token is None and credential_svc.credentials_configured(config):
-            return _draft_test_failed(
-                db, actor, project, config, NOT_CONFIGURED, _OTHER_SERVER_MESSAGE,
-            )
-    provider = build_provider(
-        config, base_url=draft_base, organization=draft_org, token=draft_token,
-    )
-    checked_at = _now()
-    try:
-        target = provider.validate_connection()
-    except GitProviderError as exc:
-        _audit(
-            db, actor, "git_connection_test_failed",
-            config.id if config is not None else project.id,
-            "Connection test failed for project "
-            f"'{project.name}' ({exc.code}): {exc.message} "
-            "[draft values were not saved]",
-        )
-        db.commit()
-        return {
-            "ok": False, "status": "error", "message": exc.message,
-            "target": "", "checked_at": checked_at, "error_code": exc.code,
-        }
-    _audit(
-        db, actor, "git_connection_tested",
-        config.id if config is not None else project.id,
-        "Connection test succeeded for project "
-        f"'{project.name}' (target={target}) [draft values were not saved]",
-    )
-    db.commit()
-    return {
-        "ok": True, "status": "ok", "message": f"Connected to {target}",
-        "target": target, "checked_at": checked_at, "error_code": "",
-    }
+        return git_connection.check_saved(db, actor, project, config, build_provider)
+    return git_connection.check_draft(db, actor, project, config, draft, build_provider)
 
 # =====================================================================
 # 3. Read-only repository discovery (no selection, no persistence)
@@ -866,9 +524,9 @@ def list_available_repositories(
     lookup: no configuration change and no repository-history row.
     """
     project = _get_project_or_404(db, project_id, actor)
-    config, enabled = _integration_state(db, project.id)
+    config, enabled = integration_state(db, project.id)
     if not enabled:
-        raise HTTPException(status_code=409, detail=_DETAIL_INTEGRATION_DISABLED)
+        raise HTTPException(status_code=409, detail=DETAIL_INTEGRATION_DISABLED)
     provider = build_provider(config)
     try:
         discovered = provider.list_repositories(limit=_DISCOVERY_LIMIT)
@@ -901,130 +559,6 @@ def list_available_repositories(
 # 4-9. Branch creation for a work item
 # =====================================================================
 
-def _assignee_briefs(db: Session, target: BranchTarget) -> list[dict]:
-    if not target.assignee_ids:
-        return []
-    rows = db.scalars(
-        select(User).where(User.id.in_(sorted(target.assignee_ids))).order_by(User.id)
-    ).all()
-    return [
-        {"id": row.id, "name": row.name, "email": row.email, "role": row.role}
-        for row in rows
-    ]
-
-def _bug_target(db: Session, item_id: int, user: User) -> BranchTarget:
-    """Resolve a `bugs` row (Bug/Requirement/Task/Sub-task/Story/Epic)."""
-    bug = db.get(Bug, item_id)
-    if bug is None or not can_access_project(
-        accessible_project_ids(db, user), bug.project_id
-    ):
-        raise HTTPException(status_code=404, detail=_DETAIL_WORK_ITEM_NOT_FOUND)
-    item_type = bug.item_type or "Bug"
-    return BranchTarget(
-        item_type=item_type,
-        item_id=bug.id,
-        project_id=bug.project_id,
-        title=bug.title,
-        display_id=display_id_for_branch(item_type, bug.id, bug.display_id),
-        assignee_ids=frozenset(assignee.id for assignee in bug.assignees),
-    )
-
-def _require_story(target: BranchTarget) -> None:
-    """Story-only gate for every branch action, before any provider work."""
-    if not supports_branch_creation(target.item_type):
-        raise HTTPException(
-            status_code=422,
-            detail=_STORY_ONLY_MESSAGE,
-            headers={"X-Error-Code": _STORY_ONLY_CODE},
-        )
-
-def _assert_can_create_branch(target: BranchTarget, actor: User) -> None:
-    """The assignee-or-Project-Admin rule. The ONLY authorization for creation.
-
-    A reporter, viewer, generic project member or unrelated user does not qualify
-    merely because they can view or edit the item.
-    """
-    if not actor.is_active:
-        raise HTTPException(
-            status_code=403, detail="A deactivated user cannot create a Git branch"
-        )
-    if _is_project_admin(actor):
-        return
-    if actor.id not in target.assignee_ids:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                "Only an assignee of this work item or a project administrator "
-                "can create its Git branch"
-            ),
-        )
-
-def _creation_permission(
-    target: BranchTarget, actor: User, *, integration_enabled: bool
-) -> tuple[bool, str]:
-    """Non-authoritative hint for the UI, plus the reason when it is False."""
-    if not supports_branch_creation(target.item_type):
-        return False, _STORY_ONLY_MESSAGE
-    if not get_settings().GIT_BRANCH_CREATION_ENABLED:
-        return False, "Branch creation is disabled for this deployment"
-    if not integration_enabled:
-        return False, _DETAIL_INTEGRATION_DISABLED
-    if not actor.is_active:
-        return False, "Your account is deactivated"
-    if _is_project_admin(actor) or actor.id in target.assignee_ids:
-        return True, ""
-    return False, (
-        "Only an assignee of this work item or a project administrator can create "
-        "its Git branch"
-    )
-
-def _work_item_branches_payload(
-    db: Session, target: BranchTarget, actor: User
-) -> dict:
-    """Development section: existing branches plus what the actor may do.
-
-    Branch history is listed for every work-item type; branch ACTIONS are
-    Story-only and every action is re-authorized server-side. The internal
-    repository row id is never exposed; repositories are discovered live by the
-    create dialog instead of being listed here.
-    """
-    _config, enabled = _integration_state(db, target.project_id)
-    supported = supports_branch_creation(target.item_type)
-    branches: list[dict] = []
-    rows = db.scalars(
-        select(WorkItemBranch)
-        .where(
-            WorkItemBranch.work_item_type == target.item_type,
-            WorkItemBranch.work_item_id == target.item_id,
-        )
-        .order_by(WorkItemBranch.id)
-    ).all()
-    branches = [
-        _branch_out(row, display_id=target.display_id, title=target.title)
-        for row in rows
-    ]
-    can_create, reason = _creation_permission(
-        target, actor, integration_enabled=enabled
-    )
-    deletion_enabled = bool(
-        get_settings().GIT_BRANCH_DELETION_ENABLED and supported and enabled
-    )
-    can_remove = bool(deletion_enabled)
-    return {
-        "work_item_type": target.item_type,
-        "work_item_id": target.item_id,
-        "project_id": target.project_id,
-        "display_id": target.display_id,
-        "title": target.title,
-        "assignees": _assignee_briefs(db, target),
-        "branch_creation_supported": supported,
-        "integration_enabled": enabled,
-        "can_create_branch": can_create,
-        "reason": reason,
-        "branch_deletion_enabled": deletion_enabled,
-        "can_remove_branch": can_remove,
-        "branches": branches,
-    }
 
 def _preview_payload(
     db: Session,
@@ -1039,11 +573,11 @@ def _preview_payload(
     Read-only by contract: provider reads are allowed, but nothing is written —
     no ProjectRepository identity row, no WorkItemBranch, no flush, no audit.
     """
-    _require_story(target)
-    _assert_can_create_branch(target, actor)
-    config, enabled = _integration_state(db, target.project_id)
+    require_story(target)
+    assert_can_create_branch(target, actor)
+    config, enabled = integration_state(db, target.project_id)
     if not enabled:
-        raise HTTPException(status_code=409, detail=_DETAIL_INTEGRATION_DISABLED)
+        raise HTTPException(status_code=409, detail=DETAIL_INTEGRATION_DISABLED)
     provider = build_provider(config)
     try:
         metadata = _verified_provider_metadata(provider, provider_repo_id.strip())
@@ -1055,10 +589,10 @@ def _preview_payload(
         "work_item_id": target.item_id,
         "display_id": target.display_id,
         "work_item_title": target.title,
-        "assignees": _assignee_briefs(db, target),
+        "assignees": assignee_briefs(db, target),
         "repository_name": metadata.name,
         "repository_full_name": metadata.full_name,
-        "base_branch": base_branch.strip() if base_branch else _default_base_branch(config),
+        "base_branch": base_branch.strip() if base_branch else default_base_branch(config),
         "branch_name": "",
         "can_create": True,
         "reason": "",
@@ -1075,14 +609,14 @@ def _preview_payload(
         )
         payload["branch_name"] = existing.branch_name
         payload["base_branch"] = existing.base_branch or payload["base_branch"]
-        payload["existing_branch"] = _branch_out(
+        payload["existing_branch"] = branch_out(
             existing, display_id=target.display_id, title=target.title
         )
         return payload
     # Pure reads below: base-branch verification plus deterministic naming.
     try:
         branch_name, base_branch, _display_id = branch_svc.preview_branch_name(
-            target, base_branch, default_base_branch=_default_base_branch(config)
+            target, base_branch, default_base_branch=default_base_branch(config)
         )
         payload["base_branch"] = base_branch
         if not provider.get_branch_sha(metadata.owner, metadata.name, base_branch):
@@ -1108,7 +642,7 @@ def _audit_branch_success(
         db, actor, "git_branch_created" if created else "git_branch_reused", row.id,
         f"project={target.project_id} work_item={target.item_type}#{target.item_id} "
         f"display_id={target.display_id} repository_ref={repository.id} "
-        f"repository={_repo_full_name(repository)} branch={row.branch_name} "
+        f"repository={repo_full_name(repository)} branch={row.branch_name} "
         f"base={row.base_branch} sha={(row.base_commit_sha or '')[:12]} "
         f"actor={actor.id} result={'created' if created else 'existing'}",
     )
@@ -1133,13 +667,13 @@ def _create_branch(
     to read back what a concurrent request already wrote — on both the
     IntegrityError path and the "remote branch already exists" path.
     """
-    _require_story(target)
-    _assert_can_create_branch(target, actor)
-    config, enabled = _integration_state(db, target.project_id)
+    require_story(target)
+    assert_can_create_branch(target, actor)
+    config, enabled = integration_state(db, target.project_id)
     if not enabled:
-        _audit_branch_failure(db, actor, target, _DETAIL_INTEGRATION_DISABLED)
+        _audit_branch_failure(db, actor, target, DETAIL_INTEGRATION_DISABLED)
         db.commit()
-        raise HTTPException(status_code=409, detail=_DETAIL_INTEGRATION_DISABLED)
+        raise HTTPException(status_code=409, detail=DETAIL_INTEGRATION_DISABLED)
     repository, base_branch = _resolve_creation_repository(
         db, target.project_id, payload, config
     )
@@ -1189,10 +723,10 @@ def _create_branch(
     _audit_branch_success(db, actor, target, row, repository, created=created)
     db.commit()
     db.refresh(row)
-    return _branch_out(row, display_id=target.display_id, title=target.title), created
+    return branch_out(row, display_id=target.display_id, title=target.title), created
 
 def _list_route(db: Session, target: BranchTarget, actor: User) -> dict:
-    return _work_item_branches_payload(db, target, actor)
+    return work_item_branches_payload(db, target, actor)
 
 def _preview_route(
     db: Session,
@@ -1239,8 +773,8 @@ def _remove_branch_record(
     if not supports_branch_creation(row.work_item_type):
         raise HTTPException(
             status_code=422,
-            detail=_STORY_ONLY_MESSAGE,
-            headers={"X-Error-Code": _STORY_ONLY_CODE},
+            detail=STORY_ONLY_MESSAGE,
+            headers={"X-Error-Code": STORY_ONLY_CODE},
         )
     if row.status == branch_svc.STATUS_DELETED:
         raise HTTPException(
@@ -1262,7 +796,7 @@ def _remove_branch_record(
     if (
         short_name.lower() in _PROTECTED_BRANCH_NAMES
         or short_name == (row.base_branch or "")
-        or short_name == _default_base_branch(_get_config_row(db, row.project_id))
+        or short_name == default_base_branch(get_config_row(db, row.project_id))
     ):
         raise HTTPException(
             status_code=409,
@@ -1282,7 +816,7 @@ def _remove_branch_record(
             "it cannot be removed safely",
         )
 
-    config = _get_config_row(db, row.project_id)
+    config = get_config_row(db, row.project_id)
     provider = build_provider(config)
     try:
         already_absent = not provider.delete_branch(repository.owner, repository.name, ref)
@@ -1291,7 +825,7 @@ def _remove_branch_record(
             # Auth/rate-limit/TLS/timeout/5xx: the record stays Active with a
             # sanitized error so a safe retry remains possible.
             row.last_error = sanitize_provider_message(exc.message)
-            row.last_checked_at = _now()
+            row.last_checked_at = utcnow()
             db.commit()
             raise _translate_provider_error(exc) from exc
         # Exact 404 from a provider that raises instead of returning False:
@@ -1299,20 +833,20 @@ def _remove_branch_record(
         already_absent = True
     row.status = branch_svc.STATUS_DELETED
     row.version += 1
-    row.removed_at = _now()
+    row.removed_at = utcnow()
     row.removed_by_id = actor.id
     row.removed_by_name = actor.name
     row.removal_reason = (
         _REMOVAL_REASON_RECONCILED if already_absent else _REMOVAL_REASON
     )
     row.last_error = ""
-    row.last_checked_at = _now()
+    row.last_checked_at = utcnow()
     db.flush()
     _audit(
         db, actor, "git_branch_removed", row.id,
         f"project={row.project_id} work_item={row.work_item_type}#{row.work_item_id} "
         f"branch={row.branch_name} ref={row.provider_branch_ref} "
-        f"repository={_repo_full_name(repository)} actor={actor.id} "
+        f"repository={repo_full_name(repository)} actor={actor.id} "
         f"result={'reconciled_absent' if already_absent else 'removed'}",
     )
     db.commit()
@@ -1340,7 +874,7 @@ def list_work_item_branches(
     db: Session = Depends(get_db),
     actor: User = Depends(get_current_user),
 ) -> dict:
-    return _list_route(db, _bug_target(db, work_item_id, actor), actor)
+    return _list_route(db, bug_target(db, work_item_id, actor), actor)
 
 @router.get(
     "/work-items/{work_item_id}/branches/preview", response_model=GitBranchPreviewOut,
@@ -1355,9 +889,9 @@ def preview_work_item_branch(
 ) -> dict:
     if not provider_repo_id.strip():
         raise HTTPException(status_code=422, detail="provider_repo_id is required")
-    _validate_base_branch(base_branch)
+    validate_base_branch(base_branch)
     return _preview_route(
-        db, _bug_target(db, work_item_id, actor), actor,
+        db, bug_target(db, work_item_id, actor), actor,
         provider_repo_id=provider_repo_id, base_branch=base_branch,
     )
 
@@ -1371,7 +905,7 @@ def create_work_item_branch(
     actor: User = Depends(get_current_user),
 ) -> dict:
     return _create_route(
-        db, _bug_target(db, work_item_id, actor), payload, actor, response
+        db, bug_target(db, work_item_id, actor), payload, actor, response
     )
 
 @router.delete("/branches/{branch_record_id}", response_model=GitBranchOut,
@@ -1389,7 +923,7 @@ def remove_branch_record(
     metadata is preserved.
     """
     row = _remove_branch_record(db, branch_record_id, expected_version, actor)
-    return _branch_out(
+    return branch_out(
         row,
         display_id=display_id_for_branch(row.work_item_type, row.work_item_id),
         title="",

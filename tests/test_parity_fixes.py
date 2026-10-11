@@ -292,7 +292,7 @@ def test_agile_create_validates_assignees_and_places_sprint_properly(admin_clien
     res = admin_client.post("/api/agile/work-items", json={
         "project_id": project["id"], "title": "Sprint epic", "item_type": "Epic", "sprint_id": sprint["id"],
     })
-    assert res.status_code == 422 and "not planned" in res.json()["detail"]
+    assert res.status_code == 422 and "not planned" in res.json()["detail"][0]["msg"]
 
 
 # --- Taxonomy ----------------------------------------------------------------
@@ -306,7 +306,7 @@ def test_subtask_sprint_follows_its_parent_on_every_route(admin_client):
     sub = _agile_item(admin_client, project["id"], "Child", "Sub-task", parent_id=story["id"])
     assert _bug_row(sub["id"]).sprint_id == sprint["id"]
     res = admin_client.put(f"/api/bugs/{sub['id']}", json={"sprint_id": None})
-    assert res.status_code == 422 and "parent" in res.json()["detail"]
+    assert res.status_code == 422 and "parent" in res.json()["detail"][0]["msg"]
     res = admin_client.put(f"/api/bugs/{story['id']}", json={"sprint_id": None})
     assert res.status_code == 200, res.text
     assert _bug_row(sub["id"]).sprint_id is None
@@ -320,7 +320,7 @@ def test_archived_epic_refuses_new_issues(admin_client):
     res = admin_client.post("/api/agile/work-items", json={
         "project_id": project["id"], "title": "Too late", "item_type": "Story", "epic_id": epic["id"],
     })
-    assert res.status_code == 422 and "Archived" in res.json()["detail"]
+    assert res.status_code == 422 and "Archived" in res.json()["detail"][0]["msg"]
     story = _agile_item(admin_client, project["id"], "Existing", "Story")
     res = admin_client.put(f"/api/agile/work-items/{story['id']}/hierarchy",
                            json={"epic_id": epic["id"], "version": story["version"]})

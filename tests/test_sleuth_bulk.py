@@ -3,41 +3,19 @@ non-admin writes (single or bulk) get action_denied while reads keep working (te
 """
 from __future__ import annotations
 
-import os as _os
-import sys as _sys
-
-from tests.conftest import default_org_id
-
-_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
-
-import os
-import tempfile
-
-_tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-_tmp.close()
-os.environ["DATABASE_URL"] = f"sqlite:///{_tmp.name}"
-os.environ["SESSION_SECRET"] = "test-secret-bulk-only"
-os.environ["SLEUTH_CLOUD_ENABLED"] = "0"
-
-# Purge app.* so this file gets a fresh import bound to its own DB (avoids "no such table").
-import sys as _sys_purge
-
-for _m in list(_sys_purge.modules):
-    if _m == "app" or _m.startswith("app."):
-        del _sys_purge.modules[_m]
-
 from app import models
 from app.auth import hash_password
 from app.chatbot import actions, executor
 from app.chatbot.memory import store as memstore
 from app.database import Base, SessionLocal, engine
+from tests.conftest import default_org_id
 
 
 def seed():
     """Drop and recreate all tables, seed 3 New/Medium/DEV bugs in General, return a dict of ids."""
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
-    memstore._clear_all_for_test()
+    memstore._sessions.clear()
     db = SessionLocal()
     try:
         admin = models.User(org_id=default_org_id(), name="Saikat Aich", email="admin@bulk.test",

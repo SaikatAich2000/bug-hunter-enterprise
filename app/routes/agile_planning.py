@@ -10,12 +10,13 @@ from app.access import accessible_project_ids, can_access_project
 from app.agile import boards as boards_svc
 from app.agile import planning as planning_svc
 from app.agile.permissions import MANAGE_BACKLOG, require_permission
-from app.api_docs import NOT_FOUND_404, NOT_FOUND_VALIDATION_422
+from app.api_docs import BAD_REQUEST_FORBIDDEN_NOT_FOUND_422, NOT_FOUND_404
 from app.auth import get_current_user
 from app.database import get_db
-from app.models import Activity, Project, Sprint, User
+from app.models import Project, Sprint, User
 from app.people import reject_inactive, require_project_members, resolve_users
 from app.schemas import PlanningOut, SprintCapacityReplaceIn
+from app.services.audit import audit
 
 router = APIRouter(prefix="/api/agile", tags=["agile-planning"])
 
@@ -43,7 +44,7 @@ def get_planning(
     return planning_svc.build_planning_summary(db, sprint, board)
 
 
-@router.put("/sprints/{sprint_id}/capacity", response_model=PlanningOut, responses=NOT_FOUND_VALIDATION_422)
+@router.put("/sprints/{sprint_id}/capacity", response_model=PlanningOut, responses=BAD_REQUEST_FORBIDDEN_NOT_FOUND_422)
 def update_capacity(
     sprint_id: int, payload: SprintCapacityReplaceIn,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
@@ -68,10 +69,7 @@ def update_capacity(
         planning_svc.replace_capacity(db, sprint, board, entries)
     except planning_svc.PlanningError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    db.add(Activity(
-        bug_id=None, entity_type="sprint", entity_id=sprint.id,
-        actor_user_id=actor.id, actor_name=actor.name, action="sprint_capacity_updated",
-        detail=f"Updated capacity for sprint '{sprint.name}' ({len(entries)} member(s))",
-    ))
+    audit(db, actor, "sprint", sprint.id, "sprint_capacity_updated",
+          f"Updated capacity for sprint '{sprint.name}' ({len(entries)} member(s))")
     db.commit()
     return planning_svc.build_planning_summary(db, sprint, board)

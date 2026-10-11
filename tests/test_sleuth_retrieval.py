@@ -33,7 +33,7 @@ def test_keywords_caps_term_count():
 
 
 def test_like_escape_neutralizes_wildcards():
-    from app.chatbot.retrieval import _like_escape
+    from app.util import like_escape as _like_escape
     assert _like_escape("a%b_c\\d") == "a\\%b\\_c\\\\d"
 
 

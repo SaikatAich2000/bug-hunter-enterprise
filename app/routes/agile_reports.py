@@ -18,9 +18,9 @@ from app.agile import reports as reports_svc
 from app.agile.permissions import EXPORT_AGILE_REPORTS, VIEW_AGILE_REPORTS, require_permission
 from app.api_docs import (
     BAD_REQUEST_NOT_FOUND_404,
-    NOT_FOUND_404,
+    FORBIDDEN_403,
+    FORBIDDEN_NOT_FOUND_VALIDATION_422,
     NOT_FOUND_500,
-    NOT_FOUND_VALIDATION_422,
     XLSX_FILE_200,
     XLSX_OR_CSV_FILE_200,
 )
@@ -41,6 +41,7 @@ from app.schemas import (
     WorkloadReportOut,
     display_id_for,
 )
+from app.util import defang_formula
 
 router = APIRouter(prefix="/api/agile/reports", tags=["agile-reports"])
 
@@ -57,8 +58,6 @@ _EXPORTABLE_REPORTS = (
 # Longest window the day-by-day flow/control reports accept; each day is
 # reconstructed from history, so an unbounded range is an easy way to pin a CPU.
 _MAX_REPORT_RANGE_DAYS = 366
-# Spreadsheet apps execute a cell that starts with one of these as a formula.
-_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 
 
 def _validate_date_range(date_from: str, date_to: str) -> None:
@@ -78,9 +77,7 @@ def _validate_date_range(date_from: str, date_to: str) -> None:
 
 def _csv_safe(value):
     """Neutralise spreadsheet formula injection in exported text cells."""
-    if isinstance(value, str) and value.startswith(_CSV_FORMULA_PREFIXES):
-        return "'" + value
-    return value
+    return defang_formula(value) if isinstance(value, str) else value
 
 
 def _get_sprint_and_board(db: Session, sprint_id: int, user: User):
@@ -108,7 +105,7 @@ def _get_report_board(db: Session, board_id: int, user: User):
     return board
 
 
-@router.get("/sprint/{sprint_id}", response_model=SprintReportOut, responses=NOT_FOUND_404)
+@router.get("/sprint/{sprint_id}", response_model=SprintReportOut, responses=FORBIDDEN_NOT_FOUND_VALIDATION_422)
 def get_sprint_report(
     sprint_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user),
 ) -> dict:
@@ -218,7 +215,7 @@ _WORK_ITEM_COLS = [
 
 
 @router.get("/sprint/{sprint_id}/export.xlsx", response_class=Response,
-            responses={**XLSX_FILE_200, **NOT_FOUND_500})
+            responses={**XLSX_FILE_200, **NOT_FOUND_500, **FORBIDDEN_403})
 def export_sprint_report_xlsx(
     sprint_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user),
 ) -> StreamingResponse:
@@ -354,7 +351,7 @@ def export_sprint_report_xlsx(
     )
 
 
-@router.get("/burndown", response_model=BurndownReportOut, responses=NOT_FOUND_404)
+@router.get("/burndown", response_model=BurndownReportOut, responses=FORBIDDEN_NOT_FOUND_VALIDATION_422)
 def get_burndown_report(
     sprint_id: int = Query(...), db: Session = Depends(get_db), user: User = Depends(get_current_user),
 ) -> dict:
@@ -362,7 +359,7 @@ def get_burndown_report(
     return reports_svc.burndown_report(db, sprint, board)
 
 
-@router.get("/burnup", response_model=BurnupReportOut, responses=NOT_FOUND_404)
+@router.get("/burnup", response_model=BurnupReportOut, responses=FORBIDDEN_NOT_FOUND_VALIDATION_422)
 def get_burnup_report(
     sprint_id: int = Query(...), db: Session = Depends(get_db), user: User = Depends(get_current_user),
 ) -> dict:
@@ -370,7 +367,7 @@ def get_burnup_report(
     return reports_svc.burnup_report(db, sprint, board)
 
 
-@router.get("/workload", response_model=WorkloadReportOut, responses=NOT_FOUND_404)
+@router.get("/workload", response_model=WorkloadReportOut, responses=FORBIDDEN_NOT_FOUND_VALIDATION_422)
 def get_workload_report(
     sprint_id: int = Query(...), db: Session = Depends(get_db), user: User = Depends(get_current_user),
 ) -> dict:
@@ -378,7 +375,7 @@ def get_workload_report(
     return reports_svc.workload_report(db, sprint, board)
 
 
-@router.get("/daily", response_model=DailyReportOut, responses=NOT_FOUND_VALIDATION_422)
+@router.get("/daily", response_model=DailyReportOut, responses=FORBIDDEN_NOT_FOUND_VALIDATION_422)
 def get_daily_report(
     sprint_id: int = Query(...), report_date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
     db: Session = Depends(get_db), user: User = Depends(get_current_user),
@@ -396,7 +393,7 @@ def get_daily_report(
     return result
 
 
-@router.get("/epic/{epic_id}", response_model=EpicReportOut, responses=NOT_FOUND_404)
+@router.get("/epic/{epic_id}", response_model=EpicReportOut, responses=FORBIDDEN_NOT_FOUND_VALIDATION_422)
 def get_epic_progress_report(
     epic_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user),
 ) -> dict:
@@ -412,7 +409,7 @@ def get_epic_progress_report(
     return reports_svc.epic_report(db, epic, boards_svc.get_default_board(db, epic.project_id))
 
 
-@router.get("/scope-change", response_model=ScopeChangeReportOut, responses=NOT_FOUND_404)
+@router.get("/scope-change", response_model=ScopeChangeReportOut, responses=FORBIDDEN_NOT_FOUND_VALIDATION_422)
 def get_scope_change_report(
     sprint_id: int = Query(...), db: Session = Depends(get_db), user: User = Depends(get_current_user),
 ) -> dict:
@@ -422,7 +419,7 @@ def get_scope_change_report(
 
 # --- Reporting follow-on: velocity, cumulative flow, control chart ---
 
-@router.get("/velocity", response_model=VelocityReportOut, responses=NOT_FOUND_404)
+@router.get("/velocity", response_model=VelocityReportOut, responses=FORBIDDEN_NOT_FOUND_VALIDATION_422)
 def get_velocity_report(
     board_id: int = Query(...), sprint_count: int = Query(default=7, ge=1, le=50),
     db: Session = Depends(get_db), user: User = Depends(get_current_user),
@@ -431,7 +428,7 @@ def get_velocity_report(
     return reports_svc.velocity_report(db, board, sprint_count)
 
 
-@router.get("/cumulative-flow", response_model=CumulativeFlowReportOut, responses=NOT_FOUND_404)
+@router.get("/cumulative-flow", response_model=CumulativeFlowReportOut, responses=FORBIDDEN_NOT_FOUND_VALIDATION_422)
 def get_cumulative_flow_report(
     board_id: int = Query(...), date_from: str = Query(...), date_to: str = Query(...),
     include_subtasks: bool = Query(default=True),
@@ -442,7 +439,7 @@ def get_cumulative_flow_report(
     return reports_svc.cumulative_flow_report(db, board, date_from, date_to, include_subtasks)
 
 
-@router.get("/control-chart", response_model=ControlChartReportOut, responses=NOT_FOUND_404)
+@router.get("/control-chart", response_model=ControlChartReportOut, responses=FORBIDDEN_NOT_FOUND_VALIDATION_422)
 def get_control_chart_report(
     board_id: int = Query(...), date_from: str = Query(...), date_to: str = Query(...),
     db: Session = Depends(get_db), user: User = Depends(get_current_user),
@@ -452,7 +449,7 @@ def get_control_chart_report(
     return reports_svc.control_chart_report(db, board, date_from, date_to)
 
 
-@router.get("/release/{version_id}", response_model=Release360Out, responses=NOT_FOUND_404)
+@router.get("/release/{version_id}", response_model=Release360Out, responses=FORBIDDEN_NOT_FOUND_VALIDATION_422)
 def get_release_report(
     version_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user),
 ) -> dict:
@@ -604,7 +601,7 @@ def _report_to_csv_bytes(data: dict, report_key: str | None = None) -> bytes:
 
 
 @router.post("/export", response_class=Response,
-             responses={**XLSX_OR_CSV_FILE_200, **BAD_REQUEST_NOT_FOUND_404})
+             responses={**XLSX_OR_CSV_FILE_200, **BAD_REQUEST_NOT_FOUND_404, **FORBIDDEN_403})
 def export_report(
     report_key: str = Query(..., description="|".join(_EXPORTABLE_REPORTS)),
     sprint_id: int | None = Query(default=None),

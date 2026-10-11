@@ -1,0 +1,1 @@
+function e(e){return document.querySelector(`meta[name="${e}"]`)?.getAttribute(`content`)||``}function t(){return e(`application-name`)}function n(t){let n=e(`application-asset-version`);return n?`/static/${t}?v=${encodeURIComponent(n)}`:`/static/${t}`}function r(){let[e=``,...n]=t().trim().split(/\s+/);return{first:e.toUpperCase(),rest:n.join(` `).toUpperCase()}}export{n,r,t};

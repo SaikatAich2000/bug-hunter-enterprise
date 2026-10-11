@@ -207,7 +207,7 @@ def create_work_item(db: Session, actor: User, args: dict) -> dict:
     description = plain_text(args.get("description"))
 
     if item_type in LEGACY_ITEM_TYPES:
-        if not can_edit_bug(actor, actor.id, [], item_type=item_type):
+        if not can_edit_bug(actor, item_type=item_type):
             raise ToolError(f"You don't have permission to create a {item_type}")
     elif not project.agile_enabled:
         # Same rule as POST /api/agile/work-items.
@@ -240,7 +240,7 @@ def transition_work_item_tool(db: Session, actor: User, args: dict) -> dict:
         raise ToolError("item_id and to_status are required")
     item_id = _int_arg(args, "item_id")
     item = _get_item(db, actor, item_id)
-    if not can_edit_bug(actor, item.reporter_id, [a.id for a in item.assignees], item_type=item.item_type):
+    if not can_edit_bug(actor, item_type=item.item_type):
         raise ToolError(f"You don't have permission to edit #{item_id}")
     allowed = statuses_for_type(item.item_type)
     try:
@@ -263,7 +263,7 @@ def assign_work_item_tool(db: Session, actor: User, args: dict) -> dict:
     if not item_id or not assignee_name:
         raise ToolError("item_id and assignee_name are required")
     item = _get_item(db, actor, _int_arg(args, "item_id"))
-    if not can_edit_bug(actor, item.reporter_id, [a.id for a in item.assignees], item_type=item.item_type):
+    if not can_edit_bug(actor, item_type=item.item_type):
         raise ToolError(f"You don't have permission to edit #{item_id}")
     user = _resolve_user_by_name(db, actor, assignee_name)
     if not user.is_active:
@@ -288,7 +288,7 @@ def add_comment_tool(db: Session, actor: User, args: dict) -> dict:
     if not item_id or not body:
         raise ToolError("item_id and body are required")
     item = _get_item(db, actor, _int_arg(args, "item_id"))
-    if not can_edit_bug(actor, item.reporter_id, [a.id for a in item.assignees], item_type=item.item_type):
+    if not can_edit_bug(actor, item_type=item.item_type):
         raise ToolError(f"You don't have permission to comment on #{item_id}")
     comment = Comment(bug_id=item.id, author_user_id=actor.id, author_name=actor.name, body=sanitize_html(body))
     db.add(comment)

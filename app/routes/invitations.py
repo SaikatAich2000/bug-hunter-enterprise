@@ -9,7 +9,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.access import add_user_project, project_role
-from app.api_docs import BAD_REQUEST_FORBIDDEN_CONFLICT_NOT_FOUND_404, BAD_REQUEST_NOT_FOUND_404
+from app.api_docs import (
+    BAD_REQUEST_FORBIDDEN_CONFLICT_NOT_FOUND_404,
+    BAD_REQUEST_FORBIDDEN_NOT_FOUND_404,
+    BAD_REQUEST_NOT_FOUND_404,
+    INVITE_ERRORS_400_403_404_409_429,
+)
 from app.auth import INVITATION_TTL, can_invite, generate_token, get_current_user, hash_password, hash_token
 from app.config import get_settings
 from app.database import get_db
@@ -99,7 +104,7 @@ def _out(inv: Invitation) -> dict:
 
 
 @router.post("", response_model=InvitationOut, status_code=status.HTTP_201_CREATED,
-             responses=BAD_REQUEST_FORBIDDEN_CONFLICT_NOT_FOUND_404)
+             responses=INVITE_ERRORS_400_403_404_409_429)
 def create_invitation(
     payload: InvitationCreate,
     background: BackgroundTasks,
@@ -156,7 +161,7 @@ def create_invitation(
     return _out(inv)
 
 
-@router.get("", response_model=list[InvitationOut], responses=BAD_REQUEST_NOT_FOUND_404)
+@router.get("", response_model=list[InvitationOut], responses=BAD_REQUEST_FORBIDDEN_NOT_FOUND_404)
 def list_invitations(
     actor: User = Depends(get_current_user), db: Session = Depends(get_db),
 ) -> list[dict]:

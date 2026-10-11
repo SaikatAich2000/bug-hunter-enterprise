@@ -323,19 +323,133 @@ def _live_completion(db: Session, members: set[int], done: set[str], history: Hi
     return completed, members - completed
 
 
+_TRACKED_FIELDS = ("created", "sprint", "status", "story_points", "original_estimate")
+
+
+def _standard_items(items: dict[int, Bug]) -> dict[int, Bug]:
+    return {i: item for i, item in items.items() if item.item_type in STANDARD_TYPES}
+
+
+class _Replay:
+    """Replays a started sprint's change history, tracking the running remaining /
+    scope / completed totals and recording the events that moved them."""
+
+    def __init__(self, analysis: SprintAnalysis, history: History, start: datetime):
+        self.a = analysis
+        self.history = history
+        self.done = analysis.done
+        self.sid = str(analysis.sprint.id)
+        self.states = {i: IssueState.at(history, i, start) for i in analysis.items}
+        self.remaining = self.scope = self.completed = 0.0
+        # Issues already done when the sprint started were completed outside it:
+        # they are not part of the commitment.
+        analysis.completed_outside.update(
+            i for i, st in self.states.items() if self.member(st) and st.status in self.done
+        )
+        analysis.committed = {
+            i: self.estimate(st) for i, st in self.states.items()
+            if self.member(st) and i not in analysis.completed_outside
+        }
+        for i, st in self.states.items():
+            self._add(self.contribution(i, st))
+        analysis.series.append((start, self.remaining, self.scope, self.completed))
+
+    def member(self, st: IssueState) -> bool:
+        return st.exists and st.sprint == self.sid
+
+    def estimate(self, st: IssueState) -> float:
+        return statistic_value(self.a.mode, st.points, st.minutes)
+
+    def contribution(self, item_id: int, st: IssueState) -> tuple[float, float, float]:
+        # Work completed outside the sprint is listed apart and never burns.
+        if not self.member(st) or item_id in self.a.completed_outside:
+            return 0.0, 0.0, 0.0
+        value = self.estimate(st)
+        finished = st.status in self.done
+        return (0.0 if finished else value), value, (value if finished else 0.0)
+
+    def _add(self, delta: tuple[float, float, float]) -> None:
+        self.remaining += delta[0]
+        self.scope += delta[1]
+        self.completed += delta[2]
+
+    def apply(self, change: Change) -> None:
+        if change.item_id not in self.states or change.field not in _TRACKED_FIELDS:
+            return
+        if change.reason in _SIDE_EFFECT_REASONS and change.field == "sprint":
+            return
+        item_id = change.item_id
+        st = self.states[item_id]
+        before = self.contribution(item_id, st)
+        was_member, was_done, estimate_before = self.member(st), st.status in self.done, self.estimate(st)
+        if change.field == "created":
+            self.states[item_id] = st = IssueState.at(self.history, item_id, change.at)
+        else:
+            st.apply(change)
+        is_member, is_done = self.member(st), st.status in self.done
+        label = _event_label(change.field, was_member, is_member, was_done, is_done)
+        label = self._track_scope(label, item_id, st, estimate_before, is_done)
+        if change.field == "status" and is_member and was_done and not is_done:
+            self._reopened(item_id)
+        after = self.contribution(item_id, st)
+        delta = (after[0] - before[0], after[1] - before[1], after[2] - before[2])
+        self._add(delta)
+        if label is not None and any(delta):
+            self._record(change, label, delta[0])
+
+    def _track_scope(self, label, item_id: int, st: IssueState, estimate_before: float, is_done: bool):
+        a, outside = self.a, self.a.completed_outside
+        if label in (EVENT_ADDED, EVENT_CREATED):
+            if item_id not in a.committed:
+                a.added.add(item_id)
+            if is_done:
+                outside.add(item_id)
+            a.removed.pop(item_id, None)
+        elif label == EVENT_REMOVED:
+            if item_id in outside:
+                outside.discard(item_id)
+            else:
+                a.removed[item_id] = estimate_before
+        elif label == EVENT_ESTIMATE:
+            if self.estimate(st) == estimate_before:
+                return None
+            a.estimate_change_count += 1
+        return label
+
+    def _reopened(self, item_id: int) -> None:
+        """Reopened during the sprint: it is now work of this sprint."""
+        a = self.a
+        if item_id in a.completed_outside:
+            a.completed_outside.discard(item_id)
+            if item_id not in a.committed:
+                a.added.add(item_id)
+
+    def _record(self, change: Change, label: str, delta_remaining: float) -> None:
+        a = self.a
+        item = a.items[change.item_id]
+        a.series.append((change.at, self.remaining, self.scope, self.completed))
+        a.events.append({
+            "at": change.at, "work_item_id": item.id, "display_id": _display(item),
+            "title": item.title, "event": label, "change": round(delta_remaining, 2),
+            "actor_id": change.actor_id,
+            "remaining": round(self.remaining, 2),
+            "scope_change": label in (EVENT_ADDED, EVENT_REMOVED,
+                                      EVENT_ESTIMATE, EVENT_CREATED),
+        })
+
+
 def analyze_sprint(db: Session, sprint: Sprint, board: Board) -> SprintAnalysis:
-    mode = board.estimation_mode
     done = done_status_values(db, board)
     start, planned_end, end = sprint_window(sprint, board)
-    analysis = SprintAnalysis(sprint=sprint, board=board, mode=mode, done=done,
+    analysis = SprintAnalysis(sprint=sprint, board=board, mode=board.estimation_mode, done=done,
                               start=start, planned_end=planned_end, end=end)
     items = sprint_candidates(db, sprint)
     analysis.items = {i.id: i for i in items}
     if start is None or end is None:
-        analysis.items = {i: item for i, item in analysis.items.items() if item.item_type in STANDARD_TYPES}
+        analysis.items = _standard_items(analysis.items)
         return analysis
     if sprint.started_at is None:
-        analysis.items = {i: item for i, item in analysis.items.items() if item.item_type in STANDARD_TYPES}
+        analysis.items = _standard_items(analysis.items)
         return _analyze_legacy(db, analysis)
 
     history = History(db, items)
@@ -344,107 +458,31 @@ def analyze_sprint(db: Session, sprint: Sprint, board: Board) -> SprintAnalysis:
     analysis.items = {
         i: item for i, item in analysis.items.items() if history.value(i, "item_type", end) in STANDARD_TYPES
     }
-    sid = str(sprint.id)
-    states = {i: IssueState.at(history, i, start) for i in analysis.items}
-    outside = analysis.completed_outside
-
-    def member(st: IssueState) -> bool:
-        return st.exists and st.sprint == sid
-
-    def estimate(st: IssueState) -> float:
-        return statistic_value(mode, st.points, st.minutes)
-
-    def contribution(item_id: int, st: IssueState) -> tuple[float, float, float]:
-        # Work completed outside the sprint is listed apart and never burns.
-        if not member(st) or item_id in outside:
-            return 0.0, 0.0, 0.0
-        value = estimate(st)
-        finished = st.status in done
-        return (0.0 if finished else value), value, (value if finished else 0.0)
-
-    # Issues already done when the sprint started were completed outside it:
-    # they are not part of the commitment.
-    outside.update(i for i, st in states.items() if member(st) and st.status in done)
-    analysis.committed = {i: estimate(st) for i, st in states.items() if member(st) and i not in outside}
-    remaining = scope = completed = 0.0
-    for i, st in states.items():
-        r, sc, c = contribution(i, st)
-        remaining, scope, completed = remaining + r, scope + sc, completed + c
-    analysis.series.append((start, remaining, scope, completed))
-
+    replay = _Replay(analysis, history, start)
     for change in history.between(start, end):
-        if change.item_id not in states:
-            continue
-        if change.field not in ("created", "sprint", "status", "story_points", "original_estimate"):
-            continue
-        if change.reason in _SIDE_EFFECT_REASONS and change.field == "sprint":
-            continue
-        item_id = change.item_id
-        st = states[item_id]
-        before = contribution(item_id, st)
-        was_member, was_done, estimate_before = member(st), st.status in done, estimate(st)
-        if change.field == "created":
-            states[item_id] = st = IssueState.at(history, item_id, change.at)
-        else:
-            st.apply(change)
-        is_member, is_done = member(st), st.status in done
-        label = _event_label(change.field, was_member, is_member, was_done, is_done)
-        if label in (EVENT_ADDED, EVENT_CREATED):
-            if item_id not in analysis.committed:
-                analysis.added.add(item_id)
-            if is_done:
-                outside.add(item_id)
-            analysis.removed.pop(item_id, None)
-        elif label == EVENT_REMOVED:
-            if item_id in outside:
-                outside.discard(item_id)
-            else:
-                analysis.removed[item_id] = estimate_before
-        elif label == EVENT_ESTIMATE:
-            if estimate(st) == estimate_before:
-                label = None
-            else:
-                analysis.estimate_change_count += 1
-        if change.field == "status" and is_member and was_done and not is_done and item_id in outside:
-            # Reopened during the sprint: it is now work of this sprint.
-            outside.discard(item_id)
-            if item_id not in analysis.committed:
-                analysis.added.add(item_id)
-        after = contribution(item_id, st)
-        delta_remaining = after[0] - before[0]
-        remaining, scope, completed = (
-            remaining + delta_remaining, scope + (after[1] - before[1]), completed + (after[2] - before[2]),
-        )
-        if label is None or (delta_remaining == 0 and after[1] == before[1] and after[2] == before[2]):
-            continue
-        item = analysis.items[item_id]
-        analysis.series.append((change.at, remaining, scope, completed))
-        analysis.events.append({
-            "at": change.at, "work_item_id": item.id, "display_id": _display(item),
-            "title": item.title, "event": label, "change": round(delta_remaining, 2),
-            "actor_id": change.actor_id,
-            "remaining": round(remaining, 2),
-            "scope_change": label in (EVENT_ADDED, EVENT_REMOVED,
-                                      EVENT_ESTIMATE, EVENT_CREATED),
-        })
+        replay.apply(change)
+    _finish_analysis(db, analysis, replay, end)
+    return analysis
 
-    members = {i for i, st in states.items() if member(st)}
+
+def _finish_analysis(db: Session, analysis: SprintAnalysis, replay: _Replay, end: datetime) -> None:
+    sprint = analysis.sprint
+    members = {i for i, st in replay.states.items() if replay.member(st)}
     recorded = _completion_from_records(db, sprint) if sprint.state == "closed" else None
     if recorded is not None:
         analysis.completed, analysis.incomplete = recorded
     else:
-        analysis.completed, analysis.incomplete = _live_completion(db, members, done, history, end)
+        analysis.completed, analysis.incomplete = _live_completion(db, members, analysis.done, replay.history, end)
     analysis.completed &= set(analysis.items)
     analysis.incomplete &= set(analysis.items)
     analysis.removed = {i: v for i, v in analysis.removed.items()
                         if i not in analysis.completed and i not in analysis.incomplete}
-    analysis.estimate_at_end = {i: estimate(states[i]) for i in analysis.items}
+    analysis.estimate_at_end = {i: replay.estimate(replay.states[i]) for i in analysis.items}
     # The last point uses the sprint report's completion rule (an issue with
     # an open Sub-task is not done), so the charts and the report agree.
     end_completed = analysis.total(analysis.completed_inside)
-    end_remaining = analysis.total(analysis.incomplete - outside)
+    end_remaining = analysis.total(analysis.incomplete - analysis.completed_outside)
     analysis.series.append((end, end_remaining, end_completed + end_remaining, end_completed))
-    return analysis
 
 
 def _analyze_legacy(db: Session, analysis: SprintAnalysis) -> SprintAnalysis:
@@ -929,44 +967,30 @@ def scope_change_report(db: Session, sprint: Sprint, board: Board) -> dict:
     return {"sprint_id": sprint.id, "entries": entries}
 
 
-def daily_report(db: Session, sprint: Sprint, board: Board, report_date: str, generated_by_id: int | None) -> dict:
-    """One calendar day (board timezone) of a sprint: where every issue stood
-    at the end of the day, what moved during it, and the current blockers."""
-    zone = board_zone(board)
-    day = date.fromisoformat(report_date)
-    day_start, day_end = _midnight(day, zone), _midnight(day + timedelta(days=1), zone)
-    a = analyze_sprint(db, sprint, board)
-    mode = a.mode
-    placement = status_to_column(board)
-    columns = ordered_columns(board)
-    last_column = columns[-1] if columns else None
-    history = History(db, list(a.items.values()))
-    sid = str(sprint.id)
-    at = min(day_end, a.end) if a.end else day_end
-    members = [i for i in a.items if history.exists(i, at) and history.value(i, "sprint", at) == sid]
-    counts = {"todo": 0, "in_progress": 0, "testing": 0, "done": 0}
-    item_rows = []
-    completed_value = remaining_value = 0.0
-    for item_id in sorted(members):
-        item = a.items[item_id]
-        status = history.value(item_id, "status", at)
-        column = placement.get(status)
-        category = "done" if status in a.done else (column.category if column else "todo")
-        if column is not None and column is last_column:
-            category = "done"
-        counts[category] = counts.get(category, 0) + 1
-        value = statistic_value(mode, history.value(item_id, "story_points", at),
-                                history.value(item_id, "original_estimate", at))
-        if category == "done":
-            completed_value += value
-        else:
-            remaining_value += value
-        item_rows.append({
-            "work_item_id": item_id, "display_id": _display(item), "title": item.title,
-            "item_type": item.item_type or "Bug", "status": status or "", "category": category,
-            "column": column.name if column else "(not on the board)", "story_points": value,
-        })
-    todays = [e for e in a.events if day_start <= e["at"] < day_end]
+_SCOPE_EVENT_TYPES = {EVENT_ADDED: "added", EVENT_CREATED: "added",
+                      EVENT_REMOVED: "removed", EVENT_ESTIMATE: "estimate_changed"}
+
+
+def _daily_item_state(a: SprintAnalysis, history: History, item_id: int, at: datetime,
+                      placement: dict, last_column) -> dict:
+    """One issue's row as it stood at ``at`` (category decides which total it feeds)."""
+    item = a.items[item_id]
+    status = history.value(item_id, "status", at)
+    column = placement.get(status)
+    category = "done" if status in a.done else (column.category if column else "todo")
+    if column is not None and column is last_column:
+        category = "done"
+    value = statistic_value(a.mode, history.value(item_id, "story_points", at),
+                            history.value(item_id, "original_estimate", at))
+    return {
+        "work_item_id": item_id, "display_id": _display(item), "title": item.title,
+        "item_type": item.item_type or "Bug", "status": status or "", "category": category,
+        "column": column.name if column else "(not on the board)", "story_points": value,
+    }
+
+
+def _daily_transitions(a: SprintAnalysis, history: History, sid: str, day_start: datetime,
+                       day_end: datetime, todays: list[dict]) -> list[dict]:
     transitions = []
     for change in history.between(day_start - timedelta(microseconds=1), day_end - timedelta(microseconds=1)):
         if change.field != "status" or change.item_id not in a.items:
@@ -979,41 +1003,75 @@ def daily_report(db: Session, sprint: Sprint, board: Board, report_date: str, ge
             "occurred_at": change.at, "detail": f"{change.old or '?'} → {change.new or '?'}",
         })
     for event in todays:
-        if event["event"] != EVENT_COMPLETED and event["event"] != EVENT_REOPENED:
+        if event["event"] not in (EVENT_COMPLETED, EVENT_REOPENED):
             transitions.append({
                 "work_item_id": event["work_item_id"], "title": event["title"],
-                "event_type": {EVENT_ADDED: "added", EVENT_CREATED: "added",
-                               EVENT_REMOVED: "removed",
-                               EVENT_ESTIMATE: "estimate_changed"}.get(event["event"], event["event"]),
+                "event_type": _SCOPE_EVENT_TYPES.get(event["event"], event["event"]),
                 "occurred_at": event["at"], "detail": f"{event['change']:+g}",
             })
     transitions.sort(key=lambda t: t["occurred_at"])
-    blockers = [a.items[i] for i in members if a.items[i].blocked or a.items[i].flagged]
+    return transitions
+
+
+def _daily_blocker(item: Bug) -> dict:
+    return {"work_item_id": item.id, "title": item.title, "item_type": item.item_type or "Bug",
+            "blocked_reason": item.blocked_reason or ("Flagged" if item.flagged else ""), "status": item.status}
+
+
+def _daily_scope_today(todays: list[dict]) -> dict:
     return {
-        "sprint_id": sprint.id, "sprint_name": sprint.name, "goal": sprint.goal or "",
-        "report_date": report_date, "generated_at": _now().replace(microsecond=0),
-        "generated_by_id": generated_by_id,
-        "committed_count": len(a.committed),
-        "story_count": sum(1 for i in members if a.items[i].item_type == "Story"),
-        "bug_count": sum(1 for i in members if a.items[i].item_type == "Bug"),
-        "todo_count": counts.get("todo", 0), "in_progress_count": counts.get("in_progress", 0),
-        "testing_count": counts.get("testing", 0), "done_count": counts.get("done", 0),
-        "blocked_count": len(blockers),
-        "committed_estimate": round(sum(a.committed.values()), 2),
-        "completed_estimate": round(completed_value, 2),
-        "remaining_estimate": round(remaining_value, 2),
         # Net of reopens: work finished and reopened the same day is not done.
         "completed_estimate_today": round(
             -sum(e["change"] for e in todays if e["event"] in (EVENT_COMPLETED, EVENT_REOPENED)), 2,
         ),
         "scope_added_today": sum(1 for e in todays if e["event"] in (EVENT_ADDED, EVENT_CREATED)),
         "scope_removed_today": sum(1 for e in todays if e["event"] == EVENT_REMOVED),
-        "transitions": transitions,
-        "blockers": [
-            {"work_item_id": b.id, "title": b.title, "item_type": b.item_type or "Bug",
-             "blocked_reason": b.blocked_reason or ("Flagged" if b.flagged else ""), "status": b.status}
-            for b in blockers
-        ],
+    }
+
+
+def _daily_totals(a: SprintAnalysis, members: list[int], item_rows: list[dict]) -> dict:
+    counts = {"todo": 0, "in_progress": 0, "testing": 0, "done": 0}
+    for row in item_rows:
+        counts[row["category"]] = counts.get(row["category"], 0) + 1
+    completed = sum(r["story_points"] for r in item_rows if r["category"] == "done")
+    remaining = sum(r["story_points"] for r in item_rows if r["category"] != "done")
+    return {
+        "committed_count": len(a.committed),
+        "story_count": sum(1 for i in members if a.items[i].item_type == "Story"),
+        "bug_count": sum(1 for i in members if a.items[i].item_type == "Bug"),
+        "todo_count": counts.get("todo", 0), "in_progress_count": counts.get("in_progress", 0),
+        "testing_count": counts.get("testing", 0), "done_count": counts.get("done", 0),
+        "committed_estimate": round(sum(a.committed.values()), 2),
+        "completed_estimate": round(completed, 2),
+        "remaining_estimate": round(remaining, 2),
+    }
+
+
+def daily_report(db: Session, sprint: Sprint, board: Board, report_date: str, generated_by_id: int | None) -> dict:
+    """One calendar day (board timezone) of a sprint: where every issue stood
+    at the end of the day, what moved during it, and the current blockers."""
+    zone = board_zone(board)
+    day = date.fromisoformat(report_date)
+    day_start, day_end = _midnight(day, zone), _midnight(day + timedelta(days=1), zone)
+    a = analyze_sprint(db, sprint, board)
+    columns = ordered_columns(board)
+    history = History(db, list(a.items.values()))
+    sid = str(sprint.id)
+    at = min(day_end, a.end) if a.end else day_end
+    members = [i for i in a.items if history.exists(i, at) and history.value(i, "sprint", at) == sid]
+    placement, last_column = status_to_column(board), (columns[-1] if columns else None)
+    item_rows = [_daily_item_state(a, history, i, at, placement, last_column) for i in sorted(members)]
+    todays = [e for e in a.events if day_start <= e["at"] < day_end]
+    blockers = [a.items[i] for i in members if a.items[i].blocked or a.items[i].flagged]
+    return {
+        "sprint_id": sprint.id, "sprint_name": sprint.name, "goal": sprint.goal or "",
+        "report_date": report_date, "generated_at": _now().replace(microsecond=0),
+        "generated_by_id": generated_by_id,
+        **_daily_totals(a, members, item_rows),
+        "blocked_count": len(blockers),
+        **_daily_scope_today(todays),
+        "transitions": _daily_transitions(a, history, sid, day_start, day_end, todays),
+        "blockers": [_daily_blocker(b) for b in blockers],
         "items": item_rows,
     }
 

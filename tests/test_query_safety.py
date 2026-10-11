@@ -192,10 +192,10 @@ class TestAttachmentEdge:
         assert r.status_code in (201, 400, 422)
 
     def test_attachment_with_no_content_type(self, admin_client):
-        """Server should fall back to application/octet-stream."""
+        """A missing client content type is fine: the stored type comes from the extension."""
         p = _make_project(admin_client, "AE-2")
         bug = _make_bug(admin_client, p["id"])
-        # FastAPI/Starlette may leave content_type empty; server should default to octet-stream.
-        files = {"file": ("plain.dat", io.BytesIO(b"data"))}
+        files = {"file": ("plain.txt", io.BytesIO(b"data"))}
         r = admin_client.post(f"/api/bugs/{bug['id']}/attachments", files=files)
         assert r.status_code == 201
+        assert r.json()["content_type"] == "text/plain"

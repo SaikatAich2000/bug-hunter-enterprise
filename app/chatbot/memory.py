@@ -153,13 +153,6 @@ class _Store:
         with self._lock:
             self._sessions.pop(user_id, None)
 
-    def _all_sessions_for_test(self) -> dict[int, _Session]:
-        with self._lock:
-            return dict(self._sessions)
-
-    def _clear_all_for_test(self) -> None:
-        with self._lock:
-            self._sessions.clear()
 
 
 # Module-level singleton.

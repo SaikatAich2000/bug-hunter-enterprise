@@ -26,13 +26,13 @@ from app.database import get_db
 from app.models import (
     PROJECT_ROLE_LEAD,
     ROLE_ADMIN,
-    Activity,
     Bug,
     Project,
     User,
     user_projects,
 )
 from app.schemas import ProjectCreateIn, ProjectIn, ProjectOut
+from app.services.audit import audit
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -40,11 +40,7 @@ router = APIRouter(prefix="/api/projects", tags=["projects"])
 _DETAIL_PROJECT_NOT_FOUND = "Project not found"
 
 def _audit(db: Session, actor: User, action: str, entity_id: int, detail: str) -> None:
-    db.add(Activity(
-        org_id=actor.org_id, bug_id=None, entity_type="project", entity_id=entity_id,
-        actor_user_id=actor.id, actor_name=actor.name,
-        action=action, detail=detail,
-    ))
+    audit(db, actor, "project", entity_id, action, detail)
 
 
 def _name_taken(db: Session, org_id: int, name: str, exclude_id: int | None = None) -> bool:

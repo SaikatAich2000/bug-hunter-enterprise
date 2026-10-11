@@ -4,6 +4,7 @@ Every notify_* body builder, recipient helpers, and SMTP transport against a fak
 from __future__ import annotations
 
 import logging
+import types
 from types import SimpleNamespace
 
 from app import email_service as es
@@ -217,3 +218,15 @@ def test_smtp_swallows_transport_error(monkeypatch, caplog):
     with caplog.at_level(logging.ERROR, logger="bug_hunter.email"):
         es.deliver("Hi", ["a@b.local"], "body")  # must not raise
     assert any("Failed to send email" in (r.message or "") for r in caplog.records)
+
+
+# email_service: a failed password-reset delivery should log an error
+def test_password_reset_delivery_failure_logs_error(monkeypatch, caplog):
+    from app import email_service as es
+
+    monkeypatch.setattr(es, "deliver", lambda subject, to, body, from_address=None: False)
+    monkeypatch.setattr(es, "get_settings",
+                        lambda: types.SimpleNamespace(EMAIL_BACKEND="smtp", APP_NAME="Bug Hunter"))
+    with caplog.at_level("ERROR"):
+        es.notify_password_reset("user@bh.local", "User", "http://bh.local/reset?t=x")
+    assert any("not delivered" in r.message.lower() for r in caplog.records)

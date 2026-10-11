@@ -34,7 +34,17 @@ from app import notification_service
 from app.access import accessible_project_ids, can_access_project, scope_event_query
 from app.config import get_settings
 from app.custom_values import check_value, required_message
-from app.models import ROLE_ADMIN, Activity, Bug, BugCustomValue, CustomField, Event, Project, User, user_projects
+from app.models import (
+    ROLE_ADMIN,
+    Activity,
+    Bug,
+    BugCustomValue,
+    CustomField,
+    Event,
+    Project,
+    User,
+    user_projects,
+)
 from app.schemas import (
     ALLOWED_ENVIRONMENTS,
     ALLOWED_ITEM_TYPES,

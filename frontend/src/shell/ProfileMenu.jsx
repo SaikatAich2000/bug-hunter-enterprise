@@ -6,13 +6,14 @@ import { api } from "../lib/api";
 import { initials } from "../lib/format";
 import { confirmDialog } from "../components/ConfirmHost";
 import { unsubscribeOnLogout } from "../lib/push";
+import { emitOnboarding } from "../onboarding/onboardingBus";
 
 function currentTheme() {
   return document.documentElement.dataset.theme === "light" ? "light" : "dark";
 }
 
 export default function ProfileMenu() {
-  const { currentUser, setChangePasswordOpen, setAccountOpen } = useApp();
+  const { currentUser, setChangePasswordOpen, setAccountOpen, setView } = useApp();
 
   const [open, setOpen] = useState(false);
   const [theme, setTheme] = useState(currentTheme);
@@ -76,6 +77,16 @@ export default function ProfileMenu() {
   const handleAccount = () => {
     setOpen(false);
     setAccountOpen(true);
+  };
+
+  const openHelp = () => {
+    setOpen(false);
+    setView("help");
+  };
+
+  const openTour = () => {
+    setOpen(false);
+    emitOnboarding("tour-resume");
   };
 
   const avatar = initials(currentUser.name) || "?";
@@ -154,6 +165,28 @@ export default function ProfileMenu() {
           >
             <span className="profile-menu-ic" aria-hidden="true">{theme === "dark" ? "☀️" : "🌙"}</span>
             {theme === "dark" ? "Light theme" : "Dark theme"}
+          </button>
+
+          <button
+            type="button"
+            role="menuitem"
+            className="profile-menu-item"
+            id="helpCenterBtn"
+            onClick={openHelp}
+          >
+            <span className="profile-menu-ic" aria-hidden="true">❓</span>{" "}
+            Help center
+          </button>
+
+          <button
+            type="button"
+            role="menuitem"
+            className="profile-menu-item"
+            id="productTourBtn"
+            onClick={openTour}
+          >
+            <span className="profile-menu-ic" aria-hidden="true">🧭</span>{" "}
+            Product tour
           </button>
 
           <div className="profile-menu-sep" />

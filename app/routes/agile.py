@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app import custom_values as cv
 from app.access import accessible_project_ids, can_access_project
 from app.agile import backlog as backlog_svc
 from app.agile import boards as boards_svc
@@ -32,15 +33,15 @@ from app.agile.permissions import (
 )
 from app.agile.sprints import SprintLifecycleError
 from app.api_docs import (
+    BAD_REQUEST_FORBIDDEN_NOT_FOUND_422,
+    BAD_REQUEST_FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422,
+    FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422,
+    FORBIDDEN_NOT_FOUND_VALIDATION_422,
     NOT_FOUND_404,
-    NOT_FOUND_CONFLICT_409,
-    NOT_FOUND_CONFLICT_VALIDATION_422,
-    NOT_FOUND_VALIDATION_422,
 )
 from app.auth import get_current_user
-from app import custom_values as cv
 from app.database import get_db
-from app.models import AcceptanceCriterion, Activity, Board, Bug, Project, Sprint, User
+from app.models import AcceptanceCriterion, Board, Bug, Project, Sprint, User
 from app.people import reject_inactive, require_project_members, resolve_users
 from app.schemas import (
     AcceptanceCriterionIn,
@@ -67,6 +68,14 @@ from app.schemas import (
     WorkItemHierarchyIn,
     WorkItemTaskFlagsIn,
 )
+from app.services.agile_items import (
+    apply_task_flag_updates,
+    backlog_item_out,
+    idempotent_lifecycle,
+    sprint_out,
+    validate_story_ready_requirements,
+)
+from app.services.audit import audit as _audit
 
 router = APIRouter(prefix="/api/agile", tags=["agile"])
 
@@ -86,43 +95,6 @@ _READY_REQUIRED_FIELDS_ERROR = (
     "Ready for Sprint requires: title, description, valid dates, priority, story points, "
     "an owner or assignee, and at least one acceptance criterion"
 )
-
-
-def _validate_story_ready_requirements(db: Session, item: Bug) -> bool:
-    """Check if a Story has all mandatory fields for Ready for Sprint.
-    Returns True if all requirements are met, False otherwise."""
-    if not (
-        item.title and item.description and item.priority
-        and item.story_points is not None and (item.owner_id or item.assignees)
-        and item.start_date and item.due_date
-    ):
-        return False
-    # Check for at least one acceptance criterion
-    has_criterion = db.scalar(
-        select(AcceptanceCriterion.id).where(AcceptanceCriterion.bug_id == item.id).limit(1)
-    )
-    return has_criterion is not None
-
-
-def _apply_task_flag_updates(item: Bug, payload: WorkItemTaskFlagsIn) -> bool:
-    """Apply task flag updates to an item. Returns True if blocked status changed."""
-    was_blocked = item.blocked
-    if payload.mandatory is not None:
-        item.mandatory = payload.mandatory
-    if payload.blocked is not None:
-        item.blocked = payload.blocked
-    if payload.blocked_reason is not None:
-        item.blocked_reason = payload.blocked_reason
-    if payload.blocked is False:
-        item.blocked_reason = ""
-    return payload.blocked is not None and payload.blocked != was_blocked
-
-
-def _audit(db: Session, actor: User, entity_type: str, entity_id: int, action: str, detail: str) -> None:
-    db.add(Activity(
-        bug_id=None, entity_type=entity_type, entity_id=entity_id,
-        actor_user_id=actor.id, actor_name=actor.name, action=action, detail=detail,
-    ))
 
 
 def _get_project_or_404(db: Session, project_id: int, user: User) -> Project:
@@ -171,10 +143,6 @@ def _get_sprint_or_404(db: Session, sprint_id: int, user: User, *, lock: bool = 
     return sprint
 
 
-def _sprint_item_count(db: Session, sprint_id: int) -> int:
-    return sprints_svc.sprint_item_count(db, sprint_id)
-
-
 # =====================================================================
 # Project activation / settings
 # =====================================================================
@@ -196,7 +164,7 @@ def get_agile_settings(
     }
 
 
-@router.post("/projects/{project_id}/enable", response_model=AgileSettingsOut, responses=NOT_FOUND_VALIDATION_422)
+@router.post("/projects/{project_id}/enable", response_model=AgileSettingsOut, responses=FORBIDDEN_NOT_FOUND_VALIDATION_422)
 def enable_agile(
     project_id: int, payload: AgileActivateIn,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
@@ -220,7 +188,7 @@ def enable_agile(
     }
 
 
-@router.post("/projects/{project_id}/disable", response_model=AgileSettingsOut, responses=NOT_FOUND_CONFLICT_409)
+@router.post("/projects/{project_id}/disable", response_model=AgileSettingsOut, responses=FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422)
 def disable_agile(
     project_id: int, db: Session = Depends(get_db), actor: User = Depends(get_current_user),
 ) -> dict:
@@ -264,7 +232,7 @@ def get_board(
     return boards_svc.serialize_board(board)
 
 
-@router.put("/boards/{board_id}", response_model=BoardOut, responses=NOT_FOUND_CONFLICT_409)
+@router.put("/boards/{board_id}", response_model=BoardOut, responses=FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422)
 def update_board(
     board_id: int, payload: BoardUpdateIn,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
@@ -285,7 +253,7 @@ def update_board(
     return boards_svc.serialize_board(board)
 
 
-@router.put("/boards/{board_id}/columns", response_model=BoardOut, responses=NOT_FOUND_CONFLICT_VALIDATION_422)
+@router.put("/boards/{board_id}/columns", response_model=BoardOut, responses=FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422)
 def replace_board_columns(
     board_id: int, payload: BoardColumnsReplaceIn,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
@@ -384,29 +352,6 @@ def replace_board_columns(
 # Backlog
 # =====================================================================
 
-def _backlog_item_out(item: Bug) -> dict:
-    return {
-        "id": item.id,
-        "project_id": item.project_id,
-        "title": item.title,
-        "item_type": item.item_type,
-        "status": item.status,
-        "priority": item.priority,
-        "assignees": item.assignees,
-        "epic_id": item.epic_id,
-        "owner_id": item.owner_id,
-        "story_points": float(item.story_points) if item.story_points is not None else None,
-        "rank": item.rank,
-        "flagged": item.flagged,
-        "ready_for_sprint": item.ready_for_sprint,
-        "blocked": item.blocked,
-        "blocked_reason": item.blocked_reason,
-        "mandatory": item.mandatory,
-        "start_date": item.start_date,
-        "end_date": item.due_date,
-        "version": item.version,
-    }
-
 
 @router.get("/boards/{board_id}/backlog", response_model=list[BacklogItemOut], responses=NOT_FOUND_404)
 def get_backlog(
@@ -417,10 +362,10 @@ def get_backlog(
 ) -> list[dict]:
     board = _get_board_or_404(db, board_id, user)
     items = backlog_svc.list_backlog(db, board.project_id, limit=limit, offset=offset)
-    return [_backlog_item_out(i) for i in items]
+    return [backlog_item_out(i) for i in items]
 
 
-@router.post("/boards/{board_id}/rank", response_model=BacklogItemOut, responses=NOT_FOUND_VALIDATION_422)
+@router.post("/boards/{board_id}/rank", response_model=BacklogItemOut, responses=FORBIDDEN_NOT_FOUND_VALIDATION_422)
 def rank_backlog_item(
     board_id: int, payload: BacklogRankIn,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
@@ -437,35 +382,12 @@ def rank_backlog_item(
            f"Updated backlog rank for #{item.id} on board '{board.name}'")
     db.commit()
     db.refresh(item)
-    return _backlog_item_out(item)
+    return backlog_item_out(item)
 
 
 # =====================================================================
 # Sprints
 # =====================================================================
-
-def _sprint_out(db: Session, sprint: Sprint, item_count: int | None = None) -> dict:
-    return {
-        "id": sprint.id,
-        "display_id": f"SPRINT-{sprint.id}",
-        "board_id": sprint.board_id,
-        "assignees": [{"id": a.id, "name": a.name, "email": a.email, "role": a.role} for a in sprint.assignees],
-        "project_id": sprint.project_id,
-        "name": sprint.name,
-        "goal": sprint.goal,
-        "state": sprint.state,
-        "start_date": sprint.start_date,
-        "end_date": sprint.end_date,
-        "cadence": sprint.cadence,
-        "started_at": sprint.started_at,
-        "completed_at": sprint.completed_at,
-        "cancelled_at": sprint.cancelled_at,
-        "sequence_number": sprint.sequence_number,
-        "version": sprint.version,
-        "created_at": sprint.created_at,
-        "updated_at": sprint.updated_at,
-        "item_count": _sprint_item_count(db, sprint.id) if item_count is None else item_count,
-    }
 
 
 @router.get("/sprints", response_model=list[SprintOut], responses=NOT_FOUND_404)
@@ -476,11 +398,11 @@ def list_sprints_route(
     board = _get_board_or_404(db, board_id, user)
     sprints = sprints_svc.list_sprints(db, board.id, state)
     counts = sprints_svc.sprint_item_counts(db, [s.id for s in sprints])
-    return [_sprint_out(db, s, counts.get(s.id, 0)) for s in sprints]
+    return [sprint_out(db, s, counts.get(s.id, 0)) for s in sprints]
 
 
 @router.post("/sprints", response_model=SprintOut, status_code=status.HTTP_201_CREATED,
-             responses=NOT_FOUND_CONFLICT_409)
+             responses=BAD_REQUEST_FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422)
 def create_sprint_route(
     payload: SprintCreateIn,
     board_id: int = Query(...),
@@ -509,7 +431,7 @@ def create_sprint_route(
     _audit(db, actor, "sprint", sprint.id, "sprint_created", f"Created sprint '{sprint.name}'")
     db.commit()
     db.refresh(sprint)
-    return _sprint_out(db, sprint)
+    return sprint_out(db, sprint)
 
 
 @router.get("/sprints/{sprint_id}", response_model=SprintOut, responses=NOT_FOUND_404)
@@ -517,10 +439,10 @@ def get_sprint(
     sprint_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user),
 ) -> dict:
     sprint = _get_sprint_or_404(db, sprint_id, user)
-    return _sprint_out(db, sprint)
+    return sprint_out(db, sprint)
 
 
-@router.put("/sprints/{sprint_id}", response_model=SprintOut, responses=NOT_FOUND_CONFLICT_409)
+@router.put("/sprints/{sprint_id}", response_model=SprintOut, responses=BAD_REQUEST_FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422)
 def update_sprint_route(
     sprint_id: int, payload: SprintUpdateIn,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
@@ -557,10 +479,10 @@ def update_sprint_route(
     _audit(db, actor, "sprint", sprint.id, "sprint_updated", f"Updated sprint '{sprint.name}'")
     db.commit()
     db.refresh(sprint)
-    return _sprint_out(db, sprint)
+    return sprint_out(db, sprint)
 
 
-@router.post("/sprints/{sprint_id}/items", response_model=list[BacklogItemOut], responses=NOT_FOUND_CONFLICT_409)
+@router.post("/sprints/{sprint_id}/items", response_model=list[BacklogItemOut], responses=FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422)
 def add_sprint_items(
     sprint_id: int, payload: SprintItemsAddIn,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
@@ -578,10 +500,10 @@ def add_sprint_items(
     _audit(db, actor, "sprint", sprint.id, "sprint_item_added",
            f"Added {len(items)} item(s) to sprint '{sprint.name}'")
     db.commit()
-    return [_backlog_item_out(i) for i in items]
+    return [backlog_item_out(i) for i in items]
 
 
-@router.delete("/sprints/{sprint_id}/items/{work_item_id}", responses=NOT_FOUND_404)
+@router.delete("/sprints/{sprint_id}/items/{work_item_id}", responses=FORBIDDEN_NOT_FOUND_VALIDATION_422)
 def remove_sprint_item(
     sprint_id: int, work_item_id: int,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
@@ -600,24 +522,7 @@ def remove_sprint_item(
     return {"message": "Item removed from sprint"}
 
 
-def _idempotent_lifecycle(
-    db: Session, actor: User, sprint: Sprint, operation_key: str,
-    idempotency_key: str | None, payload: dict,
-):
-    """Returns cached (status, body) tuple to short-circuit, or None to proceed.
-    Raises 409 for a conflicting replay."""
-    if not idempotency_key:
-        return None
-    try:
-        cached = idem_svc.get_cached_response(
-            db, actor.id, sprint.project_id, operation_key, idempotency_key, payload,
-        )
-    except idem_svc.IdempotencyConflict as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return cached
-
-
-@router.post("/sprints/{sprint_id}/start", response_model=SprintOut, responses=NOT_FOUND_CONFLICT_409)
+@router.post("/sprints/{sprint_id}/start", response_model=SprintOut, responses=FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422)
 def start_sprint_route(
     sprint_id: int, payload: SprintStartIn,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
@@ -626,7 +531,7 @@ def start_sprint_route(
     sprint = _get_sprint_or_404(db, sprint_id, actor, lock=True)
     require_permission(actor, START_SPRINT)
     raw_payload = payload.model_dump()
-    cached = _idempotent_lifecycle(db, actor, sprint, "start_sprint", idempotency_key, raw_payload)
+    cached = idempotent_lifecycle(db, actor, sprint, "start_sprint", idempotency_key, raw_payload)
     if cached is not None:
         return json.loads(cached[1])
     if sprint.version != payload.version:
@@ -649,7 +554,7 @@ def start_sprint_route(
         db.rollback()
         raise HTTPException(status_code=409, detail=_DETAIL_SPRINT_NAME_TAKEN) from exc
     _audit(db, actor, "sprint", sprint.id, "sprint_started", f"Started sprint '{sprint.name}'")
-    result = _sprint_out(db, sprint)
+    result = sprint_out(db, sprint)
     if idempotency_key:
         idem_svc.store_result(
             db, actor.id, sprint.project_id, "start_sprint", idempotency_key, raw_payload,
@@ -659,7 +564,7 @@ def start_sprint_route(
     return result
 
 
-@router.post("/sprints/{sprint_id}/complete", response_model=SprintOut, responses=NOT_FOUND_CONFLICT_409)
+@router.post("/sprints/{sprint_id}/complete", response_model=SprintOut, responses=FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422)
 def complete_sprint_route(
     sprint_id: int, payload: SprintCompleteIn,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
@@ -668,7 +573,7 @@ def complete_sprint_route(
     sprint = _get_sprint_or_404(db, sprint_id, actor, lock=True)
     require_permission(actor, COMPLETE_SPRINT)
     raw_payload = payload.model_dump()
-    cached = _idempotent_lifecycle(db, actor, sprint, "complete_sprint", idempotency_key, raw_payload)
+    cached = idempotent_lifecycle(db, actor, sprint, "complete_sprint", idempotency_key, raw_payload)
     if cached is not None:
         return json.loads(cached[1])
     if sprint.version != payload.version:
@@ -692,7 +597,7 @@ def complete_sprint_route(
         raise HTTPException(status_code=409, detail=_DETAIL_SPRINT_NAME_TAKEN) from exc
     _audit(db, actor, "sprint", sprint.id, "sprint_completed",
            f"Completed sprint '{sprint.name}': {payload.closing_note}")
-    result = _sprint_out(db, sprint)
+    result = sprint_out(db, sprint)
     if idempotency_key:
         idem_svc.store_result(
             db, actor.id, sprint.project_id, "complete_sprint", idempotency_key, raw_payload,
@@ -702,7 +607,7 @@ def complete_sprint_route(
     return result
 
 
-@router.post("/sprints/{sprint_id}/cancel", response_model=SprintOut, responses=NOT_FOUND_CONFLICT_409)
+@router.post("/sprints/{sprint_id}/cancel", response_model=SprintOut, responses=FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422)
 def cancel_sprint_route(
     sprint_id: int, payload: SprintCancelIn,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
@@ -711,7 +616,7 @@ def cancel_sprint_route(
     sprint = _get_sprint_or_404(db, sprint_id, actor, lock=True)
     require_permission(actor, CANCEL_SPRINT)
     raw_payload = payload.model_dump()
-    cached = _idempotent_lifecycle(db, actor, sprint, "cancel_sprint", idempotency_key, raw_payload)
+    cached = idempotent_lifecycle(db, actor, sprint, "cancel_sprint", idempotency_key, raw_payload)
     if cached is not None:
         return json.loads(cached[1])
     if sprint.version != payload.version:
@@ -731,7 +636,7 @@ def cancel_sprint_route(
     db.flush()
     _audit(db, actor, "sprint", sprint.id, "sprint_cancelled",
            f"Cancelled sprint '{sprint.name}': {payload.cancellation_note}")
-    result = _sprint_out(db, sprint)
+    result = sprint_out(db, sprint)
     if idempotency_key:
         idem_svc.store_result(
             db, actor.id, sprint.project_id, "cancel_sprint", idempotency_key, raw_payload,
@@ -753,7 +658,7 @@ def get_sprint_history(
 # Work-item hierarchy + Agile-type creation
 # =====================================================================
 
-@router.post("/work-items", response_model=BacklogItemOut, status_code=status.HTTP_201_CREATED, responses=NOT_FOUND_VALIDATION_422)
+@router.post("/work-items", response_model=BacklogItemOut, status_code=status.HTTP_201_CREATED, responses=BAD_REQUEST_FORBIDDEN_NOT_FOUND_422)
 def create_agile_work_item(
     payload: AgileWorkItemCreateIn,
     background: BackgroundTasks,
@@ -851,10 +756,10 @@ def create_agile_work_item(
         deliver_event, actor.org_id, "bug.created",
         {"bug": _bug_to_out_dict(item), "actor": _user_brief(actor)},
     )
-    return _backlog_item_out(item)
+    return backlog_item_out(item)
 
 
-@router.put("/work-items/{item_id}/hierarchy", response_model=BacklogItemOut, responses=NOT_FOUND_CONFLICT_VALIDATION_422)
+@router.put("/work-items/{item_id}/hierarchy", response_model=BacklogItemOut, responses=FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422)
 def update_hierarchy(
     item_id: int, payload: WorkItemHierarchyIn,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
@@ -876,10 +781,10 @@ def update_hierarchy(
            f"Updated hierarchy for #{item.id}: parent={payload.parent_id}, epic={payload.epic_id}")
     db.commit()
     db.refresh(item)
-    return _backlog_item_out(item)
+    return backlog_item_out(item)
 
 
-@router.put("/work-items/{item_id}/ready-for-sprint", response_model=BacklogItemOut, responses=NOT_FOUND_CONFLICT_VALIDATION_422)
+@router.put("/work-items/{item_id}/ready-for-sprint", response_model=BacklogItemOut, responses=FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422)
 def set_ready_for_sprint(
     item_id: int, payload: ReadyForSprintIn,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
@@ -898,7 +803,7 @@ def set_ready_for_sprint(
     if item.version != payload.version:
         raise HTTPException(status_code=409, detail=_DETAIL_ITEM_MODIFIED)
     if payload.ready_for_sprint:
-        if not _validate_story_ready_requirements(db, item):
+        if not validate_story_ready_requirements(db, item):
             raise HTTPException(status_code=422, detail=_READY_REQUIRED_FIELDS_ERROR)
     item.ready_for_sprint = payload.ready_for_sprint
     item.version += 1
@@ -907,10 +812,10 @@ def set_ready_for_sprint(
            f"Set ready_for_sprint={payload.ready_for_sprint} on #{item.id}")
     db.commit()
     db.refresh(item)
-    return _backlog_item_out(item)
+    return backlog_item_out(item)
 
 
-@router.put("/work-items/{item_id}/dates", response_model=BacklogItemOut, responses=NOT_FOUND_CONFLICT_409)
+@router.put("/work-items/{item_id}/dates", response_model=BacklogItemOut, responses=FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422)
 def update_work_item_dates(
     item_id: int, payload: WorkItemDatesIn,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
@@ -932,10 +837,10 @@ def update_work_item_dates(
            f"Updated dates for #{item.id}: start={payload.start_date}, end={payload.end_date}")
     db.commit()
     db.refresh(item)
-    return _backlog_item_out(item)
+    return backlog_item_out(item)
 
 
-@router.put("/work-items/{item_id}/task-flags", response_model=BacklogItemOut, responses=NOT_FOUND_CONFLICT_VALIDATION_422)
+@router.put("/work-items/{item_id}/task-flags", response_model=BacklogItemOut, responses=FORBIDDEN_NOT_FOUND_CONFLICT_VALIDATION_422)
 def update_task_flags(
     item_id: int, payload: WorkItemTaskFlagsIn,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
@@ -955,7 +860,7 @@ def update_task_flags(
         raise HTTPException(status_code=422, detail="blocked_reason is required when blocking an item")
     
     was_mandatory = item.mandatory
-    blocked_status_changed = _apply_task_flag_updates(item, payload)
+    blocked_status_changed = apply_task_flag_updates(item, payload)
     item.version += 1
     db.flush()
     if blocked_status_changed:
@@ -967,7 +872,7 @@ def update_task_flags(
                f"Set mandatory={item.mandatory} on #{item.id}")
     db.commit()
     db.refresh(item)
-    return _backlog_item_out(item)
+    return backlog_item_out(item)
 
 
 @router.get("/work-items/{item_id}/acceptance-criteria", response_model=list[AcceptanceCriterionOut], responses=NOT_FOUND_404)
@@ -985,7 +890,7 @@ def list_acceptance_criteria(
 @router.post(
     "/work-items/{item_id}/acceptance-criteria",
     response_model=AcceptanceCriterionOut, status_code=status.HTTP_201_CREATED,
-    responses=NOT_FOUND_404,
+    responses=FORBIDDEN_NOT_FOUND_VALIDATION_422,
 )
 def add_acceptance_criterion(
     item_id: int, payload: AcceptanceCriterionIn,
@@ -1008,7 +913,7 @@ def add_acceptance_criterion(
     return row
 
 
-@router.put("/acceptance-criteria/{criterion_id}", response_model=AcceptanceCriterionOut, responses=NOT_FOUND_404)
+@router.put("/acceptance-criteria/{criterion_id}", response_model=AcceptanceCriterionOut, responses=FORBIDDEN_NOT_FOUND_VALIDATION_422)
 def update_acceptance_criterion(
     criterion_id: int, payload: AcceptanceCriterionUpdateIn,
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
@@ -1034,7 +939,7 @@ def update_acceptance_criterion(
     return row
 
 
-@router.delete("/acceptance-criteria/{criterion_id}", responses=NOT_FOUND_404)
+@router.delete("/acceptance-criteria/{criterion_id}", responses=FORBIDDEN_NOT_FOUND_VALIDATION_422)
 def delete_acceptance_criterion(
     criterion_id: int, db: Session = Depends(get_db), actor: User = Depends(get_current_user),
 ) -> dict:

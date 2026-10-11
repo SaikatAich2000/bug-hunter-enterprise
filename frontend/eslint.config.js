@@ -4,7 +4,7 @@ import reactHooks from "eslint-plugin-react-hooks";
 import jsxA11y from "eslint-plugin-jsx-a11y";
 import globals from "globals";
 
-// Flat config (ESLint v9+). Plain JS/JSX only — no TypeScript parser/plugin,
+// Flat config (ESLint 10). Plain JS/JSX only — no TypeScript parser/plugin,
 // per Slice J (Section 23.1 of the Agile plan): zero .ts/.tsx in this repo.
 export default [
   js.configs.recommended,
@@ -21,13 +21,14 @@ export default [
       parserOptions: { ecmaFeatures: { jsx: true } },
       globals: { ...globals.browser, ...globals.es2021 },
     },
-    settings: { react: { version: "detect" } },
+    // Explicit version: eslint-plugin-react "detect" calls context.getFilename(), removed in ESLint 10.
+    settings: { react: { version: "19.0" } },
     rules: {
       ...react.configs.recommended.rules,
       ...reactHooks.configs.recommended.rules,
       ...jsxA11y.configs.recommended.rules,
       "react/prop-types": "off", // no PropTypes/TS in this codebase; runtime-checked via tests instead
-      "react/react-in-jsx-scope": "off", // React 18 automatic JSX runtime
+      "react/react-in-jsx-scope": "off", // automatic JSX runtime
       "no-unused-vars": ["warn", { argsIgnorePattern: "^_", varsIgnorePattern: "^_" }],
       // "Fetch on mount/dependency change" via useEffect(() => { void refresh(); }, [refresh])
       // is this codebase's established, repo-wide data-fetching idiom (pre-dates this

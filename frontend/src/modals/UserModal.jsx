@@ -2,6 +2,7 @@
  * User create/edit modal (user == null → create). Password required on create,
  * optional on edit (blank keeps the existing hash).
  */
+import HelpHint from "../onboarding/HelpHint";
 import { useEffect, useRef, useState } from "react";
 import ChipPicker from "../components/ChipPicker";
 import { confirmDialog } from "../components/ConfirmHost";
@@ -225,6 +226,7 @@ export default function UserModal() {
         )}
         <div className="field" id="userProjectsField">
           <span>Projects</span>
+          <HelpHint label="Projects" guide="roles">People only see items in the projects tagged here. Admins always see every project.</HelpHint>
           <ChipPicker
             id="userProjects"
             items={projects.map((p) => ({ id: p.id, label: p.name }))}

@@ -14,7 +14,8 @@ from sqlalchemy.orm import Session
 from app import fcm_transport
 from app.config import get_settings
 from app.database import SessionLocal
-from app.models import NotificationPreference, PushSubscription, _utcnow
+from app.models import NotificationPreference, PushSubscription
+from app.util import utcnow
 
 # Push channels a user can switch off (NotificationPreference columns of the same name).
 CHANNEL_MENTIONS = "mentions"
@@ -90,7 +91,7 @@ def register(
     ``PushTokenConflict`` (a replayed token must not redirect someone else's pushes), unless
     ``rebind``: the signed-in person presenting it is holding the device (an account switch), so
     in the same statement it moves to them and the previous account stops receiving pushes."""
-    now = _utcnow()
+    now = utcnow()
     fields = {"platform": platform or "web", "user_agent": (user_agent or "")[:400], "last_seen_at": now}
     if db.get_bind().dialect.name == "postgresql":
         from sqlalchemy.dialects.postgresql import insert

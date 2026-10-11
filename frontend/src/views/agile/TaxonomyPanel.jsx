@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import Skeleton from "../../components/Skeleton";
 import { api } from "../../lib/api";
 import { toast, toastError } from "../../lib/toast";
 import { confirmDialog } from "../../components/ConfirmHost";
@@ -86,7 +87,7 @@ function ReleasesTab({ projectId, canManage }) {
     }
   };
 
-  if (loading) return <div className="sprints-loading">Loading…</div>;
+  if (loading) return <Skeleton lines={4} className="sprints-loading" />;
   return (
     <div>
       {canManage && <CreateRow fields={[{ key: "name", placeholder: "e.g. v2.1", grow: true }]} onCreate={create} />}
@@ -156,7 +157,7 @@ function ComponentsTab({ projectId, canManage }) {
     }
   };
 
-  if (loading) return <div className="sprints-loading">Loading…</div>;
+  if (loading) return <Skeleton lines={4} className="sprints-loading" />;
   return (
     <div>
       {canManage && <CreateRow fields={[{ key: "name", placeholder: "e.g. Backend", grow: true }]} onCreate={create} />}
@@ -222,7 +223,7 @@ function LabelsTab({ projectId, canManage }) {
     }
   };
 
-  if (loading) return <div className="sprints-loading">Loading…</div>;
+  if (loading) return <Skeleton lines={4} className="sprints-loading" />;
   return (
     <div>
       {canManage && <CreateRow fields={[{ key: "display_name", placeholder: "e.g. security", grow: true }]} onCreate={create} />}
@@ -258,7 +259,7 @@ export default function TaxonomyPanel({ projectId, canManage }) {
     return () => { cancelled = true; };
   }, [projectId]);
 
-  if (agileEnabled === null) return <div className="sprints-loading">Loading…</div>;
+  if (agileEnabled === null) return <Skeleton lines={4} className="sprints-loading" />;
   if (!agileEnabled) {
     return (
       <div className="empty-state">

@@ -4,21 +4,16 @@ taxonomy; adds no new schema.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agile.taxonomy import is_done_status
 from app.models import Bug, BugLink, User, Version, WorkItemVersion
+from app.util import utcnow
 
 
 class ReleaseError(ValueError):
     pass
-
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc).replace(microsecond=0)
 
 
 def _version_items(db: Session, version_id: int) -> list[Bug]:
@@ -134,7 +129,7 @@ def mark_released(db: Session, version: Version, _actor: User) -> Version:
             "Release is not ready: " + "; ".join(c["message"] for c in hard_errors)
         )
     version.status = "released"
-    version.released_at = _utcnow()
+    version.released_at = utcnow()
     version.version += 1
     db.flush()
     return version

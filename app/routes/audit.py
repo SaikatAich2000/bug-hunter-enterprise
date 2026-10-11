@@ -16,20 +16,11 @@ from app.auth import require_manager_or_admin
 from app.database import get_db
 from app.models import ROLE_ADMIN, Activity, Board, Bug, Event, Project, Sprint, User
 from app.schemas import ActivityOut
+from app.util import MAX_PK_INT, like_escape
 
 router = APIRouter(prefix="/api/audit", tags=["audit"])
 
 # int4 max; longer digit strings would overflow entity_id/bug_id on Postgres (500).
-_MAX_PK_INT = 2**31 - 1
-
-
-def _like_escape(needle: str) -> str:
-    """Escape LIKE wildcards so literal '%' and '_' in user input match plainly."""
-    return (
-        needle.replace("\\", "\\\\")
-              .replace("%", "\\%")
-              .replace("_", "\\_")
-    )
 
 
 def _scope_to_org_and_projects(stmt, user, accessible):
@@ -80,7 +71,7 @@ def _filtered_audit(db: Session, user: User, entity_type: Optional[str],
     if q:
         stmt = stmt.outerjoin(Bug, Bug.id == Activity.bug_id)
         raw = q.strip()
-        like = f"%{_like_escape(raw.lower())}%"
+        like = f"%{like_escape(raw.lower())}%"
         clauses = [
             Activity.action.ilike(like, escape="\\"),
             Activity.detail.ilike(like, escape="\\"),
@@ -95,11 +86,11 @@ def _filtered_audit(db: Session, user: User, entity_type: Optional[str],
         if digits_match:
             digits = digits_match.group(0)
             # Skip exact-int compare above int4 max.
-            if int(digits) <= _MAX_PK_INT:
+            if int(digits) <= MAX_PK_INT:
                 entity_id_val = int(digits)
                 clauses.append(Activity.entity_id == entity_id_val)
                 clauses.append(Activity.bug_id == entity_id_val)
-            digit_like = f"%{_like_escape(digits)}%"
+            digit_like = f"%{like_escape(digits)}%"
             clauses.append(cast(Activity.entity_id, String).ilike(digit_like, escape="\\"))
         stmt = stmt.where(or_(*clauses))
     return stmt.order_by(Activity.created_at.desc(), Activity.id.desc())

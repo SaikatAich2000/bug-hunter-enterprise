@@ -7,16 +7,10 @@ const root = fileURLToPath(new URL(".", import.meta.url));
 
 export default defineConfig({
   plugins: [react()],
-  // One worker on Windows: multiple workers surface a Vite module-runner
-  // incompatibility with the workspace root. Single-worker runs are fast here
-  // (all suites execute in well under a second of test time).
   server: { fs: { strict: false, allow: [fileURLToPath(new URL(".", import.meta.url))] } },
   test: {
     environment: "jsdom",
     pool: "forks",
-    poolOptions: {
-      forks: { singleFork: true, isolate: false },
-    },
     include: ["src/**/*.test.jsx"],
     setupFiles: ["./vitest.setup.js"],
     exclude: ["node_modules/**"],

@@ -1,5 +1,6 @@
 /** Reports: burndown, burnup, sprint report, velocity,
  * cumulative flow, control chart, epic report, daily summary, workload. */
+import Skeleton from "../../components/Skeleton";
 import { useEffect, useMemo, useState } from "react";
 import { useApp } from "../../state/AppContext";
 import BhSelect from "../../components/BhSelect";
@@ -276,7 +277,7 @@ export default function ReportsPanel({ projectId, board }) {
   if (meta.scope === "sprint" && !reportable.length) body = <p className="muted ag-empty">Start a sprint to see this report.</p>;
   else if (meta.scope === "epic" && !(epics.data || []).length) body = <p className="muted ag-empty">Create an epic to see this report.</p>;
   else if (meta.scope === "range" && !rangeValid) body = <p className="ag-error">Pick a start date on or before the end date.</p>;
-  else if (!data) body = result.loading ? <div className="sprints-loading">Loading…</div> : null;
+  else if (!data) body = result.loading ? <Skeleton lines={4} className="sprints-loading" /> : null;
   else if (reportKey === "burndown" || reportKey === "burnup") {
     body = (
       <>
