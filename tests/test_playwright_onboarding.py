@@ -135,7 +135,7 @@ def test_welcome_then_resumable_tour(browser, stack):
         tour = pg.get_by_role("dialog", name="Work items")
         expect(tour).to_be_visible()
         pg.get_by_role("button", name="Next").click()
-        expect(pg.get_by_role("dialog", name="Sprints")).to_be_visible()
+        expect(pg.get_by_role("dialog", name="Organization")).to_be_visible()
         pg.keyboard.press("Escape")  # pauses the tour
         expect(pg.locator(".tour-card")).to_have_count(0)
 
