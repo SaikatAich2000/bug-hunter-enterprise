@@ -1,6 +1,7 @@
 // Organization name and description (admins).
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
+import DeleteOrganization from "./DeleteOrganization";
 import { withLoader } from "../lib/loader";
 import { toast, toastError } from "../lib/toast";
 import { useApp } from "../state/AppContext";
@@ -36,6 +37,7 @@ export default function GeneralTab() {
   }
 
   return (
+    <>
     <form className="ent-section" noValidate onSubmit={save} aria-busy={!loaded}>
       <h3>Organization</h3>
       <fieldset className="ent-fieldset" disabled={!loaded}>
@@ -56,5 +58,7 @@ export default function GeneralTab() {
       </div>
       </fieldset>
     </form>
+    <DeleteOrganization orgName={currentUser.organization_name} />
+    </>
   );
 }

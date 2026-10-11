@@ -313,3 +313,13 @@
 
 /* The account dialog keeps one height across its tabs instead of jumping as the content changes. */
 #modalAccount .modal-body { min-height: min(400px, 60vh); }
+
+/* Danger zone: delete organization */
+.ent-danger { border: 1px solid var(--danger); border-radius: 10px; padding: 14px 16px; margin-top: 16px; }
+.ent-danger h3 { color: var(--danger-ink); }
+.ent-danger-heading { margin: 0 0 8px; font-size: 14px; }
+.ent-danger-heading:focus { outline: none; box-shadow: var(--shadow-focus); border-radius: 4px; }
+.ent-counts { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin: 0 0 12px; }
+.ent-counts div { border: 1px solid var(--border-strong); border-radius: 8px; padding: 6px 10px; background: var(--bg-elev-2); }
+.ent-counts dt { font-size: 12px; color: var(--text-muted); }
+.ent-counts dd { margin: 0; font-size: 18px; font-weight: 700; color: var(--text); }
