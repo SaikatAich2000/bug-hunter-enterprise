@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import new_client, sign_up
+from tests.conftest import new_client
 from tests.test_cross_tenant import _OWN_SCOPE, PASSWORD, World, _operations
 
 ROLES = ["anonymous", "user", "lead", "manager", "admin", "attacker"]
