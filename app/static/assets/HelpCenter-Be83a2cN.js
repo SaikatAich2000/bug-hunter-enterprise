@@ -1,4 +1,4 @@
-import{n as e}from"./rolldown-runtime-CbXtAM7H.js";import{v as t,x as n}from"./vendor-CFDLG235.js";import{i as r}from"./rich-editor-sbPULaiK.js";import{S as i,b as a,x as o}from"./index-DQXYs5Z-.js";var s=e(n(),1),c={"&":`&amp;`,"<":`&lt;`,">":`&gt;`,'"':`&quot;`,"'":`&#39;`},l=e=>e.replace(/[&<>"']/g,e=>c[e]);function u(e){return e.toLowerCase().replace(/[^a-z0-9]+/g,`-`).replace(/^-+|-+$/g,``)}function d(e){let t=e.trim();return/^(https?:\/\/|mailto:|#)/i.test(t)?t:``}function f(e){let t=[],n=e.replace(/`([^`]+)`/g,(e,n)=>(t.push(n),`\uE000${t.length-1}\uE000`));return n=n.replace(/\*\*([^*]+)\*\*/g,`<strong>$1</strong>`).replace(/(^|[^*])\*([^*\s][^*]*)\*/g,`$1<em>$2</em>`).replace(/\[([^\]]+)\]\(([^)\s]+)\)/g,(e,t,n)=>{let r=d(n.replace(/&amp;/g,`&`));if(!r)return t;let i=/^https?:/i.test(r);return`<a href="${l(r)}"${i?` target="_blank" rel="noopener noreferrer"`:``}>${t}</a>`}),n.replace(/\uE000(\d+)\uE000/g,(e,n)=>`<code>${t[Number(n)]}</code>`)}var p=e=>String(e??``).replace(/\uE000/g,``).replace(/\r\n?/g,`
+import{n as e}from"./rolldown-runtime-CbXtAM7H.js";import{v as t,x as n}from"./vendor-CFDLG235.js";import{i as r}from"./rich-editor-sbPULaiK.js";import{C as i,S as a,x as o}from"./index-DzWO6-RU.js";var s=e(n(),1),c={"&":`&amp;`,"<":`&lt;`,">":`&gt;`,'"':`&quot;`,"'":`&#39;`},l=e=>e.replace(/[&<>"']/g,e=>c[e]);function u(e){return e.toLowerCase().replace(/[^a-z0-9]+/g,`-`).replace(/^-+|-+$/g,``)}function d(e){let t=e.trim();return/^(https?:\/\/|mailto:|#)/i.test(t)?t:``}function f(e){let t=[],n=e.replace(/`([^`]+)`/g,(e,n)=>(t.push(n),`\uE000${t.length-1}\uE000`));return n=n.replace(/\*\*([^*]+)\*\*/g,`<strong>$1</strong>`).replace(/(^|[^*])\*([^*\s][^*]*)\*/g,`$1<em>$2</em>`).replace(/\[([^\]]+)\]\(([^)\s]+)\)/g,(e,t,n)=>{let r=d(n.replace(/&amp;/g,`&`));if(!r)return t;let i=/^https?:/i.test(r);return`<a href="${l(r)}"${i?` target="_blank" rel="noopener noreferrer"`:``}>${t}</a>`}),n.replace(/\uE000(\d+)\uE000/g,(e,n)=>`<code>${t[Number(n)]}</code>`)}var p=e=>String(e??``).replace(/\uE000/g,``).replace(/\r\n?/g,`
 `);function m(e){return e.trim().replace(/^\|/,``).replace(/\|$/,``).split(`|`).map(e=>e.trim())}var h=e=>/^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(e)&&e.includes(`-`),g=e=>/^(#{1,4}\s|>\s?|\s*[-*]\s|\s*\d+\.\s|```|---+\s*$)/.test(e);function _(e){let t=p(e).split(`
 `),n=[],r=0;for(;r<t.length;){let e=t[r];if(!e.trim()){r++;continue}if(e.startsWith("```")){let e=[];for(r++;r<t.length&&!t[r].startsWith("```");)e.push(t[r++]);r++,n.push(`<pre><code>${l(e.join(`
 `))}</code></pre>`);continue}let i=/^(#{1,4})\s+(.*)$/.exec(e);if(i){let e=i[1].length;n.push(`<h${e} id="g-${u(i[2])}">${f(l(i[2]))}</h${e}>`),r++;continue}if(/^---+\s*$/.test(e)){n.push(`<hr>`),r++;continue}if(e.startsWith(`>`)){let e=[];for(;r<t.length&&t[r].startsWith(`>`);)e.push(t[r++].replace(/^>\s?/,``));n.push(`<blockquote>${f(l(e.join(` `)))}</blockquote>`);continue}if(e.includes(`|`)&&r+1<t.length&&h(t[r+1])){let i=m(e);r+=2;let a=[];for(;r<t.length&&t[r].includes(`|`)&&t[r].trim();)a.push(m(t[r++]));let o=(e,t)=>`<${e}>${f(l(t))}</${e}>`;n.push(`<table><thead><tr>${i.map(e=>o(`th`,e)).join(``)}</tr></thead><tbody>`+a.map(e=>`<tr>${e.map(e=>o(`td`,e)).join(``)}</tr>`).join(``)+`</tbody></table>`);continue}let a=/^\s*([-*]|\d+\.)\s+/.exec(e);if(a){let e=/\d/.test(a[1]),i=[];for(;r<t.length&&/^\s*([-*]|\d+\.)\s+/.test(t[r]);){let e=t[r++].replace(/^\s*([-*]|\d+\.)\s+/,``);for(;r<t.length&&t[r].trim()&&/^\s{2,}\S/.test(t[r])&&!/^\s*([-*]|\d+\.)\s+/.test(t[r]);)e+=` ${t[r++].trim()}`;i.push(`<li>${f(l(e))}</li>`)}n.push(`<${e?`ol`:`ul`}>${i.join(``)}</${e?`ol`:`ul`}>`);continue}let o=[e.trim()];for(r++;r<t.length&&t[r].trim()&&!g(t[r]);)o.push(t[r++].trim());n.push(`<p>${f(l(o.join(` `)))}</p>`)}return v(n.join(`
@@ -197,31 +197,133 @@ These are switched on in the server's environment settings, not in the app:\r
 ## 6. Bring existing work in\r
 \r
 Use **Download Template** and **Bulk Upload** on the Work Items page to import items from Excel or CSV. See [Creating and tracking items](#help/items).\r
-`,"./guides/07-roles.md":`# Roles and permissions\r
-\r
-There are three roles. Your role is shown in the account menu at the top right. The server checks it on every action, so a hidden button is never the only protection.\r
-\r
-| Capability | User | Manager | Admin |\r
-|---|---|---|---|\r
-| See projects they belong to | Yes | Yes | All projects |\r
-| Create and edit Bugs, Stories and Sub-tasks | Yes | Yes | Yes |\r
-| Edit Tasks and Requirements | No | Yes | Yes |\r
-| Edit any item or event | No | Yes | Yes |\r
-| Move cards on a sprint board, view agile reports | Yes | Yes | Yes |\r
-| Enable Agile, manage sprints, boards, releases, labels | No | Yes | Yes |\r
-| Create projects and users | No | Yes | Yes |\r
-| Use Reports and Audit Trail | No | Yes | Yes |\r
-| Delete items, edit or delete comments, delete attachments | No | No | Yes |\r
-| Grant the admin role, edit admins | No | No | Yes |\r
-| View and revoke Sessions | No | No | Yes |\r
-\r
-## Project access\r
-\r
-Non-admins only see items in projects they are a member of. If something you expect is missing, ask a manager to add you to the project.\r
-\r
-## Why a button might be missing\r
-\r
-Sections such as Reports, Audit Trail and Sessions only appear for roles that may use them. If you need access, ask an admin to change your role.\r
-\r
-See also [Admin setup](#help/admin).\r
-`});function x(e){for(let t of e.split(/\n\s*\n/)){let e=t.trim();if(e&&!e.startsWith(`#`))return e.replace(/\s+/g,` `)}return``}var S=Object.entries(b).sort(([e],[t])=>e.localeCompare(t)).map(([e,t])=>{let n=e.replace(/^.*\/\d*-?/,``).replace(/\.md$/,``);return{id:n,title:/^#\s+(.+)$/m.exec(t)?.[1]??n,summary:x(t),markdown:t}});function C(e){return S.find(t=>t.id===e)??null}function w(e){let t=String(e??``).toLowerCase().split(/\s+/).filter(Boolean);return t.length?S.filter(e=>{let n=`${e.title}\n${e.markdown}`.toLowerCase();return t.every(e=>n.includes(e))}):S}var T=t();function E(){let[e,t]=(0,s.useState)(``),[n,r]=(0,s.useState)(()=>i()??S[0]?.id),c=(0,s.useRef)(null),l=(0,s.useRef)(!1);(0,s.useEffect)(()=>o(()=>{let e=i();e&&C(e)&&(l.current=!0,r(e),t(``))}),[]);let u=(0,s.useMemo)(()=>w(e),[e]),d=C(n)??u[0]??S[0],f=(0,s.useMemo)(()=>d?_(d.markdown):``,[d]),p=(0,s.useMemo)(()=>d?y(d.markdown):[],[d]);(0,s.useEffect)(()=>{l.current&&(l.current=!1,c.current?.focus({preventScroll:!0}))},[d?.id]);let m=e=>{l.current=!0,r(e)};return(0,T.jsxs)(`section`,{className:`help-center`,id:`viewHelp`,"aria-label":`Help center`,children:[(0,T.jsxs)(`aside`,{className:`help-side`,children:[(0,T.jsxs)(`div`,{className:`field help-search`,children:[(0,T.jsx)(`label`,{htmlFor:`helpSearch`,className:`sr-only`,children:`Search the guides`}),(0,T.jsx)(`input`,{id:`helpSearch`,type:`search`,placeholder:`Search the guides…`,autoComplete:`off`,value:e,onChange:e=>t(e.target.value)})]}),(0,T.jsxs)(`nav`,{"aria-label":`Guides`,children:[(0,T.jsx)(`ul`,{className:`help-list`,children:u.map(e=>(0,T.jsx)(`li`,{children:(0,T.jsx)(`button`,{type:`button`,className:`help-list-item${e.id===d?.id?` active`:``}`,"aria-current":e.id===d?.id?`page`:void 0,onClick:()=>m(e.id),children:e.title})},e.id))}),u.length===0&&(0,T.jsxs)(`p`,{className:`help-none muted`,role:`status`,children:[`No guide matches “`,e,`”.`]})]}),(0,T.jsx)(`div`,{className:`help-side-actions`,children:(0,T.jsx)(`button`,{type:`button`,className:`btn ghost`,onClick:()=>a(`tour`),children:`Take the product tour`})})]}),(0,T.jsxs)(`article`,{className:`help-article`,ref:c,tabIndex:-1,"aria-label":d?.title,children:[p.length>1&&(0,T.jsx)(`nav`,{className:`help-toc`,"aria-label":`On this page`,children:p.filter(e=>e.level===2).map(e=>(0,T.jsx)(`button`,{type:`button`,className:`help-toc-link`,onClick:()=>document.getElementById(e.id)?.scrollIntoView?.({block:`start`}),children:e.text},e.id))}),(0,T.jsx)(`div`,{className:`help-md`,onClick:e=>{let t=e.target.closest?.(`a[href]`);if(!t)return;let n=t.getAttribute(`href`)||``;if(n.startsWith(`#help/`)){e.preventDefault();let t=n.slice(6);C(t)&&m(t)}else n.startsWith(`#`)&&(e.preventDefault(),document.getElementById(n.slice(1))?.scrollIntoView?.({block:`start`}))},role:`presentation`,dangerouslySetInnerHTML:{__html:f}})]},d?.id)]})}export{E as default};
+`,"./guides/07-roles.md":`# Roles and permissions
+
+There are three roles. Your role is shown in the account menu at the top right. The server checks it on every action, so a hidden button is never the only protection.
+
+| Capability | User | Manager | Admin |
+|---|---|---|---|
+| See projects they belong to | Yes | Yes | All projects |
+| Create and edit Bugs, Stories and Sub-tasks | Yes | Yes | Yes |
+| Edit Tasks and Requirements | No | Yes | Yes |
+| Edit any item or event | No | Yes | Yes |
+| Move cards on a sprint board, view agile reports | Yes | Yes | Yes |
+| Enable Agile, manage sprints, boards, releases, labels | No | Yes | Yes |
+| Create projects and users | No | Yes | Yes |
+| Use Reports and Audit Trail | No | Yes | Yes |
+| Delete items, edit or delete comments, delete attachments | No | No | Yes |
+| Grant the admin role, edit admins | No | No | Yes |
+| View and revoke Sessions | No | No | Yes |
+
+## Project leads
+
+A project lead is a member who also manages that project: they add and remove its members, change member roles and define its custom fields. Leads are per project, not a role of their own. A project always keeps at least one lead. See [Organizations](#help/organizations).
+
+## Project access
+
+Non-admins only see items in projects they are a member of. If something you expect is missing, ask a manager to add you to the project.
+
+## Why a button might be missing
+
+Sections such as Reports, Audit Trail and Sessions only appear for roles that may use them. If you need access, ask an admin to change your role.
+
+See also [Admin setup](#help/admin).
+`,"./guides/08-organizations.md":`# Organizations
+
+Everything in your workspace belongs to one organization: its people, projects, items, webhooks and settings. Nothing is shared with other organizations. Open **Organization** in the top bar. Admins see four tabs (General, Branding, Invitations, Webhooks); managers see only Invitations.
+
+## General
+
+Admins only. Change the organization's **name** (at least two characters) and its **description**, then click **Save**. The name appears in the top bar and in the account menu, and every change is recorded in the audit trail. At the bottom of the tab, **Delete organization** removes the whole organization. See [Security and privacy](#help/security).
+
+## Branding
+
+Admins only. Branding is shown to everyone in the organization.
+
+- **Logo**: a PNG, JPEG, SVG, GIF or WebP image of 100 KB or less.
+- **Accent colour**: a hex value such as \`#6366f1\`, or pick it with the colour box. Leave it empty for the default.
+- **Email From address**: the sender of notification emails, for example \`Acme Bugs <bugs@acme.com>\`. Your mail server must be allowed to send as that address.
+
+Leave a field empty to go back to the default. The first-time **Organization setup** (account menu) asks for the same details.
+
+## Invitations
+
+Admins and managers invite people by email. An invitation is a link that works for 7 days and can be used once.
+
+1. Enter the **email**, choose a **role** (only admins can invite another admin) and, optionally, the **projects** the person joins. Managers can only pick projects they lead. Tick **Join as project lead** to make them a lead of those projects.
+2. Click **Send invitation**. The list shows each invitation as pending, accepted, expired or revoked.
+3. **Revoke** a pending invitation and its link stops working.
+
+To protect the organization, invitations are limited: a burst limit per minute and a daily ceiling. When you reach one you see a message and can try again later. Someone who is already a member cannot be invited again.
+
+## Members and project leads
+
+Each project has members, and each member is either a **lead** or a **member**. Open a project from the sidebar (click its name) to see **Members**. Admins and the project's leads can add people, change a role and remove people. Everyone else sees the list read-only.
+
+**A project always keeps at least one lead.** If you try to demote or remove the last lead, the server refuses with "Cannot demote the last project lead. Promote another member first." Promote someone else to lead, then change the first person.
+
+People only see the projects they belong to; admins see all of them. See [Roles and permissions](#help/roles).
+
+## Webhooks
+
+Admins only. A webhook sends a signed \`POST\` to your URL when something happens.
+
+- **Create**: a name, a URL and the events. Use \`*\` for everything, or names such as \`bug.created\`, \`bug.*\` or \`comment.added\`.
+- **Secret**: shown once when the webhook is created or rotated. Copy it then. Check each delivery with the \`X-BugHunter-Signature\` header (HMAC-SHA256 of the body).
+- **Addresses**: the URL must be reachable on the public internet. Private, loopback, link-local and cloud-metadata addresses are refused, and redirects are not followed.
+- **Test** queues a ping so you can check your listener. **Pause** and **Resume** stop and restart deliveries. **Rotate secret** issues a new one (listeners with the old secret then fail verification). **Delete** removes it.
+- After ten failed deliveries in a row a webhook is suspended; fix the listener and click **Resume**. The list shows the last status and error.
+
+## Custom fields
+
+Admins and a project's leads define extra fields for the project's items. Open the project (click its name in the sidebar) and use **Custom fields**.
+
+- Field types are **text**, **number**, **date** and **select** (a list of options).
+- Mark a field **required** and the server refuses to save an item without it, including bulk imports.
+- Everyone who can edit an item fills the values in on the item form, under **Custom fields**. People who cannot edit an item (for example a plain user on a Task) see its values but cannot change them. Changes are audited and fire the same webhook events as other edits.
+
+## Saved views
+
+A saved view stores the current filters of the Work Items list. In the filter bar, click **Save view**, name it and save; pick it later from **Saved views** to apply it. You can delete your own views. Admins and managers can tick **Share with everyone** so the whole organization sees the view; only its creator can change or delete it.
+`,"./guides/09-security.md":`# Security and privacy
+
+How to protect your sign-in and what you can do with your data. Account settings are in the account menu at the top right, under **Account settings**.
+
+## Two-factor authentication
+
+Account settings, **Security**. Two-factor authentication (2FA) asks for a code from an authenticator app in addition to your password.
+
+1. Click **Enable 2FA** and scan the QR code with an authenticator app. If you cannot scan, type the key shown under the code.
+2. Enter the 6-digit code the app shows and click **Turn on**.
+3. Save the **recovery codes** that appear. Each works once if you lose the app, and they are not shown again.
+
+To turn 2FA off, or to get new recovery codes (the old ones stop working), enter your password first. If the server has 2FA switched off, the tab says so.
+
+## Sessions
+
+Every sign-in is a session on one device. Changing your password signs out every other device. Admins see all active sessions under **Sessions** in the top bar, with user, browser, address and last activity, and can **Revoke** one to sign that device out without touching the others. The session you are using cannot be revoked there; log out instead.
+
+## Changing your email address
+
+Account settings, **Profile**, **Email address**. Enter the new address and your current password, then click **Send code**. A 6-digit code goes to the new address; enter it and click **Confirm**. Until then nothing changes. The old address is told about the change, so an unexpected change gets noticed. An email address can belong to only one account on the server, whatever its capital letters.
+
+## Downloading your data
+
+Account settings, **Privacy**, **Download my data**. You get a JSON file with your profile, the items you reported or are assigned to, your comments, attachment details, sessions and audit entries, saved views, chat, notifications, devices, notification settings, invitations you sent, email-change requests and your custom-field values.
+
+## Deleting your account
+
+Account settings, **Privacy**, **Delete my account**: enter your password and confirm. It is permanent. Items you reported stay, without your name. The last admin of an organization cannot delete their account: promote another admin first, or delete the organization.
+
+If you cannot sign in to the app, the public page \`/delete-account.html\` signs you in with your password (and 2FA code) and deletes the account.
+
+## Deleting an organization
+
+Admins only. Organization, **General**, **Delete organization**. This removes the organization and everything in it for good: people, projects, items, comments, attachments, webhooks, invitations, saved views and the audit trail.
+
+1. Click **Show what will be deleted**. This is a dry run: it lists the counts and changes nothing.
+2. Enter your **password** and type the organization's **exact name**.
+3. Click **Delete organization forever**. You are signed out.
+
+The deletion is written to the server's audit log. There is no undo, so download what you need first (see [Reports](#help/reports) and Download my data above).
+`});function x(e){for(let t of e.split(/\n\s*\n/)){let e=t.trim();if(e&&!e.startsWith(`#`))return e.replace(/\s+/g,` `)}return``}var S=Object.entries(b).sort(([e],[t])=>e.localeCompare(t)).map(([e,t])=>{let n=e.replace(/^.*\/\d*-?/,``).replace(/\.md$/,``);return{id:n,title:/^#\s+(.+)$/m.exec(t)?.[1]??n,summary:x(t),markdown:t}});function C(e){return S.find(t=>t.id===e)??null}function w(e){let t=String(e??``).toLowerCase().split(/\s+/).filter(Boolean);return t.length?S.filter(e=>{let n=`${e.title}\n${e.markdown}`.toLowerCase();return t.every(e=>n.includes(e))}):S}var T=t();function E(){let[e,t]=(0,s.useState)(``),[n,r]=(0,s.useState)(()=>i()??S[0]?.id),c=(0,s.useRef)(null),l=(0,s.useRef)(!1);(0,s.useEffect)(()=>a(()=>{let e=i();e&&C(e)&&(l.current=!0,r(e),t(``))}),[]);let u=(0,s.useMemo)(()=>w(e),[e]),d=C(n)??u[0]??S[0],f=(0,s.useMemo)(()=>d?_(d.markdown):``,[d]),p=(0,s.useMemo)(()=>d?y(d.markdown):[],[d]);(0,s.useEffect)(()=>{l.current&&(l.current=!1,c.current?.focus({preventScroll:!0}))},[d?.id]);let m=e=>{l.current=!0,r(e)};return(0,T.jsxs)(`section`,{className:`help-center`,id:`viewHelp`,"aria-label":`Help center`,children:[(0,T.jsxs)(`aside`,{className:`help-side`,children:[(0,T.jsxs)(`div`,{className:`field help-search`,children:[(0,T.jsx)(`label`,{htmlFor:`helpSearch`,className:`sr-only`,children:`Search the guides`}),(0,T.jsx)(`input`,{id:`helpSearch`,type:`search`,placeholder:`Search the guides…`,autoComplete:`off`,value:e,onChange:e=>t(e.target.value)})]}),(0,T.jsxs)(`nav`,{"aria-label":`Guides`,children:[(0,T.jsx)(`ul`,{className:`help-list`,children:u.map(e=>(0,T.jsx)(`li`,{children:(0,T.jsx)(`button`,{type:`button`,className:`help-list-item${e.id===d?.id?` active`:``}`,"aria-current":e.id===d?.id?`page`:void 0,onClick:()=>m(e.id),children:e.title})},e.id))}),u.length===0&&(0,T.jsxs)(`p`,{className:`help-none muted`,role:`status`,children:[`No guide matches “`,e,`”.`]})]}),(0,T.jsx)(`div`,{className:`help-side-actions`,children:(0,T.jsx)(`button`,{type:`button`,className:`btn ghost`,onClick:()=>o(`tour`),children:`Take the product tour`})})]}),(0,T.jsxs)(`article`,{className:`help-article`,ref:c,tabIndex:-1,"aria-label":d?.title,children:[p.length>1&&(0,T.jsx)(`nav`,{className:`help-toc`,"aria-label":`On this page`,children:p.filter(e=>e.level===2).map(e=>(0,T.jsx)(`button`,{type:`button`,className:`help-toc-link`,onClick:()=>document.getElementById(e.id)?.scrollIntoView?.({block:`start`}),children:e.text},e.id))}),(0,T.jsx)(`div`,{className:`help-md`,onClick:e=>{let t=e.target.closest?.(`a[href]`);if(!t)return;let n=t.getAttribute(`href`)||``;if(n.startsWith(`#help/`)){e.preventDefault();let t=n.slice(6);C(t)&&m(t)}else n.startsWith(`#`)&&(e.preventDefault(),document.getElementById(n.slice(1))?.scrollIntoView?.({block:`start`}))},role:`presentation`,dangerouslySetInnerHTML:{__html:f}})]},d?.id)]})}export{E as default};
