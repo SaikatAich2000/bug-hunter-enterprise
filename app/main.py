@@ -271,6 +271,8 @@ def _production_config_errors(s) -> list[str]:
         errors.append("APP_BASE_URL must use https in production")
     if s.EMAIL_BACKEND == "console":
         errors.append("EMAIL_BACKEND=console is not allowed in production")
+    if getattr(s, "METRICS_ENABLED", False) and not (getattr(s, "METRICS_TOKEN", "") or "").strip():
+        errors.append("METRICS_TOKEN must be set when METRICS_ENABLED is on in production")
     return errors
 
 
@@ -1202,6 +1204,9 @@ def metrics(request: Request) -> Response:
     """Prometheus counters; 404 unless METRICS_ENABLED, guarded by METRICS_TOKEN when set."""
     if not settings.METRICS_ENABLED:
         raise HTTPException(status_code=404, detail="Not found")
+    if settings.is_production and not settings.METRICS_TOKEN:
+        # Fail closed: counters expose routes and traffic, so production never serves them open.
+        raise HTTPException(status_code=403, detail="Metrics need METRICS_TOKEN in production")
     if settings.METRICS_TOKEN:
         supplied = request.headers.get("authorization", "")
         if not supplied.startswith("Bearer "):

@@ -143,7 +143,7 @@ to resolution, only cover that window.
 
 **Metrics.** With `METRICS_ENABLED=true`, `GET /api/metrics` serves Prometheus counters
 (request counts and latency per route, logins, webhook deliveries); set `METRICS_TOKEN` to
-require `Authorization: Bearer <token>`. Counters are per worker process.
+require `Authorization: Bearer <token>`; a production deploy refuses to serve metrics without one. Counters are per worker process.
 
 Deleting items, editing/deleting comments, and deleting attachments are
 admin-only for every type. Everyone sees only the projects they are a member of,
