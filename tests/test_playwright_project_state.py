@@ -160,7 +160,7 @@ def test_new_project_appears_once_without_reload(page):
     # The sidebar shows the new project exactly once (deduplicated upsert),
     # without any reload.
     assert page.evaluate("window.__bhNoReloadProbe") == 42, "the page reloaded"
-    assert _side_items(page, PROJECT_NAME).count() == 1
+    expect(_side_items(page, PROJECT_NAME)).to_have_count(1)
 
     # The New Item selector now contains the project exactly once…
     page.click("#newBugBtn")
@@ -168,7 +168,7 @@ def test_new_project_appears_once_without_reload(page):
     options = page.locator(
         "#formBug select[name='project_id'] option", has_text=PROJECT_NAME
     )
-    assert options.count() == 1
+    expect(options).to_have_count(1)
 
     # …and the remembered type survives the project creation. expect() waits
     # for the form to finish seeding instead of sampling it mid-render.
